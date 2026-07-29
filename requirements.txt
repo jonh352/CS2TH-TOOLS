@@ -1,0 +1,7 @@
+PySide6>=6.6,<7
+playwright>=1.40,<2
+requests>=2.31,<3
+numpy>=2.0,<3
+tzdata>=2025.2
+qrcode>=7.4,<9
+Pillow>=10,<13

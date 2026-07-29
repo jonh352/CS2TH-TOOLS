@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs2th-tools"
+version = "0.3.0"
+description = "CS2TH desktop tools for float lookup, marketplace links and Steam inventory."
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.6,<7",
+  "playwright>=1.40,<2",
+  "requests>=2.31,<3",
+  "numpy>=2.0,<3",
+  "tzdata>=2025.2",
+  "qrcode>=7.4,<9",
+  "Pillow>=10,<13",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
