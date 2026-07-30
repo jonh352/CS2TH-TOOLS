@@ -7,7 +7,7 @@ import ctypes
 import json
 import sys
 from ctypes import wintypes
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,16 @@ class Account:
 class AuthSession:
     access_token: str
     account: Account
+    public_beta: dict[str, bool] = field(default_factory=dict)
+
+    def has_tradeup_access(self) -> bool:
+        beta = self.public_beta or {}
+        return bool(self.account.member or beta.get("tradeup"))
+
+
+def has_tradeup_access(session: AuthSession | None) -> bool:
+    """Public beta grants access only to a currently logged-in account."""
+    return bool(session and session.has_tradeup_access())
 
 
 class _DataBlob(ctypes.Structure):
@@ -183,6 +193,18 @@ def _response_detail(response: requests.Response, fallback: str) -> str:
     return fallback
 
 
+def _session_from_payload(access_token: str, payload: dict[str, Any]) -> AuthSession:
+    public_beta = payload.get("public_beta")
+    public_beta = public_beta if isinstance(public_beta, dict) else {}
+    if "tradeup" not in public_beta and "login_full_access" in payload:
+        public_beta["tradeup"] = bool(payload.get("login_full_access"))
+    return AuthSession(
+        access_token,
+        _account_from_payload(payload),
+        {str(key): bool(value) for key, value in public_beta.items()},
+    )
+
+
 class AuthClient:
     def __init__(
         self,
@@ -214,6 +236,8 @@ class AuthClient:
             )
             account = _account_from_payload(raw.get("account") or {})
             if token and account.username:
+                # Public-beta state is deliberately not restored from disk.
+                # It must be fetched again from cs2th.cn on every app start.
                 session = AuthSession(token, account)
                 if not protected:
                     self._save(session)
@@ -290,9 +314,9 @@ class AuthClient:
         try:
             response.raise_for_status()
             payload = response.json()
-            session = AuthSession(
-                access_token=self._login_token(response, payload),
-                account=_account_from_payload(payload),
+            session = _session_from_payload(
+                self._login_token(response, payload),
+                payload,
             )
         except (AttributeError, TypeError, ValueError, requests.RequestException) as exc:
             raise AuthUnavailableError("账号服务返回了无效响应") from exc
@@ -327,7 +351,7 @@ class AuthClient:
         if not isinstance(payload, dict) or not isinstance(payload.get("user"), dict):
             self.clear_local_session()
             return None
-        refreshed = AuthSession(session.access_token, _account_from_payload(payload))
+        refreshed = _session_from_payload(session.access_token, payload)
         if not refreshed.account.username:
             self.clear_local_session()
             return None

@@ -15,7 +15,14 @@ from core.alchemy_quality import (
     get_pid_map,
     resolve_inventory_skin_template,
 )
-from core.auth_client import AuthClient, AuthRejectedError, AuthUnavailableError
+from core.auth_client import (
+    Account,
+    AuthClient,
+    AuthRejectedError,
+    AuthSession,
+    AuthUnavailableError,
+    has_tradeup_access,
+)
 from core.float32_wear_prefix import find_float32_range_intersection
 from core.alchemy_calc import (
     _fetch_product_price_from_api,
@@ -588,6 +595,32 @@ class MetadataTests(unittest.TestCase):
 
 
 class AuthTests(unittest.TestCase):
+    def test_tradeup_access_matrix_requires_login_and_correct_entitlement(self) -> None:
+        free = Account(user_id="1", username="free")
+        tradeup = Account(
+            user_id="2",
+            username="tradeup",
+            member=True,
+            effective_entitlements=("tradeup",),
+        )
+        terminal_only = Account(
+            user_id="3",
+            username="terminal",
+            effective_entitlements=("terminal",),
+        )
+
+        self.assertFalse(has_tradeup_access(None))
+        self.assertFalse(has_tradeup_access(AuthSession("free", free)))
+        self.assertTrue(
+            has_tradeup_access(
+                AuthSession("beta", free, {"tradeup": True})
+            )
+        )
+        self.assertTrue(has_tradeup_access(AuthSession("member", tradeup)))
+        self.assertFalse(
+            has_tradeup_access(AuthSession("wrong-product", terminal_only))
+        )
+
     def test_auth_http_headers_are_latin1_safe(self) -> None:
         client = AuthClient(enabled=True)
         user_agent = client._http.headers["User-Agent"]

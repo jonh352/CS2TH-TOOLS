@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QCursor, QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -24,7 +26,7 @@ from config import (
     BRAND_IMAGE,
     CLOSE_BEHAVIOR_MINIMIZE,
 )
-from core.auth_client import AuthClient, AuthSession
+from core.auth_client import AuthClient, AuthSession, has_tradeup_access
 from core.close_behavior_prefs import load_close_behavior
 from ui.login_dialog import LoginDialog
 from ui.dialogs.information_dialogs import SettingsDialog
@@ -52,6 +54,10 @@ class MainWindow(QMainWindow):
         self.auth_session: AuthSession | None = self.auth_client.load_local_session()
         self._auth_validation_worker: SessionValidationWorker | None = None
         self._logout_worker: LogoutWorker | None = None
+        self._access_allowed = False
+        self._auth_recheck_timer = QTimer(self)
+        self._auth_recheck_timer.setSingleShot(True)
+        self._auth_recheck_timer.timeout.connect(self._start_auth_validation)
         self.theme_name = str(self.settings.value("theme", "dark"))
         if self.theme_name not in ("dark", "light"):
             self.theme_name = "dark"
@@ -84,7 +90,11 @@ class MainWindow(QMainWindow):
 
         # Let the branded shell paint once before constructing the first large
         # feature page. Remaining pages stay lazy for the entire session.
-        QTimer.singleShot(0, lambda: self._activate("alchemy"))
+        self._show_access_gate(
+            "正在验证汰换小助手使用权限…"
+            if self.auth_session is not None
+            else "请先登录 CS2TH 账号后使用汰换小助手"
+        )
         QTimer.singleShot(0, self._start_auth_validation)
         self._sync_account_button()
 
@@ -234,6 +244,12 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def _activate(self, key: str) -> None:
+        if key != "about" and not self._access_allowed:
+            self.toast.show_toast(
+                "请先登录，并确认账号具有汰换会员/大会员权益或处于汰换公测期",
+                style="warning",
+            )
+            return
         previous_key = self._active_page_key
         previous = self.pages.get(self._active_page_key)
         if (
@@ -381,14 +397,70 @@ class MainWindow(QMainWindow):
             self.account_button.setText("登录 CS2TH")
             self.account_button.setToolTip("使用 cs2th.cn 账号登录")
 
+    def _show_access_gate(self, message: str) -> None:
+        if self._startup_placeholder is None:
+            self._startup_placeholder = QLabel()
+            self._startup_placeholder.setObjectName("muted")
+            self._startup_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.stack.addWidget(self._startup_placeholder)
+        self._startup_placeholder.setText(message)
+        self.stack.setCurrentWidget(self._startup_placeholder)
+        self._active_page_key = ""
+        for key, button in self.nav_buttons.items():
+            button.setEnabled(key == "about")
+            button.setProperty("active", False)
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _schedule_auth_recheck(self, session: AuthSession) -> None:
+        delay_seconds = 300.0
+        beta = session.public_beta or {}
+        if not beta.get("tradeup") and session.account.member_until > 0:
+            delay_seconds = min(
+                delay_seconds,
+                max(1.0, session.account.member_until - time.time()),
+            )
+        self._auth_recheck_timer.start(max(1_000, int(delay_seconds * 1_000)))
+
+    def _apply_access_session(
+        self, session: AuthSession | None, *, error: str = ""
+    ) -> None:
+        self.auth_session = session
+        self._sync_account_button()
+        allowed = bool(has_tradeup_access(session) and not error)
+        self._access_allowed = allowed
+        if allowed and session is not None:
+            for button in self.nav_buttons.values():
+                button.setEnabled(True)
+            self._schedule_auth_recheck(session)
+            if not self._active_page_key:
+                self._activate("alchemy")
+            return
+        self._auth_recheck_timer.stop()
+        if session is not None:
+            self._auth_recheck_timer.start(30_000 if error else 300_000)
+        if error:
+            message = f"暂时无法验证使用权限：{error}"
+        elif session is None:
+            message = "请先登录 CS2TH 账号后使用汰换小助手"
+        else:
+            message = "汰换公测已关闭；当前账号需要汰换会员或大会员权益"
+        self._show_access_gate(message)
+
     def _start_auth_validation(self) -> None:
+        if self.auth_session is None or not self.auth_client.enabled:
+            self._apply_access_session(
+                self.auth_session,
+                error=(
+                    "账号服务未启用"
+                    if not self.auth_client.enabled
+                    else ""
+                ),
+            )
+            return
         if (
-            self.auth_session is None
-            or not self.auth_client.enabled
-            or (
                 self._auth_validation_worker is not None
                 and self._auth_validation_worker.isRunning()
-            )
         ):
             return
         self._auth_validation_worker = SessionValidationWorker(
@@ -402,11 +474,10 @@ class MainWindow(QMainWindow):
     def _auth_validation_finished(
         self, session: AuthSession | None, error: str
     ) -> None:
-        self.auth_session = session
-        self._sync_account_button()
+        self._apply_access_session(session, error=error)
         if error:
             self.account_button.setToolTip(
-                "暂时无法连接 cs2th.cn，正在使用本地登录状态"
+                "暂时无法连接 cs2th.cn，功能已锁定直至完成权限验证"
             )
         elif session is None:
             self.toast.show_toast("CS2TH 登录已过期，请重新登录", style="info")
@@ -416,9 +487,8 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(self, "退出登录", "确定退出当前 CS2TH 账号吗？")
             if answer == QMessageBox.StandardButton.Yes:
                 session = self.auth_session
-                self.auth_session = None
                 self.auth_client.clear_local_session()
-                self._sync_account_button()
+                self._apply_access_session(None)
                 self._logout_worker = LogoutWorker(
                     self.auth_client, session, self
                 )
@@ -429,8 +499,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _logged_in(self, session: AuthSession) -> None:
-        self.auth_session = session
-        self._sync_account_button()
+        self._apply_access_session(session)
 
     def closeEvent(self, event) -> None:
         if load_close_behavior() == CLOSE_BEHAVIOR_MINIMIZE:
