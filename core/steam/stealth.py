@@ -398,6 +398,11 @@ def _webgl_renderer_info_js() -> str:
 }})();"""
 
 
+def market_browser_stealth_init_js() -> str:
+  """Deprecated: market windows no longer inject stealth (triggers C5 console-ban)."""
+  return ""
+
+
 def playwright_stealth_init_js() -> str:
   # parts: list[str] = [_AUTOMATION_STEALTH]
   parts: list[str] = []

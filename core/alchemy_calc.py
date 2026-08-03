@@ -149,8 +149,14 @@ def _fetch_product_price_from_api(
         raise RuntimeError(f"获取产物价格失败: {e}") from e
 
 
-def load_product_price_raw() -> dict:
-    """Prefer a local development snapshot, otherwise sync from CS2TH."""
+def load_product_price_raw(*, force_remote: bool = False) -> dict:
+    """Prefer a local development snapshot, otherwise sync from CS2TH.
+
+    ``force_remote`` bypasses the five-minute freshness shortcut and asks the
+    server to validate the cached ETag.  It is used by the explicit inventory
+    refresh action so the prices shown beside a newly fetched inventory are
+    current at that moment.
+    """
     now = datetime.now()
     data = _load_product_price_cache()
     http_meta = _load_product_price_http_meta()
@@ -178,20 +184,21 @@ def load_product_price_raw() -> dict:
     if data is not None:
         try:
             _validate_product_price_payload(data, PRODUCT_PRICE_FILE.name)
-            if _http_price_cache_is_fresh(http_meta) or _product_price_cache_is_fresh(
-                data, now
+            if not force_remote and (
+                _http_price_cache_is_fresh(http_meta)
+                or _product_price_cache_is_fresh(data, now)
             ):
                 return data
         except RuntimeError:
             data = None
 
     if not PRICE_API_ENABLED:
-        if data is not None:
+        if data is not None and not force_remote:
             return data
         raise RuntimeError(SOFTWARE_LOGIN_PRODUCT_PRICE_ERROR_MESSAGE)
     session = AuthClient().load_local_session()
     if session is None:
-        if data is not None:
+        if data is not None and not force_remote:
             return data
         raise RuntimeError(SOFTWARE_LOGIN_PRODUCT_PRICE_ERROR_MESSAGE)
     try:
@@ -200,7 +207,7 @@ def load_product_price_raw() -> dict:
             str(http_meta.get("etag") or ""),
         )
     except RuntimeError:
-        if data is not None:
+        if data is not None and not force_remote:
             logger.warning("线上价格同步失败，继续使用本地缓存", exc_info=True)
             return data
         raise
@@ -268,10 +275,65 @@ def _quality_nfv_leaves(
     return price_map[key][box_id].get(en_quality, {}) or {}
 
 
-def get_expectation_map(price_map: dict, box_id: int, quality: str, stat_trak: bool) -> dict:
+_price_lookup_cache_owner: dict | None = None
+_expectation_map_cache: dict[tuple[int, str, bool], dict[float, float]] = {}
+_product_nfv_keys_cache: dict[tuple[int, str, bool], list[float]] = {}
+
+
+def _activate_price_lookup_cache(price_map: dict) -> None:
+    """Keep derived price lookups only for the currently used price map.
+
+    Product prices are immutable during one calculation.  Holding the owner by
+    identity both prevents stale results when a fresh price package is loaded
+    and prevents Python from reusing its ``id`` while cached entries remain.
+    """
+
+    global _price_lookup_cache_owner
+    if _price_lookup_cache_owner is price_map:
+        return
+    _price_lookup_cache_owner = price_map
+    _expectation_map_cache.clear()
+    _product_nfv_keys_cache.clear()
+
+
+def get_expectation_map(
+    price_map: dict,
+    box_id: int,
+    quality: str,
+    stat_trak: bool,
+) -> dict:
     """归一化磨损 -> 均价（该档所有 paint_index 价的算术平均），供 assign_expectation / Dinkelbach。"""
+    _activate_price_lookup_cache(price_map)
+    cache_key = (int(box_id), str(quality), bool(stat_trak))
+    cached = _expectation_map_cache.get(cache_key)
+    if cached is not None:
+        return cached
     leaves = _quality_nfv_leaves(price_map, box_id, quality, stat_trak)
-    return {nfv: _leaf_average({k:v for k, v in leaf.items() if not k.startswith("*")}) for nfv, leaf in leaves.items()}
+    result = {
+        nfv: _leaf_average({k: v for k, v in leaf.items() if not k.startswith("*")})
+        for nfv, leaf in leaves.items()
+    }
+    _expectation_map_cache[cache_key] = result
+    return result
+
+
+def _sorted_product_nfvs(
+    price_map: dict,
+    box_id: int,
+    quality: str,
+    stat_trak: bool,
+    nfv_map: dict[float, dict[str, float]],
+) -> list[float]:
+    """Return stable sorted product-price buckets for repeated UI valuation."""
+
+    _activate_price_lookup_cache(price_map)
+    cache_key = (int(box_id), str(quality), bool(stat_trak))
+    cached = _product_nfv_keys_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = sorted(nfv_map.keys())
+    _product_nfv_keys_cache[cache_key] = result
+    return result
 
 
 def _mapped_nfv_for_target(sorted_nfvs: list[float], target_nfv: float) -> float:
@@ -292,7 +354,13 @@ def lookup_pid_price_at_nfv(
     nfv_map = _quality_nfv_leaves(price_map, box_id, quality_zh, stat_trak)
     if not nfv_map:
         return 0.0
-    all_nfvs = sorted(nfv_map.keys())
+    all_nfvs = _sorted_product_nfvs(
+        price_map,
+        box_id,
+        quality_zh,
+        stat_trak,
+        nfv_map,
+    )
     mapped_nfv = _mapped_nfv_for_target(all_nfvs, target_nfv)
     leaf = nfv_map[mapped_nfv]
     ps = str(paint_index)
@@ -315,13 +383,9 @@ def lookup_inventory_item_price_value(item: dict, price_map: dict | None) -> flo
         return None
     try:
         fv_f = float(fv)
-        nfv = SkinTemplate.float_to_normalized(fv_f, tmpl.min_float, tmpl.max_float)
-    except (ValueError, TypeError, AssertionError):
+    except (ValueError, TypeError):
         return None
-    box_id = tmpl.weapon_box_id[0] if tmpl.weapon_box_id else 0
-    p = lookup_pid_price_at_nfv(
-        price_map, box_id, tmpl.quality, tmpl.stat_trak, nfv, tmpl.paint_index
-    )
+    p = lookup_template_price_value(tmpl, fv_f, price_map)
     try:
         pf = float(p)
     except (TypeError, ValueError):
@@ -329,6 +393,64 @@ def lookup_inventory_item_price_value(item: dict, price_map: dict | None) -> flo
     if pf <= 0:
         return None
     return pf
+
+
+def lookup_template_price_value(
+    template: SkinTemplate,
+    float_value: float,
+    price_map: dict | None,
+    weapon_box_id: int | None = None,
+) -> float | None:
+    """Look up a skin price, optionally constrained to the chosen collection."""
+    if not price_map:
+        return None
+    try:
+        nfv = SkinTemplate.float_to_normalized(
+            float(float_value), template.min_float, template.max_float
+        )
+    except (TypeError, ValueError, AssertionError):
+        return None
+    box_ids = (
+        [int(weapon_box_id)]
+        if weapon_box_id is not None and int(weapon_box_id) > 0
+        else [int(value) for value in template.weapon_box_id]
+    )
+    for box_id in box_ids:
+        price = lookup_pid_price_at_nfv(
+            price_map,
+            box_id,
+            template.quality,
+            template.stat_trak,
+            nfv,
+            template.paint_index,
+        )
+        try:
+            value = float(price)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            return value
+    return None
+
+
+def apply_inventory_buff_prices(
+    items: list[dict],
+    price_map: dict | None,
+    fetch_time: str = "",
+) -> tuple[list[dict], int]:
+    """Attach the current BUFF reference price to Steam inventory rows."""
+    priced_items: list[dict] = []
+    matched = 0
+    for source in items:
+        item = dict(source)
+        price = lookup_inventory_item_price_value(item, price_map)
+        item["buff_price"] = float(price) if price is not None else None
+        item["buff_price_fetch_time"] = str(fetch_time or "")
+        item["buff_price_source"] = "CS2TH"
+        if price is not None:
+            matched += 1
+        priced_items.append(item)
+    return priced_items, matched
 
 
 def backfill_missing_substrate_prices(
@@ -362,24 +484,22 @@ def backfill_missing_substrate_prices(
         replacement = 0.0
         if template is not None and math.isfinite(float_value) and price_map:
             try:
-                nfv = SkinTemplate.float_to_normalized(
+                raw_box_id = row.get("weapon_box_id")
+                box_id = int(raw_box_id) if raw_box_id not in (None, "") else None
+                replacement = lookup_template_price_value(
+                    template,
                     float_value,
-                    template.min_float,
-                    template.max_float,
-                )
-                box_id = template.weapon_box_id[0] if template.weapon_box_id else 0
-                replacement = lookup_pid_price_at_nfv(
                     price_map,
-                    box_id,
-                    template.quality,
-                    template.stat_trak,
-                    nfv,
-                    str(template.paint_index),
+                    weapon_box_id=box_id,
                 )
             except (TypeError, ValueError, AssertionError):
                 replacement = 0.0
-        if math.isfinite(float(replacement)) and float(replacement) > 0:
-            row["price"] = float(replacement)
+        try:
+            replacement_value = float(replacement)
+        except (TypeError, ValueError):
+            replacement_value = 0.0
+        if math.isfinite(replacement_value) and replacement_value > 0:
+            row["price"] = replacement_value
             updated += 1
         else:
             row["price"] = 0.0

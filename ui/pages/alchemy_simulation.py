@@ -83,7 +83,7 @@ _SIM_IMAGE_AREA_H = 8 + _SIM_WEAPON_ICON_H_PX + 3
 # 底物卡 246、产物卡 262（原 274，合并名称/磨损/价格后 -12）与图区高度联动时自行同步
 _SIM_CARD_FIXED_HEIGHT = 246
 # 名称+磨损+价格并入同一 meta 布局后，根 VBox 少 2 段 spacing(6)，高度减 12
-_SIM_RESULT_CARD_HEIGHT = 250
+_SIM_RESULT_CARD_HEIGHT = 260
 _SIM_GRID_SPACING = 12
 _SIM_WEAR_MAX_DECIMALS = 18
 _SIM_SUBSTRATE_INVALID_MESSAGE = "请为每个底物槽选择皮肤，并填写磨损"
@@ -225,7 +225,7 @@ def _simulation_row_price_yuan(r: dict) -> float:
 
 
 def _group_simulation_rows_by_weapon_box(rows: list[dict]) -> list[tuple[str, list[dict]]]:
-    """按武器箱名分组；组内按价格（元）降序，同价按名称稳定排序。无箱名归为「未关联武器箱」并排在最后。"""
+    """按武器箱分组，并按每组最高价产物从高到低排列。"""
     groups: dict[str, list[dict]] = {}
     for r in rows:
         wb = (r.get("weapon_box") or "").strip()
@@ -238,11 +238,30 @@ def _group_simulation_rows_by_weapon_box(rows: list[dict]) -> list[tuple[str, li
                 str(x.get("name", "")),
             )
         )
-    keys = sorted(k for k in groups if k != _SIM_WEAPON_BOX_UNKNOWN)
+    keys = sorted(
+        (k for k in groups if k != _SIM_WEAPON_BOX_UNKNOWN),
+        key=lambda k: (
+            -max((_simulation_row_price_yuan(r) for r in groups[k]), default=0.0),
+            k,
+        ),
+    )
     out: list[tuple[str, list[dict]]] = [(k, groups[k]) for k in keys]
     if _SIM_WEAPON_BOX_UNKNOWN in groups:
         out.append((_SIM_WEAPON_BOX_UNKNOWN, groups[_SIM_WEAPON_BOX_UNKNOWN]))
     return out
+
+
+def _simulation_price_outcome(
+    product_price: float | None,
+    recipe_cost: float | None,
+) -> str:
+    if product_price is None or product_price <= 0 or recipe_cost is None or recipe_cost <= 0:
+        return "neutral"
+    if product_price > recipe_cost:
+        return "profit"
+    if product_price < recipe_cost:
+        return "loss"
+    return "neutral"
 
 
 def _apply_wear_zone_appearance_badge(label: QLabel, wear01: float | None) -> None:
@@ -286,6 +305,7 @@ class _SimulationResultCard(QFrame):
         parent=None,
         *,
         product_price: float | None = None,
+        recipe_cost: float | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("alchemySimulationResultCard")
@@ -367,6 +387,10 @@ class _SimulationResultCard(QFrame):
 
         self._price_line = QLabel(self)
         self._price_line.setObjectName("alchemySimulationResultPriceLine")
+        self._price_line.setProperty(
+            "priceOutcome",
+            _simulation_price_outcome(product_price, recipe_cost),
+        )
         self._price_line.setText(_format_sim_price_prefix_yuan(product_price))
 
         # 名称 / 磨损 / 价格单独成块且 spacing=0，避免根布局 spacing 在行间插入空隙
@@ -1209,6 +1233,15 @@ class AlchemySimulationPage(QWidget):
             self._results_section.hide()
             return
         cw = ALCHEMY_SIMULATION_GRID_COLUMN_MIN_WIDTH
+        metrics = (
+            self._simulation_metrics_five
+            if self._is_five_mode()
+            else self._simulation_metrics_ten
+        )
+        try:
+            recipe_cost = float(metrics.get("cost")) if metrics else None
+        except (TypeError, ValueError):
+            recipe_cost = None
         grouped = _group_simulation_rows_by_weapon_box(rows)
         for box_title, group_rows in grouped:
             group_wrap = QWidget()
@@ -1250,6 +1283,7 @@ class AlchemySimulationPage(QWidget):
                     cw,
                     grid_host,
                     product_price=product_price,
+                    recipe_cost=recipe_cost,
                 )
                 cards.append(card)
                 self._result_cards.append(card)

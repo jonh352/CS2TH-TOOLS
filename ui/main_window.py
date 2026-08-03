@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
-from PySide6.QtCore import QSettings, Qt, QTimer
-from PySide6.QtGui import QCursor, QIcon, QPixmap
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -44,6 +45,24 @@ PAGE_DEFINITIONS = (
     ("platforms", "材料采集"),
     ("about", "关于"),
 )
+
+ACCOUNT_PLAN_LABELS = {
+    "tradeup": "汰换会员",
+    "terminal": "终端会员",
+    "selection": "选品会员",
+    "all_access": "大会员",
+}
+
+
+class _BrandHomeLink(QFrame):
+    """Clickable brand block linking back to the CS2TH website."""
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton:
+            QDesktopServices.openUrl(QUrl("https://cs2th.cn"))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -106,8 +125,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(24, 10, 20, 10)
         layout.setSpacing(6)
 
+        brand_link = _BrandHomeLink()
+        brand_link.setObjectName("brandHomeLink")
+        brand_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        brand_link.setToolTip("打开 CS2TH 官网")
+        brand_link_layout = QHBoxLayout(brand_link)
+        brand_link_layout.setContentsMargins(0, 0, 0, 0)
+        brand_link_layout.setSpacing(6)
+
         logo = QLabel()
         logo.setObjectName("brandLogo")
+        logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         if BRAND_IMAGE.is_file():
             pixmap = QPixmap(str(BRAND_IMAGE))
             logo.setPixmap(
@@ -118,17 +146,20 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
-        layout.addWidget(logo)
+        brand_link_layout.addWidget(logo)
 
         brand = QVBoxLayout()
         brand.setSpacing(0)
         name = QLabel("CS2TH")
         name.setObjectName("brandName")
+        name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         sub = QLabel(f"汰换小助手 · v{APP_VERSION}")
         sub.setObjectName("brandSub")
+        sub.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         brand.addWidget(name)
         brand.addWidget(sub)
-        layout.addLayout(brand)
+        brand_link_layout.addLayout(brand)
+        layout.addWidget(brand_link)
         layout.addSpacing(10)
         divider = QFrame()
         divider.setObjectName("brandDivider")
@@ -190,6 +221,9 @@ class MainWindow(QMainWindow):
             page.import_to_collection_requested.connect(
                 self._on_recipe_import_to_collection
             )
+            page.import_json_to_alchemy_requested.connect(
+                self._on_saved_json_import_to_alchemy
+            )
             return page
         if key == "special":
             from ui.pages.special_wear import SpecialWearPage
@@ -214,6 +248,9 @@ class MainWindow(QMainWindow):
             page = PlatformPage(self.stack)
             page.import_to_simulation_requested.connect(
                 self._on_recipe_import_to_simulation
+            )
+            page.import_to_alchemy_requested.connect(
+                self._on_collection_import_to_alchemy
             )
             return page
         if key == "about":
@@ -321,6 +358,37 @@ class MainWindow(QMainWindow):
         self.toast.show_toast("库存底物已导入计算页", style="success")
         self._activate("alchemy")
 
+    def _on_collection_import_to_alchemy(
+        self, items: object, mode: object = None
+    ) -> None:
+        if not isinstance(items, list) or not items:
+            return
+        alchemy = self._ensure_page("alchemy")
+        if mode == "replace":
+            alchemy.apply_inventory_import_replace(items, source_label="采集")
+        else:
+            alchemy.apply_inventory_import_merge(items)
+        count = len(items)
+        self.toast.show_toast(
+            f"已将采集挂单导入炼金计算（{count} 条）",
+            style="success",
+        )
+        self._activate("alchemy")
+        platforms = self.pages.get("platforms")
+        if platforms is not None and hasattr(platforms, "mark_collection_imported"):
+            platforms.mark_collection_imported()
+
+    def _on_saved_json_import_to_alchemy(self, items: object) -> None:
+        if not isinstance(items, list) or not items:
+            return
+        alchemy = self._ensure_page("alchemy")
+        alchemy.apply_inventory_import_replace(items, source_label="采集 JSON")
+        self.toast.show_toast(
+            f"已载入采集 JSON（{len(items)} 条），并替换原底物",
+            style="success",
+        )
+        self._activate("alchemy")
+
     @staticmethod
     def _inventory_item_quality_key(item: dict) -> str:
         for key in ("market_name", "market_hash_name", "name"):
@@ -390,12 +458,37 @@ class MainWindow(QMainWindow):
 
     def _sync_account_button(self) -> None:
         if self.auth_session:
-            suffix = " · 会员" if self.auth_session.account.member else ""
+            lines = self._account_entitlement_lines()
+            suffix = (
+                f" · {lines[0].split(' 到期 ', 1)[0]}"
+                if len(lines) == 1
+                else f" · {len(lines)}项权益"
+                if lines
+                else " · 普通用户"
+            )
             self.account_button.setText(self.auth_session.account.username + suffix)
-            self.account_button.setToolTip("点击退出登录")
+            detail = "\n".join(lines) if lines else "当前没有有效会员权益"
+            self.account_button.setToolTip(f"{detail}\n\n点击可退出登录")
         else:
             self.account_button.setText("登录 CS2TH")
             self.account_button.setToolTip("使用 cs2th.cn 账号登录")
+
+    def _account_entitlement_lines(self) -> list[str]:
+        if not self.auth_session:
+            return []
+        now = time.time()
+        subscriptions = self.auth_session.account.subscriptions or {}
+        active = [
+            (key, float(until or 0))
+            for key, until in subscriptions.items()
+            if float(until or 0) > now
+        ]
+        active.sort(key=lambda item: (item[0] != "all_access", item[0]))
+        return [
+            f"{ACCOUNT_PLAN_LABELS.get(key, key)} 到期 "
+            f"{datetime.fromtimestamp(until).strftime('%Y-%m-%d %H:%M')}"
+            for key, until in active
+        ]
 
     def _show_access_gate(self, message: str) -> None:
         if self._startup_placeholder is None:
@@ -484,7 +577,13 @@ class MainWindow(QMainWindow):
 
     def _account_clicked(self) -> None:
         if self.auth_session is not None:
-            answer = QMessageBox.question(self, "退出登录", "确定退出当前 CS2TH 账号吗？")
+            lines = self._account_entitlement_lines()
+            detail = "\n".join(lines) if lines else "当前没有有效会员权益"
+            answer = QMessageBox.question(
+                self,
+                "账号权益 / 退出登录",
+                f"{detail}\n\n确定退出当前 CS2TH 账号吗？",
+            )
             if answer == QMessageBox.StandardButton.Yes:
                 session = self.auth_session
                 self.auth_client.clear_local_session()

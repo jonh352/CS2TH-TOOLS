@@ -10,6 +10,7 @@ from ui.workers.alchemy_workers import (
     _CalcPoolThread,
     _build_non_overlapping_group_recipes,
 )
+from ui.pages.alchemy_modes import AlchemyModeMixin
 
 
 def _rows(count: int) -> list[dict]:
@@ -87,6 +88,24 @@ class AlchemyWorkerTests(unittest.TestCase):
     def test_non_overlapping_switch_controls_result_filter(self) -> None:
         self.assertEqual(len(self._run_target(non_overlapping_recipes=True)), 1)
         self.assertEqual(len(self._run_target(non_overlapping_recipes=False)), 2)
+
+    def test_running_progress_never_claims_one_hundred_percent(self) -> None:
+        class Sink:
+            def __init__(self) -> None:
+                self.value = None
+
+            def setValue(self, value: int) -> None:
+                self.value = value
+
+            def setText(self, value: str) -> None:
+                self.value = value
+
+        page = type("ProgressPage", (), {})()
+        page.step3_progress_bar = Sink()
+        page.step3_progress_label = Sink()
+        AlchemyModeMixin._on_calc_progress(page, 100)
+        self.assertEqual(page.step3_progress_bar.value, 99)
+        self.assertEqual(page.step3_progress_label.value, "99%")
 
     def test_one_hundred_military_items_make_ten_disjoint_recipes(self) -> None:
         rows = _rows(100)

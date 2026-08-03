@@ -77,6 +77,129 @@ def material_wear_range(material: dict) -> tuple[float | None, float | None, str
     return None, None, f"{wear} · 饰品范围 {min_float:.4f}–{max_float:.4f}"
 
 
+def _exclude_skin_base_name(name: str) -> str:
+    text = str(name or "").strip()
+    text = re.sub(r"^纪念品\s+", "", text)
+    text = re.sub(r"^Souvenir\s+", "", text, flags=re.I)
+    text = re.sub(r"（纪念品）$", "", text)
+    text = re.sub(r"\s*\(Souvenir\)$", "", text, flags=re.I)
+    return text.strip()
+
+
+def fetch_material_alternatives(
+    *,
+    collection_name: str,
+    rarity: str,
+    wear: str,
+    exclude_name: str,
+    market: str = "spot",
+    normalized: float | None = None,
+    access_token: str = "",
+) -> list[dict]:
+    """Load same-collection / same-rarity sibling skins for one recipe input."""
+    collection_name = str(collection_name or "").strip()
+    rarity = str(rarity or "").strip()
+    wear = str(wear or "").strip()
+    if not collection_name or not rarity or not wear:
+        return []
+    headers = {
+        "X-CS2TH-Client": "cs2th-tools",
+        "X-CS2TH-Version": APP_VERSION,
+    }
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    params: dict[str, str] = {
+        "collection_name": collection_name,
+        "rarity": rarity,
+        "wear": wear,
+        "exclude": _exclude_skin_base_name(exclude_name),
+        "market": market if market in {"spot", "futures"} else "spot",
+    }
+    if normalized is not None:
+        try:
+            params["normalized"] = str(float(normalized))
+        except (TypeError, ValueError):
+            pass
+    try:
+        response = requests.get(
+            f"{AUTH_API_BASE_URL}/api/collections/rarity-skins",
+            params=params,
+            headers=headers,
+            timeout=20,
+        )
+        payload = response.json() if response.text else {}
+    except (requests.RequestException, ValueError):
+        return []
+    if not response.ok or not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def alternative_to_recipe_material(alt: dict, primary: dict) -> dict:
+    """Map a rarity-skins item onto the recipe-material card schema."""
+    wear = str(primary.get("wear") or "").strip()
+    equiv = alt.get("equiv_float")
+    try:
+        unit_float = float(equiv) if equiv is not None else float(primary.get("unit_float") or 0)
+    except (TypeError, ValueError):
+        unit_float = float(primary.get("unit_float") or 0)
+    float_range = str(alt.get("float_range") or "").strip()
+    material = {
+        "name": str(alt.get("name") or alt.get("market_hash_name") or "未知备选"),
+        "market_hash_name": str(alt.get("market_hash_name") or ""),
+        "market_hash_name_en": str(alt.get("market_hash_name_en") or ""),
+        "count": 0,
+        "wear": wear,
+        "float_range": float_range,
+        "unit_float": unit_float,
+        "unit_normalized": alt.get("equiv_normalized", primary.get("unit_normalized")),
+        "unit_price_cny": float(alt.get("unit_price_cny") or 0),
+        "collection_name": str(primary.get("collection_name") or ""),
+        "goods_id": alt.get("goods_id"),
+        "c5_id": alt.get("c5_id"),
+        "youpin_id": alt.get("youpin_id"),
+        "eco_id": alt.get("eco_id"),
+        "min_float": alt.get("min_float"),
+        "max_float": alt.get("max_float"),
+        "is_alternative": True,
+        "supports_wear": bool(alt.get("supports_wear", True)),
+    }
+    return material
+
+
+def attach_recipe_alternatives(payload: dict, access_token: str = "") -> dict:
+    """Fetch and attach alternatives for each primary input onto the recipe payload."""
+    inputs = [item for item in payload.get("inputs", []) if isinstance(item, dict)]
+    rarity = str(payload.get("input_rarity") or "").strip()
+    market = str(payload.get("_market") or "spot")
+    alternatives: dict[int, list[dict]] = {}
+    for index, item in enumerate(inputs):
+        try:
+            normalized = item.get("unit_normalized")
+            normalized_value = (
+                float(normalized) if normalized not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            normalized_value = None
+        siblings = fetch_material_alternatives(
+            collection_name=str(item.get("collection_name") or ""),
+            rarity=rarity,
+            wear=str(item.get("wear") or ""),
+            exclude_name=str(item.get("name") or ""),
+            market=market,
+            normalized=normalized_value,
+            access_token=access_token,
+        )
+        alternatives[index] = [
+            alternative_to_recipe_material(sibling, item) for sibling in siblings
+        ]
+    payload["_alternatives_by_input"] = alternatives
+    return payload
+
+
 def cs2th_detail_to_saved_recipe(payload: dict) -> dict:
     """Convert the public CS2TH detail response to the local recipe schema."""
     inputs = [item for item in payload.get("inputs", []) if isinstance(item, dict)]

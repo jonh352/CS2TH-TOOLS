@@ -424,6 +424,18 @@ class CollapsibleGroup(QFrame):
         self._goods_name = goods_name
         self._on_selection_changed = on_selection_changed
         self._slot_key_to_row: dict[str, int] = {}
+        # Large imports used to eagerly build seven QTableWidgetItem objects for
+        # every substrate, even though groups start collapsed.  Keep selection
+        # state in a lightweight list and only materialise the table when the
+        # user expands it.  This avoids multi-second UI stalls and large memory
+        # spikes for inventories containing thousands of rows.
+        self._table_populated = False
+        self._row_states: list[list[bool]] = [[True, False] for _ in items]
+        self._slot_key_to_item_index: dict[str, int] = {}
+        for item_index, source_item in enumerate(items):
+            slot_key = substrate_row_lookup_key(source_item)
+            if slot_key and slot_key not in self._slot_key_to_item_index:
+                self._slot_key_to_item_index[slot_key] = item_index
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -545,8 +557,6 @@ class CollapsibleGroup(QFrame):
         self.table_widget.setSortingEnabled(True)
         self.table_widget.itemChanged.connect(self._on_table_item_changed)
         self.table_widget.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_indicator_changed)
-        self._populate_table()
-
         table_layout.addWidget(self.table_widget)
         main_layout.addWidget(self.table_frame)
 
@@ -574,6 +584,9 @@ class CollapsibleGroup(QFrame):
         )
 
     def _populate_table(self):
+        if self._table_populated:
+            return
+        self.table_widget.blockSignals(True)
         self.table_widget.setSortingEnabled(False)
         self.table_widget.setRowCount(len(self._items))
         for row, item in enumerate(self._items):
@@ -656,12 +669,47 @@ class CollapsibleGroup(QFrame):
             calc_item.setData(Qt.ItemDataRole.UserRole, item)
             calc_item.setData(Qt.ItemDataRole.UserRole + 1, _row_uuid(item))
             calc_item.setData(Qt.ItemDataRole.UserRole + 2, substrate_row_lookup_key(item))
+            calc_item.setData(Qt.ItemDataRole.UserRole + 3, row)
+            calc_checked, must_checked = self._row_states[row]
+            must_item.setCheckState(
+                Qt.CheckState.Checked if must_checked else Qt.CheckState.Unchecked
+            )
+            calc_item.setCheckState(
+                Qt.CheckState.Checked if calc_checked else Qt.CheckState.Unchecked
+            )
             self.table_widget.setItem(row, 6, calc_item)
 
         self.table_widget.setSortingEnabled(True)
         self.table_widget.horizontalHeader().setSortIndicator(2, Qt.SortOrder.AscendingOrder)
         self.table_widget.sortItems(2, Qt.SortOrder.AscendingOrder)
+        self._table_populated = True
         self._rebuild_slot_key_row_index()
+        self.table_widget.blockSignals(False)
+        self._sync_select_all_from_model()
+
+    def ensure_table_populated(self) -> None:
+        """Build the expensive row widgets on demand."""
+        self._populate_table()
+
+    def _item_index_for_table_row(self, row: int) -> int | None:
+        calc_item = self.table_widget.item(row, self.table_widget._CHECK_COL)
+        if calc_item is None:
+            return None
+        item_index = calc_item.data(Qt.ItemDataRole.UserRole + 3)
+        if isinstance(item_index, int) and 0 <= item_index < len(self._items):
+            return item_index
+        return None
+
+    def _sync_model_state_from_table_row(self, row: int) -> None:
+        item_index = self._item_index_for_table_row(row)
+        if item_index is None:
+            return
+        calc_item = self.table_widget.item(row, self.table_widget._CHECK_COL)
+        must_item = self.table_widget.item(row, self.table_widget._MUST_COL)
+        self._row_states[item_index] = [
+            bool(calc_item and calc_item.checkState() == Qt.CheckState.Checked),
+            bool(must_item and must_item.checkState() == Qt.CheckState.Checked),
+        ]
 
     def _on_sort_indicator_changed(self, logical_index: int, order: Qt.SortOrder):
         if logical_index in self.table_widget._CHECK_COLUMNS:
@@ -690,6 +738,10 @@ class CollapsibleGroup(QFrame):
 
     def _on_select_all_changed(self, state):
         checked = state == Qt.CheckState.Checked.value
+        for row_state in self._row_states:
+            row_state[0] = checked
+            if not checked:
+                row_state[1] = False
         self.table_widget.blockSignals(True)
         for row in range(self.table_widget.rowCount()):
             calc_item = self.table_widget.item(row, self.table_widget._CHECK_COL)
@@ -715,6 +767,15 @@ class CollapsibleGroup(QFrame):
         all_checked = total > 0 and checked_count == total
         self.select_all_check.blockSignals(True)
         self.select_all_check.setCheckState(Qt.CheckState.Checked if all_checked else Qt.CheckState.Unchecked)
+        self.select_all_check.blockSignals(False)
+
+    def _sync_select_all_from_model(self) -> None:
+        total = len(self._row_states)
+        all_checked = total > 0 and all(state[0] for state in self._row_states)
+        self.select_all_check.blockSignals(True)
+        self.select_all_check.setCheckState(
+            Qt.CheckState.Checked if all_checked else Qt.CheckState.Unchecked
+        )
         self.select_all_check.blockSignals(False)
 
     def _on_table_item_changed(self, item):
@@ -743,6 +804,7 @@ class CollapsibleGroup(QFrame):
                 self.table_widget.blockSignals(True)
                 must_item.setCheckState(Qt.CheckState.Unchecked)
                 self.table_widget.blockSignals(False)
+        self._sync_model_state_from_table_row(item.row())
         self._sync_select_all_from_table()
         if self._on_selection_changed:
             self._on_selection_changed()
@@ -798,6 +860,13 @@ class CollapsibleGroup(QFrame):
         对满足条件的行取消「是否参与计算」勾选（仅原先为勾选状态的行计入返回值）。
         """
         n = 0
+        if not self._table_populated:
+            for item_index, data in enumerate(self._items):
+                if self._row_states[item_index][0] and should_uncheck(data):
+                    self._row_states[item_index] = [False, False]
+                    n += 1
+            self._sync_select_all_from_model()
+            return n
         self.table_widget.blockSignals(True)
         self.select_all_check.blockSignals(True)
         for row in range(self.table_widget.rowCount()):
@@ -812,6 +881,7 @@ class CollapsibleGroup(QFrame):
                 calc_item.setCheckState(Qt.CheckState.Unchecked)
                 if must_item:
                     must_item.setCheckState(Qt.CheckState.Unchecked)
+                self._sync_model_state_from_table_row(row)
                 n += 1
         self.table_widget.blockSignals(False)
         self._sync_select_all_from_table()
@@ -819,7 +889,9 @@ class CollapsibleGroup(QFrame):
         return n
 
     def get_all_slot_keys(self) -> set[str]:
-        return {k for k in self._slot_key_to_row.keys() if isinstance(k, str) and k}
+        return {
+            k for k in self._slot_key_to_item_index.keys() if isinstance(k, str) and k
+        }
 
     def find_row_by_slot_key(self, slot_key: str) -> int | None:
         if not slot_key:
@@ -830,17 +902,10 @@ class CollapsibleGroup(QFrame):
         return None
 
     def get_row_state_by_slot_key(self, slot_key: str) -> tuple[bool, bool] | None:
-        row = self.find_row_by_slot_key(slot_key)
-        if row is None:
+        item_index = self._slot_key_to_item_index.get(slot_key)
+        if item_index is None:
             return None
-        calc_item = self.table_widget.item(row, self.table_widget._CHECK_COL)
-        must_item = self.table_widget.item(row, self.table_widget._MUST_COL)
-        calc_checked = bool(
-            calc_item and calc_item.checkState() == Qt.CheckState.Checked
-        )
-        must_checked = bool(
-            must_item and must_item.checkState() == Qt.CheckState.Checked
-        )
+        calc_checked, must_checked = self._row_states[item_index]
         return (calc_checked, must_checked)
 
     def set_row_state_by_slot_key(
@@ -850,6 +915,15 @@ class CollapsibleGroup(QFrame):
         calc_checked: bool,
         must_checked: bool,
     ) -> bool:
+        item_index = self._slot_key_to_item_index.get(slot_key)
+        if item_index is None:
+            return False
+        self._row_states[item_index] = [bool(calc_checked), bool(must_checked)]
+        if not self._table_populated:
+            self._sync_select_all_from_model()
+            if self._on_selection_changed:
+                self._on_selection_changed()
+            return True
         row = self.find_row_by_slot_key(slot_key)
         if row is None:
             return False
@@ -899,6 +973,7 @@ class CollapsibleGroup(QFrame):
         calc_item.setCheckState(
             Qt.CheckState.Checked if calc_checked else Qt.CheckState.Unchecked
         )
+        self._sync_model_state_from_table_row(row)
         self.table_widget.blockSignals(False)
         self._sync_select_all_from_table()
         self.select_all_check.blockSignals(False)
@@ -908,6 +983,16 @@ class CollapsibleGroup(QFrame):
         return True
 
     def get_selected_items(self) -> list:
+        if not self._table_populated:
+            result = []
+            for item, (calc_checked, must_checked) in zip(
+                self._items, self._row_states
+            ):
+                if calc_checked:
+                    row_data = dict(item)
+                    row_data["must_select"] = bool(must_checked)
+                    result.append(row_data)
+            return result
         result = []
         for row in range(self.table_widget.rowCount()):
             calc_item = self.table_widget.item(row, self.table_widget._CHECK_COL)
@@ -931,6 +1016,8 @@ class CollapsibleGroup(QFrame):
 
     def toggle(self):
         self._expanded = not self._expanded
+        if self._expanded:
+            self.ensure_table_populated()
         self._update_disclosure_arrow()
         self.table_frame.setVisible(self._expanded)
         self.updateGeometry()

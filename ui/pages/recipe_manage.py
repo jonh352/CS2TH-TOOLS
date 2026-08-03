@@ -15,12 +15,14 @@ from PySide6.QtCore import (
     Qt,
     QMimeData,
     QTimer,
+    QUrl,
     Signal,
 )
 from PySide6.QtGui import (
     QAction,
     QCursor,
     QDrag,
+    QDesktopServices,
     QFocusEvent,
     QFont,
     QHideEvent,
@@ -32,10 +34,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QButtonGroup,
     QDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLayout,
     QLineEdit,
@@ -46,13 +48,15 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedLayout,
+    QStackedWidget,
     QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
-from config import CONTENT_PAGE_LAYOUT_MARGINS, RECIPE_ICON_PATH
+from config import COLLECTED_JSON_DIR, CONTENT_PAGE_LAYOUT_MARGINS, RECIPE_ICON_PATH
 from core.auth_client import AuthClient
+from core.collected_json import list_collected_json
 from core.recipe_bridge import cs2th_detail_to_saved_recipe
 from core.saved_recipes import (
     ERR_DUPLICATE_RECIPE_FOLDER_NAME,
@@ -71,6 +75,7 @@ from core.saved_recipes import (
 )
 from ui.feedback import ask_confirmation, ask_confirmation_sequence
 from ui.dialogs.move_recipe_folder_dialog import MoveRecipeFolderDialog, build_move_targets
+from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from ui.icons import expand_section_triangle_icon, load_svg_icon
 from ui.widgets.recipe_result_group import RecipeResultGroup
 from ui.widgets.toast import show_toast
@@ -691,11 +696,12 @@ class _SavedRecipeRow(QWidget):
     ):
         super().__init__(parent)
         self.setObjectName("recipeManageRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._path = path
         self._payload = payload
         self._recipe_page: RecipeManagePage | None = recipe_page
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(14, 12, 14, 12)
         outer.setSpacing(8)
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -941,6 +947,7 @@ class RecipeManagePage(QWidget):
 
     import_to_simulation_requested = Signal(object)
     import_to_collection_requested = Signal(object)
+    import_json_to_alchemy_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -975,6 +982,7 @@ class RecipeManagePage(QWidget):
         # 批量管理因切换文件夹延迟恢复时，用于作废尚未执行的 QTimer.singleShot 回调
         self._batch_resume_token: int = 0
         self._recipe_import_thread: RecipeLoadThread | None = None
+        self._view_mode = "recipes"
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
@@ -997,6 +1005,22 @@ class RecipeManagePage(QWidget):
         self._title_count_label = QLabel("共0条配方")
         self._title_count_label.setObjectName("recipePageTitleCount")
         title_row.addWidget(self._title_count_label, 0, Qt.AlignVCenter)
+        view_group = QButtonGroup(self)
+        view_group.setExclusive(True)
+        self._recipes_view_btn = QPushButton("已保存配方")
+        self._json_view_btn = QPushButton("已保存 JSON")
+        for mode, button in (
+            ("recipes", self._recipes_view_btn),
+            ("json", self._json_view_btn),
+        ):
+            button.setObjectName("platformModeButton")
+            button.setCheckable(True)
+            button.clicked.connect(
+                lambda _checked=False, value=mode: self._switch_saved_view(value)
+            )
+            view_group.addButton(button)
+            title_row.addWidget(button)
+        self._recipes_view_btn.setChecked(True)
         title_row.addStretch(1)
         self.import_cs2th_btn = QPushButton("导入 CS2TH 链接")
         self.import_cs2th_btn.setObjectName("alchemySelectFileBtn")
@@ -1155,22 +1179,61 @@ class RecipeManagePage(QWidget):
         body_lay.addSpacing(_RECIPE_LEFT_RIGHT_GAP)
         body_lay.addWidget(right_wrap, 1)
 
-        main_layout.addWidget(body, 1)
+        json_body = QWidget()
+        json_body.setObjectName("recipeManageBody")
+        json_lay = QVBoxLayout(json_body)
+        json_lay.setContentsMargins(0, 0, 0, 0)
+        json_lay.setSpacing(12)
+        json_toolbar = QWidget()
+        json_toolbar.setObjectName("recipeManageToolbar")
+        json_tb = QHBoxLayout(json_toolbar)
+        json_tb.setContentsMargins(12, 8, 12, 8)
+        self._json_location_label = QLabel("采集 JSON 文件")
+        self._json_location_label.setObjectName("recipeLocationLabel")
+        json_tb.addWidget(self._json_location_label)
+        json_tb.addStretch(1)
+        open_json_dir_btn = QPushButton("打开文件夹")
+        open_json_dir_btn.clicked.connect(self._open_collected_json_dir)
+        json_tb.addWidget(open_json_dir_btn)
+        json_lay.addWidget(json_toolbar)
+
+        self._json_empty_label = QLabel(
+            "暂无已保存 JSON。材料采集完成后点击「保存为 JSON」即可保存到此。"
+        )
+        self._json_empty_label.setObjectName("alchemyStep1Hint")
+        self._json_empty_label.setWordWrap(True)
+        json_lay.addWidget(self._json_empty_label)
+        self._json_list_container = QWidget()
+        self._json_list_container.setObjectName("alchemyGroupsContainer")
+        self._json_list_layout = QVBoxLayout(self._json_list_container)
+        self._json_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._json_list_layout.setSpacing(8)
+        json_scroll = QScrollArea()
+        json_scroll.setObjectName("alchemyScrollArea")
+        json_scroll.setWidgetResizable(True)
+        json_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        json_scroll.setFrameShape(QFrame.NoFrame)
+        json_scroll.setWidget(self._json_list_container)
+        json_lay.addWidget(json_scroll, 1)
+
+        self._body_stack = QStackedWidget()
+        self._body_stack.addWidget(body)
+        self._body_stack.addWidget(json_body)
+        main_layout.addWidget(self._body_stack, 1)
 
         self._recipe_theme_icon_refresh_pending = False
         self._apply_page_title_icon()
         self._refresh_folder_sidebar()
         self._rebuild_recipe_rows()
+        self._rebuild_collected_json_rows()
 
     def _on_import_cs2th_link(self) -> None:
         if self._recipe_import_thread is not None and self._recipe_import_thread.isRunning():
             return
-        reference, accepted = QInputDialog.getText(
+        reference, accepted = get_wide_text_input(
             self,
-            "导入 CS2TH 配方",
-            "粘贴配方链接：",
-            QLineEdit.EchoMode.Normal,
-            "",
+            title="导入 CS2TH 配方",
+            label="粘贴配方链接：",
         )
         if not accepted or not reference.strip():
             return
@@ -1251,6 +1314,88 @@ class RecipeManagePage(QWidget):
         self._sync_batch_primary_stack_geometry()
         self._refresh_folder_sidebar()
         self._rebuild_recipe_rows()
+        self._rebuild_collected_json_rows()
+
+    def _switch_saved_view(self, mode: str) -> None:
+        mode = "json" if mode == "json" else "recipes"
+        if mode == "json" and self._batch_mode:
+            self._on_batch_done()
+        self._view_mode = mode
+        showing_recipes = mode == "recipes"
+        self._body_stack.setCurrentIndex(0 if showing_recipes else 1)
+        self._recipes_view_btn.setChecked(showing_recipes)
+        self._json_view_btn.setChecked(not showing_recipes)
+        self._batch_primary_slot.setVisible(showing_recipes)
+        self.import_cs2th_btn.setVisible(showing_recipes and not self._batch_mode)
+        for button in (
+            self.select_all_btn,
+            self.move_btn,
+            self.delete_btn,
+            self.batch_done_btn,
+        ):
+            if not showing_recipes:
+                button.hide()
+        if showing_recipes:
+            self._set_batch_ui()
+            self._rebuild_recipe_rows()
+        else:
+            self._rebuild_collected_json_rows()
+
+    def _open_collected_json_dir(self) -> None:
+        COLLECTED_JSON_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(COLLECTED_JSON_DIR)))
+
+    def _open_collected_json_file(self, path: Path) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _rebuild_collected_json_rows(self) -> None:
+        while self._json_list_layout.count():
+            item = self._json_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        entries = list_collected_json()
+        self._json_empty_label.setVisible(not entries)
+        if self._view_mode == "json":
+            self._title_count_label.setText(f"共{len(entries)}个 JSON 文件")
+        for path, rows in entries:
+            frame = QFrame()
+            frame.setObjectName("recipeManageToolbar")
+            row_layout = QHBoxLayout(frame)
+            row_layout.setContentsMargins(14, 10, 14, 10)
+            text_layout = QVBoxLayout()
+            name_label = QLabel(path.stem)
+            name_label.setObjectName("sectionTitle")
+            total = sum(float(row.get("price") or 0) for row in rows)
+            try:
+                saved_at = datetime.fromtimestamp(path.stat().st_mtime).strftime(
+                    "%Y年%m月%d日 %H:%M:%S"
+                )
+            except OSError:
+                saved_at = ""
+            meta_label = QLabel(
+                f"{len(rows)} 条数据 · 总价 ￥{total:,.2f}"
+                + (f" · {saved_at}" if saved_at else "")
+            )
+            meta_label.setObjectName("muted")
+            text_layout.addWidget(name_label)
+            text_layout.addWidget(meta_label)
+            row_layout.addLayout(text_layout, 1)
+            open_button = QPushButton("打开文件")
+            open_button.clicked.connect(
+                lambda _checked=False, value=path: self._open_collected_json_file(value)
+            )
+            import_button = QPushButton("导入计算")
+            import_button.setObjectName("primaryButton")
+            import_button.clicked.connect(
+                lambda _checked=False, value=rows: self.import_json_to_alchemy_requested.emit(
+                    [dict(item) for item in value]
+                )
+            )
+            row_layout.addWidget(open_button)
+            row_layout.addWidget(import_button)
+            self._json_list_layout.addWidget(frame)
+        self._json_list_layout.addStretch(1)
 
     def changeEvent(self, event: QEvent):
         super().changeEvent(event)

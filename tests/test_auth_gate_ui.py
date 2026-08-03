@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from unittest.mock import patch
 
@@ -85,6 +86,25 @@ class MainWindowAccessGateTests(unittest.TestCase):
             "暂时无法验证使用权限",
             self.window._startup_placeholder.text(),
         )
+
+    def test_account_button_shows_entitlement_count_and_expiry_details(self) -> None:
+        until = time.time() + 30 * 86400
+        session = AuthSession(
+            "token",
+            Account(
+                user_id="3",
+                username="multi-member",
+                member=True,
+                member_until=until,
+                subscriptions={"tradeup": until, "terminal": until + 86400},
+                effective_entitlements=("tradeup", "terminal"),
+            ),
+        )
+        self.window._apply_access_session(session)
+
+        self.assertIn("2项权益", self.window.account_button.text())
+        self.assertIn("汰换会员 到期", self.window.account_button.toolTip())
+        self.assertIn("终端会员 到期", self.window.account_button.toolTip())
 
 
 if __name__ == "__main__":

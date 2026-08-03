@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -66,8 +68,8 @@ _INV_WEAPON_ICON_W = 176
 _INV_WEAPON_ICON_H = 112
 _INV_IMAGE_AREA_H = 8 + _INV_WEAPON_ICON_H + 3
 _INV_CARD_INNER_W = 8 + _INV_WEAPON_ICON_W + 8
-# 边距 8×2 + 图区 + spacing + 名称/磨损/状态
-_INV_CARD_H = 8 + _INV_IMAGE_AREA_H + 6 + 34 + 6 + 16 + 6 + 16 + 8
+# 边距 8×2 + 图区 + spacing + 名称/磨损/价格/状态
+_INV_CARD_H = 8 + _INV_IMAGE_AREA_H + 6 + 34 + 6 + 16 + 4 + 16 + 4 + 16 + 8
 _INV_GRID_W = _INV_CARD_INNER_W + 12
 _INV_GRID_H = _INV_CARD_H + 12
 # Item widgets are intentionally created in event-loop-sized chunks. Building a
@@ -79,6 +81,7 @@ _ROLE_STATUS = _ROLE_NAME + 2
 _ROLE_QUALITY = _ROLE_NAME + 3
 _ROLE_ICON = _ROLE_NAME + 4
 _ROLE_ICON_LOADED = _ROLE_NAME + 5
+_ROLE_PRICE = _ROLE_NAME + 6
 
 _QUALITY_RANK_CN: dict[str, int] = {
     "消费级": 0,
@@ -180,6 +183,20 @@ def _load_json_list(path: Path) -> list[dict]:
         return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
     except Exception:
         return []
+
+
+def _inventory_total_value(items: list[dict]) -> tuple[float, int]:
+    total = 0.0
+    matched = 0
+    for item in items:
+        try:
+            price = float(item.get("buff_price"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price) and price > 0:
+            total += price
+            matched += 1
+    return total, matched
 
 
 def _format_inventory_status_line(item: dict) -> str:
@@ -338,7 +355,14 @@ class InventoryCardDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignCenter,
             str(index.data(_ROLE_WEAR) or ""),
         )
-        status_rect = QRectF(card.left() + 8, wear_rect.bottom() + 3, image_rect.width(), 17)
+        price_rect = QRectF(card.left() + 8, wear_rect.bottom() + 1, image_rect.width(), 17)
+        painter.setPen(accent)
+        painter.drawText(
+            price_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            str(index.data(_ROLE_PRICE) or "￥-"),
+        )
+        status_rect = QRectF(card.left() + 8, price_rect.bottom() + 1, image_rect.width(), 17)
         painter.setPen(
             QColor("#21c997")
             if str(index.data(_ROLE_STATUS) or "") == "可出售"
@@ -371,6 +395,7 @@ class InventoryPage(QWidget):
         self._icon_load_generation = 0
         self._pending_icon_indices: list[int] = []
         self._pending_icon_next = 0
+        self._render_completion_status = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 24, 26, 24)
@@ -441,7 +466,28 @@ class InventoryPage(QWidget):
 
         self.status_label = QLabel("本地无数据，请先登录 Steam")
         self.status_label.setObjectName("statusLabel")
-        controls.addWidget(self.status_label)
+        self.inventory_total_value_label = QLabel("库存总价值：￥0.00")
+        self.inventory_total_value_label.setObjectName("inventoryTotalValue")
+        self.inventory_total_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.inventory_total_value_label.setToolTip("按当前已匹配价格汇总全部库存饰品")
+        summary_row = QGridLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.addWidget(
+            self.status_label,
+            0,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        summary_row.addWidget(
+            self.inventory_total_value_label,
+            0,
+            1,
+            Qt.AlignmentFlag.AlignCenter,
+        )
+        summary_row.setColumnStretch(0, 1)
+        summary_row.setColumnStretch(1, 1)
+        summary_row.setColumnStretch(2, 1)
+        controls.addLayout(summary_row)
         root.addWidget(controls_frame)
 
         list_frame, list_layout = panel(self)
@@ -516,6 +562,7 @@ class InventoryPage(QWidget):
     def _load_cached_inventory(self) -> None:
         profile_id = self._active_profile_id()
         self._items = _load_json_list(profile_inventory_data_path(profile_id)) if profile_id else []
+        self._update_inventory_total_value()
         self._apply_filters()
         if profile_id:
             self.status_label.setText(
@@ -525,6 +572,13 @@ class InventoryPage(QWidget):
             )
         else:
             self.status_label.setText("尚未添加 Steam 账号")
+
+    def _update_inventory_total_value(self) -> None:
+        total, matched = _inventory_total_value(self._items)
+        self.inventory_total_value_label.setText(f"库存总价值：￥{total:,.2f}")
+        self.inventory_total_value_label.setToolTip(
+            f"全部库存共 {len(self._items)} 件，其中 {matched} 件已匹配价格"
+        )
 
     def _start_login(self) -> None:
         if self._login_worker and self._login_worker.isRunning():
@@ -576,8 +630,8 @@ class InventoryPage(QWidget):
         )
         self._fetch_worker.status.connect(self.status_label.setText)
         self._fetch_worker.completed.connect(
-            lambda items, profile, error, pid=profile_id: self._fetch_finished(
-                pid, items, profile, error
+            lambda items, profile, error, price_status, pid=profile_id: self._fetch_finished(
+                pid, items, profile, error, price_status
             )
         )
         self._fetch_worker.start()
@@ -588,6 +642,7 @@ class InventoryPage(QWidget):
         items: list[dict] | None,
         profile: dict | None,
         error: str,
+        price_status: str,
     ) -> None:
         self._set_busy(False)
         if error:
@@ -596,6 +651,11 @@ class InventoryPage(QWidget):
         if items is None:
             return
         _atomic_json_write(profile_inventory_data_path(profile_id), items)
+        # The worker has just refreshed the on-disk package.  Invalidate the
+        # page-level map so later imports use the same prices shown on cards.
+        self._price_map = None
+        self._price_map_loaded = False
+        self._render_completion_status = price_status or f"库存更新完成，共 {len(items)} 件"
         if profile:
             save_steam_account_config_dict(
                 profile_id,
@@ -608,7 +668,7 @@ class InventoryPage(QWidget):
             )
             update_profile_display_name(profile_id, str(profile.get("personaname") or "Steam"))
         self._reload_accounts(profile_id)
-        self.status_label.setText(f"库存更新完成，共 {len(items)} 件")
+        self.status_label.setText(self._render_completion_status)
 
     def _remove_account(self) -> None:
         profile_id = self._active_profile_id()
@@ -677,6 +737,8 @@ class InventoryPage(QWidget):
         batch_size = 2 if start == 0 else _INV_RENDER_BATCH_SIZE
         end = min(total, start + batch_size)
         hint = QSize(_INV_GRID_W, _INV_GRID_H)
+        from core.alchemy_calc import format_inventory_yuan_price
+
         self.inventory_list.setUpdatesEnabled(False)
         try:
             for index in range(start, end):
@@ -700,6 +762,12 @@ class InventoryPage(QWidget):
                     float_text = "—"
                     tip_float = "—"
                 status = _format_inventory_status_line(item)
+                raw_price = item.get("buff_price")
+                try:
+                    price_value = float(raw_price) if raw_price is not None else None
+                except (TypeError, ValueError):
+                    price_value = None
+                price_text = format_inventory_yuan_price(price_value)
                 list_item = QListWidgetItem()
                 list_item.setData(Qt.ItemDataRole.UserRole, index)
                 list_item.setData(_ROLE_NAME, name)
@@ -707,7 +775,11 @@ class InventoryPage(QWidget):
                 list_item.setData(_ROLE_STATUS, status)
                 list_item.setData(_ROLE_QUALITY, quality_cn)
                 list_item.setData(_ROLE_ICON_LOADED, False)
-                list_item.setToolTip(f"{name}\n磨损：{tip_float}\n{status}")
+                list_item.setData(_ROLE_PRICE, price_text)
+                list_item.setToolTip(
+                    f"{name}\n磨损：{tip_float}\n参考价："
+                    f"{format_inventory_yuan_price(price_value)}\n{status}"
+                )
                 list_item.setFlags(
                     Qt.ItemFlag.ItemIsEnabled
                     | Qt.ItemFlag.ItemIsSelectable
@@ -729,11 +801,11 @@ class InventoryPage(QWidget):
             return
 
         self._on_selection_changed()
-        self.status_label.setText(
-            f"显示 {len(self._filtered)} / {len(self._items)} 件"
-            if self._items
-            else self.status_label.text()
-        )
+        if self._render_completion_status:
+            self.status_label.setText(self._render_completion_status)
+            self._render_completion_status = ""
+        elif self._items:
+            self.status_label.setText(f"显示 {len(self._filtered)} / {len(self._items)} 件")
         # Let the fully painted card wall reach screen before resolving the
         # heavier local skin-image index for the first time.
         QTimer.singleShot(80, self._load_visible_icons)
@@ -806,7 +878,15 @@ class InventoryPage(QWidget):
             return None
         from core.alchemy_calc import lookup_inventory_item_price_value
 
-        price = lookup_inventory_item_price_value(item, self._load_price_map_once())
+        try:
+            stored_price = float(item.get("buff_price"))
+        except (TypeError, ValueError):
+            stored_price = 0.0
+        price = (
+            stored_price
+            if stored_price > 0
+            else lookup_inventory_item_price_value(item, self._load_price_map_once())
+        )
         return {
             "float_value": float_value,
             "goods_id": str(item.get("assetid") or goods_name),

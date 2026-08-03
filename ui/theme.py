@@ -507,7 +507,7 @@ QLabel#marketAccountName, QLabel#platformFieldLabel {{
   color: {text};
   font-weight: 700;
 }}
-QPushButton#marketLoginState {{
+QLabel#marketLoginState {{
   min-height: 32px;
   padding: 0 12px;
   text-align: left;
@@ -518,17 +518,17 @@ QPushButton#marketLoginState {{
   font-size: 11px;
   font-weight: 650;
 }}
-QPushButton#marketLoginState[state="confirmed"] {{
+QLabel#marketLoginState[state="confirmed"] {{
   color: {lime};
   background: {lime_dim};
   border-color: {lime};
 }}
-QPushButton#marketLoginState[state="unknown"] {{
+QLabel#marketLoginState[state="unknown"] {{
   color: {amber};
   background: {amber_dim};
   border-color: {amber};
 }}
-QPushButton#marketLoginState[state="missing"] {{
+QLabel#marketLoginState[state="missing"] {{
   color: {muted};
   background: {input};
   border-color: {border};
@@ -584,6 +584,11 @@ QLabel#recipeBridgeMaterialTitle {{
   font-size: 14px;
   font-weight: 750;
 }}
+QLabel#recipeBridgeMaterialAltTitle {{
+  color: {muted};
+  font-size: 12px;
+  font-weight: 650;
+}}
 QLabel#recipeBridgeCount {{
   color: {cyan};
   background: {cyan_dim};
@@ -592,10 +597,28 @@ QLabel#recipeBridgeCount {{
   padding: 3px 9px;
   font-weight: 800;
 }}
+QLabel#recipeBridgeAltBadge {{
+  color: {muted};
+  background: {surface_alt};
+  border: 1px solid {border};
+  border-radius: 9px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}}
 QLabel#recipeBridgeWear {{
   color: {cyan};
   font-size: 12px;
   font-weight: 700;
+}}
+QFrame#recipeBridgeMaterialAlt {{
+  background: {surface};
+  border: 1px solid {border};
+  border-radius: 14px;
+}}
+QFrame#recipeBridgeMaterialAlt:hover {{
+  background: {card_hover};
+  border-color: {border_strong};
 }}
 QPushButton#recipeBridgePlatformButton {{
   min-height: 31px;
@@ -825,6 +848,14 @@ QSpinBox::down-button, QDoubleSpinBox::down-button {{
   background: transparent;
   border: 0;
 }}
+QSpinBox#customItemQuantitySpin {{
+  padding-right: 24px;
+}}
+QSpinBox#customItemQuantitySpin::up-button,
+QSpinBox#customItemQuantitySpin::down-button {{
+  width: 22px;
+  border-left: 1px solid {border};
+}}
 QCheckBox {{
   color: {text};
   spacing: 7px;
@@ -950,10 +981,26 @@ QLabel#inventoryCardName {{
   font-weight: 700;
 }}
 QLabel#inventoryCardWear, QLabel#inventoryCardStatus,
-QLabel#alchemySimulationResultPriceLine,
 QLabel#alchemySimulationSubstratePriceLine {{
   color: {muted};
   font-size: 11px;
+}}
+QLabel#inventoryTotalValue {{
+  color: {text};
+  font-size: 15px;
+  font-weight: 800;
+  padding: 2px 14px;
+}}
+QLabel#alchemySimulationResultPriceLine {{
+  color: {muted};
+  font-size: 15px;
+  font-weight: 800;
+}}
+QLabel#alchemySimulationResultPriceLine[priceOutcome="profit"] {{
+  color: #10b981;
+}}
+QLabel#alchemySimulationResultPriceLine[priceOutcome="loss"] {{
+  color: #ef4444;
 }}
 QLabel#alchemySimulationResultProb {{
   color: {cyan};
@@ -968,6 +1015,15 @@ QWidget#recipeManageToolbar {{
   background: {surface_alt};
   border: 1px solid {border};
   border-radius: 10px;
+}}
+QWidget#recipeManageRow {{
+  background: {surface};
+  border: 1px solid {border};
+  border-radius: 10px;
+}}
+QWidget#recipeManageRow:hover {{
+  background: {surface_alt};
+  border-color: {border_strong};
 }}
 QWidget#recipeManageBody, QWidget#recipeBatchPrimarySlot,
 QWidget#alchemyGroupsContainer, QWidget#alchemySimulationScrollInner,
@@ -1062,6 +1118,10 @@ QLabel#alchemyCalcProgressLabel {{
 }}
 QLabel#alchemyCalcProgressDetailLabel {{
   color: {muted};
+}}
+QLabel#muted[collectionState="complete"] {{
+  color: {lime};
+  font-weight: 700;
 }}
 QFrame#toastWidget, QFrame#toastWidgetSuccess,
 QFrame#toastWidgetError, QFrame#toastWidgetWarning {{

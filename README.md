@@ -80,6 +80,39 @@ $env:CS2TH_TOOLS_LOCAL_PRICE_SNAPSHOT = "D:\APIData_BUFF\data\spot_price_snapsho
 转换器读取 `bucket_min_prices` 作为产物估值，并按本项目皮肤元数据重建
 炼金算法所需的箱子、品质、暗金、归一化磨损及 paint index 层级。
 
+## 平台饰品 ID（发版数据）
+
+小助手运行时只读取以下三个静态文件中的 `buff`、`yyyp`、`c5`、`eco`
+映射，不会在线搜索饰品 ID，也不会从多个来源动态覆盖：
+
+```text
+meta\SkinTemplate.jsonl
+meta\SkinTemplate_st.jsonl
+meta\SkinTemplate_mem.jsonl
+```
+
+唯一主库位于 CS2TH 项目的 `data/market_platform_ids.json`。准备发布小助手时，
+从 CS2TH 项目执行一键刷新与导出：
+
+```powershell
+cd D:\cs2th
+$env:ECO_PARTNER_ID = "你的 PartnerId"
+$env:ECO_PRIVATE_KEY_FILE = "D:\secrets\eco-private-key.pem"
+
+.\.venv\Scripts\cs2th.exe refresh-platform-ids `
+  --export-tools D:\CS2TH-tools
+```
+
+如只需从已经更新好的 CS2TH 主库手动生成，不再次请求 ECO，可使用备用脚本：
+
+```powershell
+cd D:\CS2TH-tools
+.\.venv\Scripts\python.exe .\scripts\sync_platform_ids.py --replace --write
+```
+
+ECO PartnerId 和 RSA 私钥只配置在 CS2TH 开发环境，严禁写入仓库或打进安装包。
+生成后先测试，最后再构建安装包。
+
 ## 开发运行
 
 ```powershell
@@ -112,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\build_setup.ps1
 产出：
 
 ```text
-dist\CS2TH-Tools_Setup_v0.3.0.exe
+dist\CS2TH-Tools_Setup_v0.3.2.exe
 ```
 
 流程：精简 onedir → Inno LZMA2 压缩。对 Playwright 的 `node.exe`、枪图等「未预压缩」文件压缩率更好。

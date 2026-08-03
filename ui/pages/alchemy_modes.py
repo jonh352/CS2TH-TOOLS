@@ -710,8 +710,10 @@ class AlchemyModeMixin:
 
     def _on_calc_progress(self, pct: int):
         """扫描模式下更新进度条"""
-        self.step3_progress_bar.setValue(pct)
-        self.step3_progress_label.setText(f"{pct}%")
+        # 搜索任务全部返回后仍需做去重与结果整理；真正 finished 前最多显示 99%。
+        display_pct = max(0, min(99, int(pct)))
+        self.step3_progress_bar.setValue(display_pct)
+        self.step3_progress_label.setText(f"{display_pct}%")
 
     def _stop_special_wear_elapsed_timer(self) -> None:
         self._special_wear_elapsed_timer.stop()

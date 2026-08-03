@@ -14,7 +14,9 @@ from .browser_session import (
 from .constants import DEFAULT_SESSION_DIR
 from .errors import (
     STEAM_BROWSER_NOT_INSTALLED_MSG,
+    STEAM_BROWSER_PROFILE_BUSY_MSG,
     STEAM_FETCH_SESSION_EXPIRED,
+    SteamBrowserLaunchError,
     SteamBrowserNotFoundError,
     SteamInventoryFetchCancelledError,
     SteamSessionExpiredError,
@@ -36,7 +38,9 @@ from .stealth import playwright_stealth_init_js
 __all__ = [
     "DEFAULT_SESSION_DIR",
     "STEAM_BROWSER_NOT_INSTALLED_MSG",
+    "STEAM_BROWSER_PROFILE_BUSY_MSG",
     "STEAM_FETCH_SESSION_EXPIRED",
+    "SteamBrowserLaunchError",
     "SteamBrowserNotFoundError",
     "SteamInventoryFetchCancelledError",
     "SteamSessionExpiredError",

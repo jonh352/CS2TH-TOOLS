@@ -19,6 +19,8 @@ class WearIntervalBar(QWidget):
         selected_max: float,
         marker: float | None,
         parent=None,
+        recipe_min: float | None = None,
+        recipe_max: float | None = None,
     ) -> None:
         super().__init__(parent)
         self.total_min = float(total_min)
@@ -26,12 +28,22 @@ class WearIntervalBar(QWidget):
         self.selected_min = float(selected_min)
         self.selected_max = float(selected_max)
         self.marker = float(marker) if marker is not None else None
-        self.setMinimumHeight(58)
-        self.setToolTip(
-            f"饰品总磨损 {self.total_min:g}–{self.total_max:g}\n"
-            f"采集区间 {self.selected_min:g}–{self.selected_max:g}\n"
-            "每一小格对应一个预设磨损档"
-        )
+        self.recipe_min = float(recipe_min) if recipe_min is not None else None
+        self.recipe_max = float(recipe_max) if recipe_max is not None else None
+        self.setMinimumHeight(72)
+        self._refresh_base_tooltip()
+
+    def _refresh_base_tooltip(self) -> None:
+        lines = [
+            f"饰品总磨损 {self.total_min:g}–{self.total_max:g}",
+            f"采集区间 {self.selected_min:g}–{self.selected_max:g}",
+        ]
+        if self.recipe_min is not None and self.recipe_max is not None:
+            lines.append(f"配方磨损 {self.recipe_min:g}–{self.recipe_max:g}")
+        elif self.marker is not None:
+            lines.append(f"对应磨损 {self.marker:g}")
+        lines.append("每一小格对应一个预设磨损档")
+        self.setToolTip("\n".join(lines))
 
     def _anchors(self) -> list[float]:
         anchors = [self.total_min]
@@ -56,7 +68,7 @@ class WearIntervalBar(QWidget):
         anchors = self._anchors()
         left, right = 18.0, max(19.0, float(self.width()) - 18.0)
         width = right - left
-        top, height = 17.0, 16.0
+        top, height = 22.0, 16.0
         base = QRectF(left, top, width, height)
 
         palette = self.palette()
@@ -84,6 +96,29 @@ class WearIntervalBar(QWidget):
         painter.setBrush(selected_fill)
         painter.drawRect(selection)
 
+        # Recipe wear band (like special-wear target annotation).
+        recipe_left = recipe_right = None
+        if self.recipe_min is not None and self.recipe_max is not None:
+            recipe_left = self._anchor_position(self.recipe_min, anchors, left, width)
+            recipe_right = self._anchor_position(self.recipe_max, anchors, left, width)
+            recipe_fill = QColor(highlight)
+            recipe_fill.setAlpha(150)
+            painter.setBrush(recipe_fill)
+            painter.drawRect(
+                QRectF(
+                    min(recipe_left, recipe_right),
+                    top + 2,
+                    max(2.0, abs(recipe_right - recipe_left)),
+                    height - 4,
+                )
+            )
+            painter.setPen(QPen(highlight, 2))
+            for x in (recipe_left, recipe_right):
+                painter.drawLine(
+                    QPointF(x, top - 1),
+                    QPointF(x, top + height + 1),
+                )
+
         for index in range(1, len(anchors) - 1):
             x = left + width * index / (len(anchors) - 1)
             active = selected_left <= x <= selected_right
@@ -106,22 +141,49 @@ class WearIntervalBar(QWidget):
         if self.marker is not None:
             marker_x = self._anchor_position(self.marker, anchors, left, width)
             painter.setPen(QPen(highlight, 2))
+            painter.setBrush(highlight)
             painter.drawEllipse(QPointF(marker_x, top + height / 2), 3.2, 3.2)
 
         painter.setPen(text)
         font = painter.font()
         font.setPointSizeF(max(8.0, font.pointSizeF() - 1))
         painter.setFont(font)
+        # Handle labels = collection range; bar ends = skin total wear.
+        painter.setPen(highlight)
+        label_w = 52.0
+        for value, x in (
+            (self.selected_min, selected_left),
+            (self.selected_max, selected_right),
+        ):
+            painter.drawText(
+                QRectF(x - label_w / 2, top + height + 4, label_w, 16),
+                Qt.AlignmentFlag.AlignHCenter,
+                f"{value:g}",
+            )
+        painter.setPen(muted)
         painter.drawText(
-            QRectF(left, top + height + 6, width / 2, 18),
+            QRectF(left, top + height + 20, width / 2, 16),
             Qt.AlignmentFlag.AlignLeft,
-            f"{self.selected_min:g}",
+            f"{self.total_min:g}",
         )
         painter.drawText(
-            QRectF(left + width / 2, top + height + 6, width / 2, 18),
+            QRectF(left + width / 2, top + height + 20, width / 2, 16),
             Qt.AlignmentFlag.AlignRight,
-            f"{self.selected_max:g}",
+            f"{self.total_max:g}",
         )
+        if (
+            self.recipe_min is not None
+            and self.recipe_max is not None
+            and recipe_left is not None
+            and recipe_right is not None
+        ):
+            painter.setPen(highlight)
+            mid_x = (min(recipe_left, recipe_right) + max(recipe_left, recipe_right)) / 2
+            painter.drawText(
+                QRectF(mid_x - 54, top - 16, 108, 14),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                f"配方 {self.recipe_min:g}–{self.recipe_max:g}",
+            )
 
 
 class WearRangeSelector(WearIntervalBar):
@@ -140,7 +202,7 @@ class WearRangeSelector(WearIntervalBar):
         )
         self._drag_handle: str | None = None
         self.setCursor(Qt.CursorShape.SizeHorCursor)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(84)
         self._refresh_tooltip()
 
     def set_wear_bounds(
@@ -160,6 +222,26 @@ class WearRangeSelector(WearIntervalBar):
             self.total_max if selected_max is None else float(selected_max)
         )
         self._normalize_selection()
+        self._refresh_tooltip()
+        self.update()
+
+    def set_recipe_annotation(
+        self,
+        *,
+        recipe_min: float | None = None,
+        recipe_max: float | None = None,
+        marker: float | None = None,
+    ) -> None:
+        """Mark the recipe float band / point, like special-wear target annotation."""
+        self.recipe_min = float(recipe_min) if recipe_min is not None else None
+        self.recipe_max = float(recipe_max) if recipe_max is not None else None
+        if (
+            self.recipe_min is not None
+            and self.recipe_max is not None
+            and self.recipe_min > self.recipe_max
+        ):
+            self.recipe_min, self.recipe_max = self.recipe_max, self.recipe_min
+        self.marker = float(marker) if marker is not None else None
         self._refresh_tooltip()
         self.update()
 
@@ -184,11 +266,16 @@ class WearRangeSelector(WearIntervalBar):
         self.selected_max = anchors[high_index]
 
     def _refresh_tooltip(self) -> None:
-        self.setToolTip(
-            f"饰品总磨损 {self.total_min:g}–{self.total_max:g}\n"
-            f"当前采集 {self.selected_min:g}–{self.selected_max:g}\n"
-            "拖动左右手柄选择区间，手柄会吸附到磨损档边界"
-        )
+        lines = [
+            f"饰品总磨损 {self.total_min:g}–{self.total_max:g}",
+            f"当前采集 {self.selected_min:g}–{self.selected_max:g}",
+        ]
+        if self.recipe_min is not None and self.recipe_max is not None:
+            lines.append(f"配方磨损 {self.recipe_min:g}–{self.recipe_max:g}")
+        elif self.marker is not None:
+            lines.append(f"对应磨损 {self.marker:g}")
+        lines.append("拖动左右手柄选择区间，手柄会吸附到磨损档边界")
+        self.setToolTip("\n".join(lines))
 
     def _index_at_x(self, x: float) -> int:
         anchors = self._anchors()

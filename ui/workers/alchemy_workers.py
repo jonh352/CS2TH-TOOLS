@@ -90,7 +90,9 @@ def _build_non_overlapping_group_recipes(
     return selected
 
 
-def _scan_mode_process_pool_workers(*, task_count: int = 1) -> int:
+def _scan_mode_process_pool_workers(
+    *, task_count: int = 1, input_count: int = 0
+) -> int:
     """扫描模式 ProcessPoolExecutor 的进程数。
 
     非 Windows：与 ``cpu_count//2`` 一致（至少 1），并受 ``ALCHEMY_SCAN_MODE_PROCESS_POOL_MAX_WORKERS`` 上限。
@@ -101,6 +103,14 @@ def _scan_mode_process_pool_workers(*, task_count: int = 1) -> int:
     n = max(1, min(cpu // 2, int(ALCHEMY_SCAN_MODE_PROCESS_POOL_MAX_WORKERS)))
     if task_count > 0:
         n = min(n, max(1, int(task_count)))
+    # Every spawned Windows worker receives its own copy of the substrate list,
+    # price map and solver caches.  Reduce fan-out for unusually large imports
+    # to prevent memory pressure from killing the desktop process.  This only
+    # changes parallelism; recipe inputs and the solver algorithm stay intact.
+    if input_count >= 3000:
+        n = min(n, 2)
+    elif input_count >= 1000:
+        n = min(n, 4)
     if sys.platform != "win32":
         return n
     cap = getattr(_cf_process_module, "_MAX_WINDOWS_WORKERS", 61)
@@ -227,6 +237,8 @@ class _CalcPoolThread(QThread):
                 completed = 0
                 all_recipes: list[dict] = []
                 self.task_progress.emit(0)
+                prepared_group_count = len(prepared_groups)
+                total_work = total + prepared_group_count
                 for quality, stat_trak, prep in prepared_groups:
                     (
                         k,
@@ -236,7 +248,10 @@ class _CalcPoolThread(QThread):
                         optional_instances,
                         required_instances,
                     ) = prep
-                    n_workers = _scan_mode_process_pool_workers(task_count=len(nfv_list))
+                    n_workers = _scan_mode_process_pool_workers(
+                        task_count=len(nfv_list),
+                        input_count=len(instances),
+                    )
                     max_inflight = max(n_workers * 2, n_workers)
                     all_raw: list[dict] = []
                     ex = ProcessPoolExecutor(
@@ -289,8 +304,9 @@ class _CalcPoolThread(QThread):
                                     return
                                 all_raw.extend(chunk)
                                 completed += 1
+                                # 每个搜索任务和每个品质组的结果整理都计入总进度。
                                 self.task_progress.emit(
-                                    min(100, int(100 * completed / total))
+                                    min(99, int(99 * completed / total_work))
                                 )
                             while len(pending) < max_inflight:
                                 if self.isInterruptionRequested():
@@ -331,6 +347,10 @@ class _CalcPoolThread(QThread):
                         )
                     _tag_recipe_group(recipes, quality, stat_trak)
                     all_recipes.extend(recipes)
+                    completed += 1
+                    self.task_progress.emit(
+                        min(99, int(99 * completed / total_work))
+                    )
                 self.task_finished.emit(_recipes_to_ui_payload(all_recipes), None)
             elif self._mode == "target":
                 all_recipes: list[dict] = []

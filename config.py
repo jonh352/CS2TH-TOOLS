@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "CS2TH 汰换小助手"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.2"
 # HTTP/1.1 headers are encoded as Latin-1 by requests/urllib3. Keep the
 # transport identifier ASCII-only even though the visible application name is Chinese.
 APP_HTTP_USER_AGENT = f"CS2TH-Tradeup-Assistant/{APP_VERSION}"
@@ -42,6 +42,7 @@ INVENTORY_DIR = CACHE_DIR / "inventory"
 BROWSER_DIR = CACHE_DIR / "browser"
 ALCHEMY_CACHE_DIR = CACHE_DIR / "alchemy"
 RECIPES_DIR = CACHE_DIR / "recipes"
+COLLECTED_JSON_DIR = CACHE_DIR / "collected_json"
 STEAM_SESSION_DIR = BROWSER_DIR / "steam"
 STEAM_AVATAR_CACHE_DIR = BROWSER_DIR / "steam_avatars"
 
@@ -60,7 +61,7 @@ PRODUCT_PRICE_HTTP_META_FILE = ALCHEMY_CACHE_DIR / "product_price_http_meta.json
 MATERIAL_COLLECTION_HISTORY_FILE = CACHE_DIR / "material_collection_history.json"
 _local_price_snapshot_env = os.environ.get(
     "CS2TH_TOOLS_LOCAL_PRICE_SNAPSHOT",
-    "D:/APIData_BUFF/data/spot_price_snapshot.sqlite",
+    "",
 ).strip()
 LOCAL_PRODUCT_PRICE_SNAPSHOT: Path | None = (
     Path(_local_price_snapshot_env) if _local_price_snapshot_env else None
@@ -186,5 +187,6 @@ def ensure_runtime_dirs() -> None:
         STEAM_AVATAR_CACHE_DIR,
         ALCHEMY_CACHE_DIR,
         RECIPES_DIR,
+        COLLECTED_JSON_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

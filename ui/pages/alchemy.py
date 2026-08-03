@@ -33,6 +33,7 @@ from ui.feedback import show_alert
 from ui.dialogs.alert_dialog import WearInputNoticeDialog
 from ui.dialogs.exclude_saved_recipes_dialog import ExcludeSavedRecipesDialog
 from ui.dialogs.import_steam_inventory_dialog import ImportSteamInventoryDialog
+from ui.dialogs.custom_alchemy_item_dialog import CustomAlchemyItemDialog
 from ui.dialogs.move_recipe_folder_dialog import (
     MoveRecipeFolderDialog,
     build_all_recipe_folder_pick_targets,
@@ -65,8 +66,13 @@ from core.alchemy_quality import (
     resolve_inventory_skin_template,
     strip_appearance_suffix_from_goods_name,
 )
-from core.alchemy_calc import partition_selected_data_by_tradeup_group
-from core.data_utils import SkinTemplate, inventory_wear_chinese
+from core.alchemy_calc import (
+    lookup_inventory_item_price_value,
+    lookup_template_price_value,
+    partition_selected_data_by_tradeup_group,
+    try_build_product_price_map_from_disk,
+)
+from core.data_utils import SkinInstance, SkinTemplate, inventory_wear_chinese
 from core.inventory_steam_accounts import profile_inventory_data_path
 from core.saved_recipes import (
     SUBSTRATE_ALCHEMY_META_EXCLUDED_KEY,
@@ -195,6 +201,15 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.import_inventory_btn.setToolTip("一键导入所选 Steam 账号本地缓存的全部库存")
         self.import_inventory_btn.clicked.connect(self._on_import_steam_inventory)
         step1_top.addWidget(self.import_inventory_btn, 0, Qt.AlignVCenter)
+
+        self.custom_item_btn = QPushButton("自定义饰品")
+        self.custom_item_btn.setObjectName("alchemySelectFileBtn")
+        self.custom_item_btn.setCursor(Qt.PointingHandCursor)
+        self.custom_item_btn.setToolTip(
+            "按收藏品 / 武器箱选择饰品，并自定义数量和磨损区间"
+        )
+        self.custom_item_btn.clicked.connect(self._on_add_custom_items)
+        step1_top.addWidget(self.custom_item_btn, 0, Qt.AlignVCenter)
 
         self.clear_file_btn = QPushButton("清除数据")
         self.clear_file_btn.setObjectName("alchemyClearFileBtn")
@@ -1460,6 +1475,10 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         out: list[tuple[CollapsibleGroup, int]] = []
         seen: set[tuple[int, int]] = set()
         for g in self._groups:
+            # Saved-recipe matching is explicitly row-oriented.  Ordinary large
+            # imports keep collapsed tables lazy; only this less frequent action
+            # needs the concrete table rows.
+            g.ensure_table_populated()
             tw = g.table_widget
             for row in range(tw.rowCount()):
                 calc_it = tw.item(row, tw._CHECK_COL)
@@ -1802,8 +1821,13 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             msg += f"；已对 {unchecked} 条同皮肤同磨损的非库存底物取消参与计算"
         show_toast(self, msg, style="success" if (added or unchecked) else "info")
 
-    def apply_inventory_import_replace(self, items: list[dict]) -> None:
-        """清空后以库存导入条目作为底物列表，回到步骤一。"""
+    def apply_inventory_import_replace(
+        self,
+        items: list[dict],
+        *,
+        source_label: str = "库存",
+    ) -> None:
+        """清空后以本批导入条目作为底物列表，回到步骤一并默认全选。"""
         added, ingest_failed = self._ingest_scraped_dicts(items, replace_all=True)
         for g in self._step3_recipe_groups:
             self.step3_results_layout.removeWidget(g)
@@ -1815,7 +1839,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 del item
         self._step3_save_location_row.setVisible(False)
         self.step_stack.setCurrentIndex(0)
-        msg = f"已载入库存底物 {added} 条（已替换原底物列表）"
+        msg = f"已载入{source_label}底物 {added} 条（已替换原底物列表）"
         if ingest_failed:
             msg += f"，未写入 {ingest_failed} 条"
         show_toast(self, msg, style="success" if added else "info")
@@ -1885,8 +1909,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 style="warning",
             )
             return
-        from core.alchemy_calc import try_build_product_price_map_from_disk
-
         price_map = try_build_product_price_map_from_disk()
         mapped: list[dict] = []
         skipped = 0
@@ -1923,6 +1945,60 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         )
         if paths:
             self._load_jsonl([Path(p) for p in paths])
+
+    def _on_add_custom_items(self) -> None:
+        dialog = CustomAlchemyItemDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selection = dialog.selection()
+        if selection is None:
+            show_toast(self, "请选择有效饰品", style="warning")
+            return
+        template, weapon_box_id, low, high, quantity, manual_price = selection
+        span = max(0.0, high - low)
+        price_map = None if manual_price > 0 else try_build_product_price_map_from_disk()
+        added = 0
+        unresolved_price = 0
+        batch_id = time.time_ns()
+        for index in range(quantity):
+            ratio = (index + 0.5) / quantity
+            wear = low + span * ratio if span > 0 else low
+            wear = float(np.float32(max(template.min_float, min(template.max_float, wear))))
+            instance = SkinInstance(
+                skin_template=template,
+                float_value=wear,
+                price=manual_price,
+                platform="custom",
+            )
+            price = float(manual_price)
+            if price <= 0:
+                matched = lookup_template_price_value(
+                    template,
+                    wear,
+                    price_map,
+                    weapon_box_id=weapon_box_id,
+                )
+                price = float(matched) if matched is not None else 0.0
+                if price <= 0:
+                    unresolved_price += 1
+            row = {
+                "float_value": wear,
+                "goods_id": f"custom:{template.paint_index}:{batch_id}:{index}",
+                "goods_name": instance.name,
+                "platform": "custom",
+                "price": price,
+                "weapon_box_id": weapon_box_id,
+            }
+            if self._try_add_one_row(row):
+                added += 1
+        self._finalize_ingest(preserve_existing_states=True)
+        if not added:
+            show_toast(self, "自定义饰品与当前数据重复，未新增", style="warning")
+            return
+        message = f"已添加 {added} 件自定义饰品"
+        if unresolved_price:
+            message += f"；{unresolved_price} 件将在计算前再次匹配价格"
+        show_toast(self, message, style="success")
 
     def _load_jsonl(self, paths: list[Path]):
         """读取 JSONL / JSON 文件，合并到现有数据。

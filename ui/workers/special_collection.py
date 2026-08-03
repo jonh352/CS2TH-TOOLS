@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from threading import Event
+
 from PySide6.QtCore import QThread, Signal
 
-from core.alchemy_quality import get_name_map, normalize_name
 from core.alchemy_special_wear import compute_special_wear_recipes
-from core.market_candidates import fetch_exact_wear_candidates
+from core.collection_cancel import CollectionCancelled
+from ui.workers.material_collection import collect_candidates_parallel
 
 
 class SpecialCollectionWorker(QThread):
@@ -33,46 +35,27 @@ class SpecialCollectionWorker(QThread):
         self.target_wear_low = float(target_wear_low)
         self.target_wear_high = float(target_wear_high)
         self.slot_count = 5 if int(slot_count) == 5 else 10
+        self._stop_event = Event()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+        self.requestInterruption()
+
+    def _is_stop_requested(self) -> bool:
+        return self._stop_event.is_set() or self.isInterruptionRequested()
 
     def run(self) -> None:
-        candidates: list[dict] = []
-        errors: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        name_map = get_name_map()
-        for provider in self.providers:
-            provider_count = 0
-            try:
-                for material in self.materials:
-                    name = str(material.get("name") or "").strip()
-                    template = name_map.get(normalize_name(name))
-                    if template is None:
-                        errors.append(f"{provider}：无法匹配材料 {name}")
-                        continue
-                    rows = fetch_exact_wear_candidates(
-                        provider,
-                        template=template,
-                        display_name=name,
-                        min_wear=float(material.get("min_wear") or 0),
-                        max_wear=float(material.get("max_wear") or 1),
-                        max_pages=2,
-                        request_interval=float(
-                            max(1, self.provider_intervals.get(provider, 5))
-                        ),
-                        progress=self.progress.emit,
-                    )
-                    for row in rows:
-                        key = (
-                            str(row.get("platform") or ""),
-                            str(row.get("listing_id") or row.get("goods_id") or ""),
-                        )
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        candidates.append(row)
-                        provider_count += 1
-                self.progress.emit(f"{provider} 已收集 {provider_count} 条候选挂单")
-            except Exception as exc:  # noqa: BLE001 - report per-provider failure
-                errors.append(f"{provider}：{exc}")
+        candidates, errors = collect_candidates_parallel(
+            materials=self.materials,
+            providers=self.providers,
+            provider_intervals=self.provider_intervals,
+            progress=self.progress.emit,
+            cancel_check=self._is_stop_requested,
+        )
+
+        if self._is_stop_requested():
+            self.completed.emit(candidates, [], "已停止采集")
+            return
 
         if len(candidates) < self.slot_count:
             detail = "；".join(errors)
@@ -97,8 +80,15 @@ class SpecialCollectionWorker(QThread):
                 self.target_wear_low,
                 self.target_wear_high,
                 rounds=3,
+                cancel_check=self._is_stop_requested,
             )
+        except CollectionCancelled:
+            self.completed.emit(candidates, [], "已停止采集")
+            return
         except Exception as exc:  # noqa: BLE001 - keep the GUI worker alive
+            if self._is_stop_requested():
+                self.completed.emit(candidates, [], "已停止采集")
+                return
             self.completed.emit(
                 candidates,
                 [],

@@ -153,10 +153,14 @@ def _unprotect_token(value: str) -> str:
 
 def _account_from_payload(payload: dict[str, Any]) -> Account:
     user = payload.get("user") if isinstance(payload.get("user"), dict) else payload
+    is_serialized_account = (
+        user is payload and "user_id" in user and "member" in user
+    )
     subscriptions = user.get("subscriptions")
     subscriptions = subscriptions if isinstance(subscriptions, dict) else {}
-    effective = user.get("effective_entitlements")
-    effective = tuple(str(item) for item in effective) if isinstance(effective, list) else ()
+    effective_raw = user.get("effective_entitlements")
+    has_entitlement_schema = isinstance(effective_raw, list)
+    effective = tuple(str(item) for item in effective_raw) if has_entitlement_schema else ()
     has_tradeup = "*" in effective or "tradeup" in effective
     def subscription_until(key: str) -> float:
         state = subscriptions.get(key)
@@ -170,7 +174,13 @@ def _account_from_payload(payload: dict[str, Any]) -> Account:
     return Account(
         user_id=str(user.get("id") or user.get("user_id") or ""),
         username=str(user.get("username") or "").strip(),
-        member=has_tradeup or bool(user.get("is_member", user.get("member", False))),
+        member=(
+            bool(user.get("member"))
+            if is_serialized_account
+            else has_tradeup
+            if has_entitlement_schema
+            else bool(user.get("is_member", user.get("member", False)))
+        ),
         member_until=relevant_until or float(user.get("member_until") or 0.0),
         free_max_cost=float(user.get("free_max_cost") or 0.0),
         subscriptions={
