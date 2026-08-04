@@ -895,7 +895,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             return "locked"
         return "neutral"
 
-    def _set_recipe_substrate_action_state(self, slot: QrSlot, target_state: str) -> None:
+    def _set_recipe_substrate_action_state(
+        self, slot: QrSlot, target_state: str, *, notify: bool = True
+    ) -> None:
         calc_checked = target_state != "excluded"
         must_checked = target_state == "locked"
         updated = False
@@ -917,9 +919,12 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 logger.debug("配方操作槽位写回未命中 key 索引: key=%s", slot_key)
         if not updated:
             logger.warning("配方操作槽位写回未命中 slot_key: key=%s", slot_key)
-            show_toast(self, "未找到对应底物，无法更新状态", style="warning")
+            if notify:
+                show_toast(self, "未找到对应底物，无法更新状态", style="warning")
             return
         self._refresh_selected_data_from_groups()
+        if not notify:
+            return
         if target_state == "excluded":
             show_toast(self, "已排除当前底物", style="error")
         elif target_state == "locked":

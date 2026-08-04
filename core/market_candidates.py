@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import quote
 
 import requests
@@ -25,12 +28,66 @@ from core.collection_cancel import (
 )
 from core.data_utils import SkinTemplate
 
+logger = logging.getLogger(__name__)
+
+
+class EcoAccessGateError(RuntimeError):
+    """ECO listing API returned an access-gate / rate-limit response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result_msg: str = "",
+        needs_slider: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.result_msg = str(result_msg or "")
+        self.needs_slider = bool(needs_slider)
+
+
+class EcoPlatformPausedError(RuntimeError):
+    """ECO access still blocked; pause the platform for the rest of this run."""
+
+    pass
+
+
+class C5AccessGateError(RuntimeError):
+    """C5 listing APIs are blocked (rate-limit / risk / security check)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        needs_verify: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.needs_verify = bool(needs_verify)
+
+
+class C5PlatformPausedError(RuntimeError):
+    """C5 access still blocked; pause the platform for the rest of this run."""
+
+    pass
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 _BUFF_API = "https://buff.163.com/api/market/goods/sell_order"
+# BUFF accepts price.asc / price.desc on sell_order; use ascending so 2× unit-price early stop is valid.
+_BUFF_SELL_ORDER_SORT_BY = "price.asc"
+_BUFF_SELL_ORDER_PAGE_SIZE = 50
 _BUFF_LOGIN_CHECK_GOODS_ID = 956527
+# Wear-filtered listing queries require a real login on every platform.
+_LOGIN_CHECK_MIN_WEAR = 0.07
+_LOGIN_CHECK_MAX_WEAR = 0.15
+_YOUPIN_LOGIN_CHECK_TEMPLATE_ID = 125007
+_C5_LOGIN_CHECK_ITEM_ID = 1098059387020423168
+_C5_SELL_LIST_PAGE_SIZE = 40
+# C5 website sell list orderBy: 0 default, 2 price asc, 3 price desc.
+_C5_SELL_LIST_ORDER_BY_PRICE_ASC = 2
+_ECO_LOGIN_CHECK_GOODS_ID = 7332
 _YOUPIN_API = (
     "https://api.youpin898.com/api/homepage/es/commodity/GetCsGoPagedList"
 )
@@ -115,17 +172,36 @@ _WEAR_BOUNDS = {
 }
 # BUFF / 悠悠 / C5 stop paging once listings exceed this multiple of recipe unit_price_cny.
 _COLLECTION_PRICE_CAP_MULTIPLIER = 2.0
+# ECO uses a slightly looser cap after switching to price-asc Sort.
+_COLLECTION_ECO_PRICE_CAP_MULTIPLIER = 2.5
+# Per platform · per material · per wear window (e.g. 略磨 / 久经).
+_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW = 300
 
 
-def _collection_max_unit_price(unit_price_cny: Any) -> float | None:
-    """Return 2× recipe unit price, or None when the recipe has no usable price."""
+def _collection_window_row_limit_reached(kept: int) -> bool:
+    return int(kept) >= _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+
+
+def _collection_max_unit_price(
+    unit_price_cny: Any,
+    *,
+    multiplier: float | None = None,
+) -> float | None:
+    """Return recipe unit price × multiplier, or None when unusable."""
     try:
         value = float(unit_price_cny or 0)
     except (TypeError, ValueError):
         return None
     if value <= 0:
         return None
-    return value * _COLLECTION_PRICE_CAP_MULTIPLIER
+    factor = (
+        float(multiplier)
+        if multiplier is not None
+        else float(_COLLECTION_PRICE_CAP_MULTIPLIER)
+    )
+    if factor <= 0:
+        return None
+    return value * factor
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -358,6 +434,36 @@ def clear_provider_auth(provider: str) -> dict[str, Any]:
     }
 
 
+def clear_c5_session_auth() -> dict[str, Any]:
+    """Clear C5 login cookie/token and browser session; keep client device-id headers."""
+    _write_auth_json(
+        "c5_auth.json",
+        {
+            "ok": False,
+            "cleared": True,
+            "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        },
+    )
+    _candidate_cache.clear()
+
+    profiles_root = (CACHE_DIR / "market_browser_profiles").resolve()
+    profile = (profiles_root / "c5").resolve()
+    profile_removed = False
+    profile_error = ""
+    if profile.parent == profiles_root and profile.is_dir():
+        try:
+            shutil.rmtree(profile)
+            profile_removed = True
+        except OSError as exc:
+            profile_error = str(exc)
+    return {
+        "ok": True,
+        "provider": "c5",
+        "profile_removed": profile_removed,
+        "profile_error": profile_error,
+    }
+
+
 def _buff_cookie() -> str:
     for path in _auth_file_candidates("buff_cookie.json"):
         data = _read_json(path)
@@ -583,6 +689,401 @@ def _validation_result(
     }
 
 
+def _buff_sell_order_paintwear_params(
+    window_low: float,
+    window_high: float,
+) -> tuple[str, str]:
+    min_paintwear = f"{float(window_low):.9f}".rstrip("0").rstrip(".")
+    # Collection ranges use an open right edge below 1.0. BUFF treats
+    # max_paintwear as inclusive, so pull it back by one nanounit.
+    buff_max_wear = (
+        max(float(window_low), float(window_high) - 1e-9)
+        if float(window_high) < 1.0
+        else float(window_high)
+    )
+    max_paintwear = f"{buff_max_wear:.9f}".rstrip("0").rstrip(".")
+    return min_paintwear, max_paintwear
+
+
+def _runtime_error_to_validation(provider: str, exc: BaseException) -> dict[str, Any]:
+    text = str(exc)
+    name = provider_display_name(provider)
+    if "登录已失效" in text or "请先登录" in text or "未登录" in text:
+        return _validation_result(
+            provider,
+            ok=False,
+            message=f"{name} 登录已失效，请重新登录",
+        )
+    if any(
+        marker in text
+        for marker in ("风控", "虚拟设备", "异常网络", "高频", "风险", "滑块", "访问校验")
+    ):
+        return _validation_result(provider, ok=False, message=text)
+    if "429" in text or "频率过高" in text or "限流" in text:
+        return _validation_result(
+            provider,
+            ok=False,
+            indeterminate=True,
+            message=f"{name} 正在限流，暂时无法确认",
+        )
+    if isinstance(exc, requests.RequestException):
+        return _validation_result(
+            provider,
+            ok=False,
+            indeterminate=True,
+            message=f"{name} 校验请求失败：{text}",
+        )
+    return _validation_result(
+        provider,
+        ok=False,
+        indeterminate=True,
+        message=f"{name} 暂时无法确认：{text}",
+    )
+
+
+def _probe_youpin_collection_login(
+    token: str,
+    cookie: str = "",
+    *,
+    timeout: float = 12.0,
+) -> dict[str, Any]:
+    token = str(token or "").strip()
+    match = re.match(r"^Bearer\s+(.+)$", token, flags=re.IGNORECASE)
+    if match:
+        token = match.group(1).strip()
+    cookie = str(cookie or "").strip()
+    if not token:
+        return _validation_result(
+            "yyyp",
+            ok=False,
+            message="APP 未获取悠悠有品登录凭证",
+        )
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json;charset=UTF-8",
+        "AppType": "1",
+        "Origin": "https://www.youpin898.com",
+        "Referer": "https://www.youpin898.com/",
+        "Authorization": f"Bearer {token}",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    try:
+        response = requests.post(
+            _YOUPIN_API,
+            headers=headers,
+            json={
+                "templateId": str(_YOUPIN_LOGIN_CHECK_TEMPLATE_ID),
+                "pageSize": 40,
+                "pageIndex": 1,
+                "sortType": 1,
+                "listSortType": 1,
+                "listType": 10,
+                "stickersIsSort": False,
+                "minAbrade": _LOGIN_CHECK_MIN_WEAR,
+                "maxAbrade": _LOGIN_CHECK_MAX_WEAR,
+            },
+            timeout=timeout,
+        )
+        if response.status_code == 429:
+            return _validation_result(
+                "yyyp",
+                ok=False,
+                indeterminate=True,
+                message="悠悠有品正在限流，暂时无法确认",
+            )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return _runtime_error_to_validation("yyyp", exc)
+    code = int(payload.get("Code") or payload.get("code") or 0)
+    detail = str(payload.get("Msg") or payload.get("msg") or code)
+    if code == 0:
+        return _validation_result("yyyp", ok=True, message="悠悠有品登录有效")
+    if _response_indicates_login_required(payload, detail):
+        return _validation_result(
+            "yyyp",
+            ok=False,
+            message=f"悠悠有品登录已失效：{detail}",
+        )
+    return _validation_result(
+        "yyyp",
+        ok=False,
+        indeterminate=True,
+        message=f"悠悠有品暂时无法确认：{detail or '未知响应'}",
+    )
+
+
+def _probe_c5_collection_login(
+    cookie: str,
+    token: str = "",
+    *,
+    timeout: float = 12.0,
+) -> dict[str, Any]:
+    cookie = str(cookie or "").strip()
+    token = str(token or "").strip()
+    if not token and not _cookie_looks_authenticated(
+        cookie, ("nc5_accesstoken", "c5token", "access_token", "ncaccess", "token")
+    ):
+        return _validation_result(
+            "c5",
+            ok=False,
+            message="APP 未获取 C5GAME 登录凭证",
+        )
+    try:
+        clear_c5_app_version()
+    except Exception:
+        pass
+    errors: list[str] = []
+    for fetcher in (_fetch_c5_via_search_api, _fetch_c5_via_napi):
+        try:
+            fetcher(
+                ids=[_C5_LOGIN_CHECK_ITEM_ID],
+                display_name="登录校验",
+                min_wear=_LOGIN_CHECK_MIN_WEAR,
+                max_wear=_LOGIN_CHECK_MAX_WEAR,
+                max_pages=1,
+                request_interval=0,
+                cookie=cookie,
+                token=token,
+                progress=None,
+                cancel_check=None,
+            )
+            return _validation_result("c5", ok=True, message="C5GAME 登录有效")
+        except RuntimeError as exc:
+            text = str(exc)
+            errors.append(text)
+            if "登录已失效" in text:
+                return _validation_result(
+                    "c5",
+                    ok=False,
+                    message="C5GAME 登录已失效，请重新登录",
+                )
+            if any(
+                marker in text
+                for marker in ("风控", "虚拟设备", "异常网络", "高频", "风险")
+            ):
+                return _validation_result("c5", ok=False, message=text)
+            if "429" in text or "频率过高" in text:
+                return _validation_result(
+                    "c5",
+                    ok=False,
+                    indeterminate=True,
+                    message="C5GAME 正在限流，暂时无法确认",
+                )
+            continue
+        except requests.RequestException as exc:
+            return _runtime_error_to_validation("c5", exc)
+    prior = "；".join(errors) if errors else "网页采集接口不可用"
+    return _validation_result(
+        "c5",
+        ok=False,
+        indeterminate=True,
+        message=f"C5GAME 暂时无法确认：{prior}",
+    )
+
+
+def _probe_eco_collection_login(
+    token: str,
+    cookie: str = "",
+    *,
+    timeout: float = 12.0,
+) -> dict[str, Any]:
+    token = str(token or "").strip()
+    cookie = str(cookie or "").strip()
+    if not token and not _cookie_looks_authenticated(
+        cookie, ("token", "authorization", "eco_token", "access_token")
+    ):
+        return _validation_result(
+            "eco",
+            ok=False,
+            message="APP 未获取 ECOSteam 登录凭证",
+        )
+    try:
+        _post_eco_sell_query(
+            goods_id=_ECO_LOGIN_CHECK_GOODS_ID,
+            hash_name="",
+            min_wear=_LOGIN_CHECK_MIN_WEAR,
+            max_wear=_LOGIN_CHECK_MAX_WEAR,
+            page=1,
+            cookie=cookie,
+            token=token,
+        )
+    except RuntimeError as exc:
+        return _runtime_error_to_validation("eco", exc)
+    except requests.RequestException as exc:
+        return _runtime_error_to_validation("eco", exc)
+    return _validation_result("eco", ok=True, message="ECOSteam 登录有效")
+
+
+def _enrich_youpin_account_name(
+    result: dict[str, Any],
+    token: str,
+    cookie: str,
+    *,
+    timeout: float,
+    quick: bool,
+) -> dict[str, Any]:
+    if not result.get("ok") or quick:
+        return result
+    if result.get("account_name"):
+        return result
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "application/json, text/plain, */*",
+        "AppType": "1",
+        "Origin": "https://www.youpin898.com",
+        "Referer": "https://www.youpin898.com/",
+        "Authorization": f"Bearer {token}",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    for url in _YOUPIN_USER_INFO_APIS[:1]:
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError):
+            continue
+        data = payload.get("Data") or payload.get("data") or {}
+        if not isinstance(data, dict):
+            continue
+        nickname = str(
+            data.get("NickName")
+            or data.get("nickName")
+            or data.get("Nickname")
+            or data.get("nickname")
+            or ""
+        ).strip()
+        user_id = (
+            data.get("UserId")
+            or data.get("userId")
+            or data.get("Id")
+            or data.get("id")
+        )
+        if nickname:
+            enriched = dict(result)
+            enriched["account_name"] = nickname
+            enriched["user_id"] = user_id
+            return enriched
+    return result
+
+
+def _lookup_c5_user_profile(
+    cookie: str,
+    token: str = "",
+    *,
+    timeout: float = 12.0,
+) -> tuple[str, Any]:
+    cookie = str(cookie or "").strip()
+    token = _c5_effective_token(cookie, token)
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": _C5_ACCEPT_ENCODING,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Origin": "https://www.c5game.com",
+        "Referer": "https://www.c5game.com/user-center/user",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    if token:
+        headers["x-access-token"] = token
+    for url in _C5_USER_CHECK_APIS[:1]:
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            if response.status_code != 200:
+                continue
+            payload = response.json() if response.text else {}
+        except (requests.RequestException, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        return _extract_account_fields(payload)
+    return "", None
+
+
+def _lookup_eco_user_profile(
+    token: str,
+    cookie: str = "",
+    *,
+    timeout: float = 12.0,
+) -> tuple[str, Any]:
+    token = str(token or "").strip()
+    cookie = str(cookie or "").strip()
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Origin": "https://www.ecosteam.cn",
+        "Referer": "https://www.ecosteam.cn/",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if cookie:
+        headers["Cookie"] = cookie
+    for url in _ECO_USER_INFO_APIS[:1]:
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            if response.status_code != 200:
+                continue
+            payload = response.json() if response.text else {}
+        except (requests.RequestException, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        body = _eco_result_payload(payload)
+        nickname, user_id = _extract_account_fields(body)
+        if not nickname and not user_id:
+            nickname, user_id = _extract_account_fields(payload)
+        if nickname or user_id:
+            return nickname, user_id
+    return "", None
+
+
+def _enrich_c5_account_name(
+    result: dict[str, Any],
+    cookie: str,
+    token: str,
+    *,
+    timeout: float,
+    quick: bool,
+) -> dict[str, Any]:
+    if not result.get("ok") or quick:
+        return result
+    if result.get("account_name"):
+        return result
+    nickname, user_id = _lookup_c5_user_profile(cookie, token, timeout=timeout)
+    if nickname:
+        enriched = dict(result)
+        enriched["account_name"] = nickname
+        enriched["user_id"] = user_id
+        return enriched
+    return result
+
+
+def _enrich_eco_account_name(
+    result: dict[str, Any],
+    token: str,
+    cookie: str,
+    *,
+    timeout: float,
+    quick: bool,
+) -> dict[str, Any]:
+    if not result.get("ok") or quick:
+        return result
+    if result.get("account_name"):
+        return result
+    nickname, user_id = _lookup_eco_user_profile(token, cookie, timeout=timeout)
+    if nickname:
+        enriched = dict(result)
+        enriched["account_name"] = nickname
+        enriched["user_id"] = user_id
+        return enriched
+    return result
+
+
 def _validate_buff_login(*, timeout: float) -> dict[str, Any]:
     cookie = _buff_cookie()
     if "session=" not in cookie.lower():
@@ -591,6 +1092,10 @@ def _validate_buff_login(*, timeout: float) -> dict[str, Any]:
             ok=False,
             message="APP 未获取 BUFF 登录凭证",
         )
+    min_paintwear, max_paintwear = _buff_sell_order_paintwear_params(
+        _LOGIN_CHECK_MIN_WEAR,
+        _LOGIN_CHECK_MAX_WEAR,
+    )
     headers = {
         "User-Agent": _UA,
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -609,7 +1114,10 @@ def _validate_buff_login(*, timeout: float) -> dict[str, Any]:
                 "game": "csgo",
                 "goods_id": _BUFF_LOGIN_CHECK_GOODS_ID,
                 "page_num": 1,
-                "sort_by": "default",
+                "page_size": _BUFF_SELL_ORDER_PAGE_SIZE,
+                "sort_by": _BUFF_SELL_ORDER_SORT_BY,
+                "min_paintwear": min_paintwear,
+                "max_paintwear": max_paintwear,
             },
             headers=headers,
             timeout=timeout,
@@ -654,12 +1162,6 @@ def _validate_buff_login(*, timeout: float) -> dict[str, Any]:
 
 def _validate_youpin_login(*, timeout: float) -> dict[str, Any]:
     token, cookie = _youpin_auth()
-    if not token:
-        return _validation_result(
-            "yyyp",
-            ok=False,
-            message="APP 未获取悠悠有品登录凭证",
-        )
     return validate_youpin_credentials(token, cookie, timeout=timeout)
 
 
@@ -668,8 +1170,9 @@ def validate_youpin_credentials(
     cookie: str = "",
     *,
     timeout: float = 12.0,
+    quick: bool = False,
 ) -> dict[str, Any]:
-    """Validate a freshly captured Youpin token before persisting it."""
+    """Validate Youpin credentials using the same listing API as collection."""
     token = str(token or "").strip()
     match = re.match(r"^Bearer\s+(.+)$", token, flags=re.IGNORECASE)
     if match:
@@ -681,80 +1184,13 @@ def validate_youpin_credentials(
             ok=False,
             message="未捕获到悠悠有品 Token",
         )
-    headers = {
-        "User-Agent": _UA,
-        "Accept": "application/json, text/plain, */*",
-        "AppType": "1",
-        "Origin": "https://www.youpin898.com",
-        "Referer": "https://www.youpin898.com/",
-        "Authorization": f"Bearer {token}",
-    }
-    if cookie:
-        headers["Cookie"] = cookie
-    last_detail = "登录凭证无效"
-    for url in _YOUPIN_USER_INFO_APIS:
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-            )
-            if response.status_code == 429:
-                return _validation_result(
-                    "yyyp",
-                    ok=False,
-                    indeterminate=True,
-                    message="悠悠有品正在限流，暂时无法确认",
-                )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            last_detail = str(exc)
-            continue
-        code = int(payload.get("Code") or payload.get("code") or 0)
-        data = payload.get("Data") or payload.get("data") or {}
-        if not isinstance(data, dict):
-            data = {}
-        user_id = str(
-            data.get("UserId")
-            or data.get("userId")
-            or data.get("Id")
-            or data.get("id")
-            or ""
-        ).strip()
-        nickname = str(
-            data.get("NickName")
-            or data.get("nickName")
-            or data.get("Nickname")
-            or data.get("nickname")
-            or data.get("UserName")
-            or data.get("userName")
-            or ""
-        ).strip()
-        if code == 0 and user_id and nickname:
-            return _validation_result(
-                "yyyp",
-                ok=True,
-                message="悠悠有品登录有效",
-                account_name=nickname,
-                user_id=user_id,
-            )
-        last_detail = str(
-            payload.get("Msg")
-            or payload.get("msg")
-            or last_detail
-            or "登录凭证无效"
-        )
-        # Wrong casing / path: try the alternate endpoint.
-        if code != 0:
-            continue
-        if not user_id or not nickname:
-            last_detail = "未返回用户 ID/昵称"
-            continue
-    return _validation_result(
-        "yyyp",
-        ok=False,
-        message=f"悠悠有品登录已失效：{last_detail}",
+    result = _probe_youpin_collection_login(token, cookie, timeout=timeout)
+    return _enrich_youpin_account_name(
+        result,
+        token,
+        cookie,
+        timeout=timeout,
+        quick=quick,
     )
 
 
@@ -817,113 +1253,16 @@ def validate_c5_credentials(
     timeout: float = 12.0,
     quick: bool = False,
 ) -> dict[str, Any]:
+    """Validate C5 credentials using the same listing APIs as collection."""
     cookie = str(cookie or "").strip()
     token = _c5_effective_token(cookie, token)
-    if not token and not _cookie_looks_authenticated(
-        cookie, ("nc5_accesstoken", "c5token", "access_token", "ncaccess", "token")
-    ):
-        return _validation_result(
-            "c5",
-            ok=False,
-            message="未捕获到 C5GAME 登录凭证",
-        )
-    headers = {
-        "User-Agent": _UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Encoding": _C5_ACCEPT_ENCODING,
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Origin": "https://www.c5game.com",
-        "Referer": "https://www.c5game.com/user-center/user",
-    }
-    if cookie:
-        headers["Cookie"] = cookie
-    if token:
-        headers["x-access-token"] = token
-    last_detail = "暂时无法确认登录状态"
-    saw_rate_limit = False
-    saw_network = False
-    apis = _C5_USER_CHECK_APIS[:1] if quick else _C5_USER_CHECK_APIS
-    for url in apis:
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            saw_network = True
-            last_detail = str(exc)
-            continue
-        if response.status_code == 429:
-            saw_rate_limit = True
-            continue
-        text = response.text or ""
-        try:
-            payload = response.json() if text else {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        error_code = str(payload.get("errorCode") or payload.get("code") or "")
-        error_msg = str(payload.get("errorMsg") or payload.get("msg") or "")
-        risk_rejected = any(
-            marker in error_msg for marker in ("虚拟设备", "异常网络", "高频", "风险")
-        )
-        if risk_rejected:
-            last_detail = error_msg
-            continue
-        if (
-            response.status_code in {401, 403}
-            or error_code in {"101", "401", "403"}
-            or _response_indicates_login_required(payload, text)
-        ):
-            return _validation_result(
-                "c5",
-                ok=False,
-                message="C5GAME 登录已失效，请重新登录",
-            )
-        if response.status_code >= 400:
-            last_detail = f"HTTP {response.status_code}"
-            continue
-        nickname, user_id = _extract_account_fields(payload)
-        success = False
-        if payload.get("success") is True:
-            success = True
-        if payload.get("success") is False:
-            success = False
-        elif error_code in {"0", ""}:
-            success = True
-        data = payload.get("data")
-        if data not in (None, "", [], {}):
-            success = True
-        if success or (response.status_code == 200 and error_code in {"0", ""}):
-            return _validation_result(
-                "c5",
-                ok=True,
-                message="C5GAME 登录有效",
-                account_name=nickname,
-                user_id=user_id,
-            )
-        last_detail = str(payload.get("errorMsg") or last_detail)
-    if saw_rate_limit:
-        return _validation_result(
-            "c5",
-            ok=False,
-            indeterminate=True,
-            message="C5GAME 正在限流，暂时无法确认",
-        )
-    if saw_network:
-        return _validation_result(
-            "c5",
-            ok=False,
-            indeterminate=True,
-            message=f"C5GAME 校验请求失败：{last_detail}",
-        )
-    return _validation_result(
-        "c5",
-        ok=False,
-        indeterminate=True,
-        message=f"C5GAME 暂时无法确认：{last_detail}",
+    result = _probe_c5_collection_login(cookie, token, timeout=timeout)
+    return _enrich_c5_account_name(
+        result,
+        cookie,
+        token,
+        timeout=timeout,
+        quick=quick,
     )
 
 
@@ -1012,14 +1351,6 @@ def validate_c5_openapi_credentials(
 
 def _validate_c5_login(*, timeout: float) -> dict[str, Any]:
     cookie, token = _c5_auth()
-    if not token and not _cookie_looks_authenticated(
-        cookie, ("c5token", "access_token", "ncaccess", "token")
-    ):
-        return _validation_result(
-            "c5",
-            ok=False,
-            message="APP 未获取 C5GAME 登录凭证",
-        )
     return validate_c5_credentials(cookie, token, timeout=timeout)
 
 
@@ -1039,143 +1370,21 @@ def validate_eco_credentials(
     timeout: float = 12.0,
     quick: bool = False,
 ) -> dict[str, Any]:
+    """Validate ECO credentials using the same SellGoodsQuery API as collection."""
     token = str(token or "").strip()
     cookie = str(cookie or "").strip()
-    if not token and not _cookie_looks_authenticated(
-        cookie, ("token", "authorization", "eco_token", "access_token")
-    ):
-        return _validation_result(
-            "eco",
-            ok=False,
-            message="未捕获到 ECOSteam 登录凭证",
-        )
-    headers = {
-        "User-Agent": _UA,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Origin": "https://www.ecosteam.cn",
-        "Referer": "https://www.ecosteam.cn/",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    if cookie:
-        headers["Cookie"] = cookie
-    last_detail = "暂时无法确认登录状态"
-    saw_rate_limit = False
-    saw_network = False
-    apis = _ECO_USER_INFO_APIS[:1] if quick else _ECO_USER_INFO_APIS
-    for url in apis:
-        try:
-            # ECO GetUserInfo is GET-only; POST returns HTTP 405.
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            saw_network = True
-            last_detail = str(exc)
-            continue
-        if response.status_code == 429:
-            saw_rate_limit = True
-            continue
-        if response.status_code == 405:
-            last_detail = "HTTP 405"
-            continue
-        text = response.text or ""
-        try:
-            payload = response.json() if text else {}
-        except ValueError:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if response.status_code in {401, 403} or _response_indicates_login_required(
-            payload, text
-        ):
-            return _validation_result(
-                "eco",
-                ok=False,
-                message="ECOSteam 登录已失效，请重新登录",
-            )
-        if response.status_code >= 400:
-            last_detail = f"HTTP {response.status_code}"
-            continue
-        body = _eco_result_payload(payload)
-        nickname, user_id = _extract_account_fields(body)
-        if not nickname and not user_id:
-            nickname, user_id = _extract_account_fields(payload)
-        result_code = str(
-            body.get("ResultCode")
-            or body.get("resultCode")
-            or payload.get("ResultCode")
-            or payload.get("resultCode")
-            or payload.get("StatusCode")
-            or payload.get("code")
-            or ""
-        )
-        result_msg = str(
-            body.get("ResultMsg")
-            or body.get("resultMsg")
-            or payload.get("StatusMsg")
-            or payload.get("Msg")
-            or ""
-        )
-        success_flag = body.get("success")
-        if success_flag is None:
-            success_flag = payload.get("success")
-        if result_code in {"4001", "401", "403"} or "未登录" in result_msg:
-            return _validation_result(
-                "eco",
-                ok=False,
-                message="ECOSteam 登录已失效，请重新登录",
-            )
-        if success_flag is False and result_code not in {"", "0", "200", "OK", "ok"}:
-            last_detail = result_msg or result_code or last_detail
-            continue
-        if result_code not in {"", "0", "200", "OK", "ok"} and not (nickname or user_id):
-            last_detail = result_msg or result_code or last_detail
-            continue
-        if nickname or user_id or result_code in {"0", "200", "OK", "ok"}:
-            return _validation_result(
-                "eco",
-                ok=True,
-                message="ECOSteam 登录有效",
-                account_name=nickname,
-                user_id=user_id,
-            )
-        last_detail = result_msg or last_detail
-    if saw_rate_limit:
-        return _validation_result(
-            "eco",
-            ok=False,
-            indeterminate=True,
-            message="ECOSteam 正在限流，暂时无法确认",
-        )
-    if saw_network:
-        return _validation_result(
-            "eco",
-            ok=False,
-            indeterminate=True,
-            message=f"ECOSteam 校验请求失败：{last_detail}",
-        )
-    return _validation_result(
-        "eco",
-        ok=False,
-        indeterminate=True,
-        message=f"ECOSteam 暂时无法确认：{last_detail}",
+    result = _probe_eco_collection_login(token, cookie, timeout=timeout)
+    return _enrich_eco_account_name(
+        result,
+        token,
+        cookie,
+        timeout=timeout,
+        quick=quick,
     )
 
 
 def _validate_eco_login(*, timeout: float) -> dict[str, Any]:
     token, cookie = _eco_auth()
-    if not token and not _cookie_looks_authenticated(
-        cookie, ("token", "authorization", "eco_token", "access_token")
-    ):
-        return _validation_result(
-            "eco",
-            ok=False,
-            message="APP 未获取 ECOSteam 登录凭证",
-        )
     return validate_eco_credentials(token, cookie, timeout=timeout)
 
 
@@ -1555,19 +1764,18 @@ def fetch_buff_candidates(
         goods_id: int,
         window_low: float,
         window_high: float,
+        *,
+        window_kept: list[int],
     ) -> None:
         nonlocal request_no
-        min_paintwear = f"{float(window_low):.9f}".rstrip("0").rstrip(".")
-        # Collection ranges use an open right edge below 1.0. BUFF treats
-        # max_paintwear as inclusive, so pull it back by one nanounit.
-        buff_max_wear = (
-            max(float(window_low), float(window_high) - 1e-9)
-            if float(window_high) < 1.0
-            else float(window_high)
+        min_paintwear, max_paintwear = _buff_sell_order_paintwear_params(
+            window_low,
+            window_high,
         )
-        max_paintwear = f"{buff_max_wear:.9f}".rstrip("0").rstrip(".")
         for page in range(1, page_limit + 1):
             raise_if_cancelled(cancel_check)
+            if _collection_window_row_limit_reached(window_kept[0]):
+                break
             if request_no:
                 interruptible_wait(max(1.0, request_interval), cancel_check)
             request_no += 1
@@ -1583,7 +1791,8 @@ def fetch_buff_candidates(
                     "game": "csgo",
                     "goods_id": goods_id,
                     "page_num": page,
-                    "sort_by": "default",
+                    "page_size": _BUFF_SELL_ORDER_PAGE_SIZE,
+                    "sort_by": _BUFF_SELL_ORDER_SORT_BY,
                     "min_paintwear": min_paintwear,
                     "max_paintwear": max_paintwear,
                 },
@@ -1605,6 +1814,8 @@ def fetch_buff_candidates(
             page_hit_cap = False
             page_kept = 0
             for item in items:
+                if _collection_window_row_limit_reached(window_kept[0]):
+                    break
                 raw_wear = (item.get("asset_info") or {}).get("paintwear")
                 try:
                     wear = float(raw_wear)
@@ -1626,6 +1837,7 @@ def fetch_buff_candidates(
                     continue
                 seen_listing_ids.add(dedupe_key)
                 page_kept += 1
+                window_kept[0] += 1
                 out.append(
                     {
                         "goods_name": display_name,
@@ -1647,6 +1859,13 @@ def fetch_buff_candidates(
                         f"BUFF · {display_name} · 已超过配方单价 2 倍，停止本窗翻页"
                     )
                 break
+            if _collection_window_row_limit_reached(window_kept[0]):
+                if progress:
+                    progress(
+                        f"BUFF · {display_name} · 本磨损区间已满 "
+                        f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
+                    )
+                break
             try:
                 total_page = int(data.get("total_page") or 0)
             except (TypeError, ValueError):
@@ -1656,6 +1875,7 @@ def fetch_buff_candidates(
 
     for window_low, window_high in wear_windows:
         raise_if_cancelled(cancel_check)
+        window_kept = [0]
         ids = _merge_platform_ids(
             template.buff,
             window_low,
@@ -1663,7 +1883,14 @@ def fetch_buff_candidates(
             extra_ids,
         )
         for goods_id in ids:
-            collect_window(goods_id, window_low, window_high)
+            if _collection_window_row_limit_reached(window_kept[0]):
+                break
+            collect_window(
+                goods_id,
+                window_low,
+                window_high,
+                window_kept=window_kept,
+            )
     return out
 
 
@@ -1711,10 +1938,14 @@ def fetch_youpin_candidates(
         template_id: int,
         window_low: float,
         window_high: float,
+        *,
+        window_kept: list[int],
     ) -> None:
         nonlocal request_no
         for page in range(1, page_limit + 1):
             raise_if_cancelled(cancel_check)
+            if _collection_window_row_limit_reached(window_kept[0]):
+                break
             if request_no:
                 interruptible_wait(max(1.0, request_interval), cancel_check)
             request_no += 1
@@ -1756,10 +1987,11 @@ def fetch_youpin_candidates(
             page_hit_cap = False
             page_kept = 0
             for item in items:
-                try:
-                    wear = float(item.get("Abrade"))
-                    price = float(item.get("Price"))
-                except (TypeError, ValueError):
+                if _collection_window_row_limit_reached(window_kept[0]):
+                    break
+                wear = _extract_listing_wear(item)
+                price = _extract_listing_price(item)
+                if wear is None or price is None:
                     continue
                 if (
                     price <= 0
@@ -1776,6 +2008,7 @@ def fetch_youpin_candidates(
                     continue
                 seen_listing_ids.add(dedupe_key)
                 page_kept += 1
+                window_kept[0] += 1
                 out.append(
                     {
                         "goods_name": display_name,
@@ -1791,17 +2024,35 @@ def fetch_youpin_candidates(
                         ),
                     }
                 )
+            # Price-asc pages: once the page is entirely above the recipe cap, stop.
+            # Do not stop merely because page_kept==0 (wear/parse filters); that
+            # incorrectly aborts when the first page is all out-of-window.
             if price_cap is not None and page_hit_cap and page_kept == 0:
                 if progress:
                     progress(
                         f"悠悠有品 · {display_name} · 已超过配方单价 2 倍，停止本窗翻页"
                     )
                 break
-            if len(items) < page_size or page_kept == 0:
+            if _collection_window_row_limit_reached(window_kept[0]):
+                if progress:
+                    progress(
+                        f"悠悠有品 · {display_name} · 本磨损区间已满 "
+                        f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
+                    )
+                break
+            if len(items) < page_size:
                 break
 
-    for window_low, window_high in wear_windows:
+    for window_index, (window_low, window_high) in enumerate(wear_windows):
         raise_if_cancelled(cancel_check)
+        if window_index > 0:
+            if progress:
+                progress(
+                    f"悠悠有品 · {display_name} · 换磨损区间前等待 "
+                    f"{max(1.0, request_interval):g} 秒"
+                )
+            interruptible_wait(max(1.0, request_interval), cancel_check)
+        window_kept = [0]
         ids = _merge_platform_ids(
             template.yyyp,
             window_low,
@@ -1809,7 +2060,14 @@ def fetch_youpin_candidates(
             extra_ids,
         )
         for template_id in ids:
-            collect_window(template_id, window_low, window_high)
+            if _collection_window_row_limit_reached(window_kept[0]):
+                break
+            collect_window(
+                template_id,
+                window_low,
+                window_high,
+                window_kept=window_kept,
+            )
     return out
 
 
@@ -1884,8 +2142,9 @@ def _rows_from_c5_payload(
         marker in error_msg for marker in ("虚拟设备", "异常网络", "高频", "风险")
     )
     if risk_rejected:
-        raise RuntimeError(
-            f"C5GAME 风控拒绝了当前采集环境：{error_msg}。请重新登录 C5GAME 后再试"
+        raise C5AccessGateError(
+            f"C5GAME 风控拒绝了当前采集环境：{error_msg}",
+            needs_verify=True,
         )
     if error_code in {"101", "401", "403"} or _response_indicates_login_required(
         payload, ""
@@ -1951,11 +2210,12 @@ def _rows_from_eco_payload(
     if result_code in {"4001", "401", "403"} or "未登录" in result_msg:
         raise RuntimeError("ECOSteam 登录已失效，请重新登录后再采集")
     if result_code == "429":
-        # Access gate / slider — caller opens a headed verification window
-        # (also during silent collection).
-        raise RuntimeError(
-            "ECOSteam 触发了访问校验（滑块），正在打开验证窗口，"
-            "请在弹出窗口完成验证后继续采集"
+        needs_slider = _eco_message_has_slider_signal(result_msg)
+        raise EcoAccessGateError(
+            "ECOSteam 触发了访问校验（429），请稍后重试或完成滑块验证"
+            + (f"：{result_msg}" if result_msg else ""),
+            result_msg=result_msg,
+            needs_slider=needs_slider,
         )
     if "商品不存在" in result_msg or result_code in {"404", "4004"}:
         raise RuntimeError(f"ECOSteam 商品不存在（GoodsId={goods_id}）")
@@ -2207,6 +2467,8 @@ def _fetch_c5_via_napi(
         headers = _c5_napi_headers(item_id=item_id, cookie=cookie, token=token)
         for page in range(1, _effective_page_limit(max_pages) + 1):
             raise_if_cancelled(cancel_check)
+            if _collection_window_row_limit_reached(len(out)):
+                break
             if request_no:
                 interruptible_wait(max(1.0, request_interval), cancel_check)
             request_no += 1
@@ -2217,7 +2479,8 @@ def _fetch_c5_via_napi(
                 params={
                     "itemId": item_id,
                     "page": page,
-                    "limit": 20,
+                    "limit": _C5_SELL_LIST_PAGE_SIZE,
+                    "orderBy": _C5_SELL_LIST_ORDER_BY_PRICE_ASC,
                     "minWear": f"{min_wear:.8f}",
                     "maxWear": f"{max_wear:.8f}",
                 },
@@ -2254,14 +2517,69 @@ def _fetch_c5_via_napi(
                     if float(row.get("price") or 0) <= price_cap
                 ]
                 hit_cap = len(kept) < len(rows)
-                out.extend(kept)
+                room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                out.extend(kept[:room])
                 if hit_cap and not kept:
                     break
             else:
-                out.extend(rows)
+                room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                out.extend(rows[:room])
+            if _collection_window_row_limit_reached(len(out)):
+                break
             if not _iter_listing_rows(payload):
                 break
+        if _collection_window_row_limit_reached(len(out)):
+            break
     return out
+
+
+_C5_SIGNER_TLS = threading.local()
+
+
+@contextmanager
+def c5_signer_collection_scope() -> Iterator[None]:
+    """Reuse one ``C5WebSigner`` for all search-api calls in the current thread."""
+    if getattr(_C5_SIGNER_TLS, "active", False):
+        yield
+        return
+    _C5_SIGNER_TLS.active = True
+    _C5_SIGNER_TLS.signer = None
+    try:
+        yield
+    finally:
+        signer = getattr(_C5_SIGNER_TLS, "signer", None)
+        _C5_SIGNER_TLS.signer = None
+        _C5_SIGNER_TLS.active = False
+        if signer is not None:
+            signer.close()
+
+
+def _acquire_c5_signer(device_id: str) -> tuple[Any | None, bool]:
+    """Return ``(signer, owns_lifecycle)`` for one search-api collection batch."""
+    if not device_id:
+        return None, False
+    if getattr(_C5_SIGNER_TLS, "active", False):
+        signer = getattr(_C5_SIGNER_TLS, "signer", None)
+        if signer is None:
+            from core.c5_web_signer import C5WebSigner
+
+            signer = C5WebSigner()
+            try:
+                signer.__enter__()
+            except Exception:
+                signer.close()
+                raise
+            _C5_SIGNER_TLS.signer = signer
+        return signer, False
+    from core.c5_web_signer import C5WebSigner
+
+    signer = C5WebSigner()
+    try:
+        signer.__enter__()
+    except Exception:
+        signer.close()
+        raise
+    return signer, True
 
 
 def _fetch_c5_via_search_api(
@@ -2288,21 +2606,14 @@ def _fetch_c5_via_search_api(
         if max_unit_price is not None and float(max_unit_price) > 0
         else None
     )
-    signer = None
-    if device_id:
-        from core.c5_web_signer import C5WebSigner
-
-        signer = C5WebSigner()
-        try:
-            signer.__enter__()
-        except Exception:
-            signer.close()
-            raise
+    signer, owns_signer = _acquire_c5_signer(device_id)
     try:
         for item_id in ids:
             pathname = f"/search/v2/sell/{item_id}/list"
             for page in range(1, _effective_page_limit(max_pages) + 1):
                 raise_if_cancelled(cancel_check)
+                if _collection_window_row_limit_reached(len(out)):
+                    break
                 if request_no:
                     interruptible_wait(max(1.0, request_interval), cancel_check)
                 timestamp_ms = str(int(time.time() * 1000))
@@ -2329,7 +2640,8 @@ def _fetch_c5_via_search_api(
                     params={
                         "itemId": item_id,
                         "page": page,
-                        "limit": 20,
+                        "limit": _C5_SELL_LIST_PAGE_SIZE,
+                        "orderBy": _C5_SELL_LIST_ORDER_BY_PRICE_ASC,
                         "minWear": f"{min_wear:.8f}",
                         "maxWear": f"{max_wear:.8f}",
                     },
@@ -2371,20 +2683,26 @@ def _fetch_c5_via_search_api(
                         if float(row.get("price") or 0) <= price_cap
                     ]
                     hit_cap = len(kept) < len(rows)
-                    out.extend(kept)
+                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    out.extend(kept[:room])
                     if hit_cap and not kept:
                         break
                 else:
-                    out.extend(rows)
+                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    out.extend(rows[:room])
+                if _collection_window_row_limit_reached(len(out)):
+                    break
                 if not _iter_listing_rows(payload):
                     break
+            if _collection_window_row_limit_reached(len(out)):
+                break
     finally:
-        if signer is not None:
+        if signer is not None and owns_signer:
             signer.close()
     return out
 
 
-def _fetch_c5_via_access_session(
+def _fetch_c5_via_browser(
     *,
     ids: list[int],
     display_name: str,
@@ -2392,38 +2710,77 @@ def _fetch_c5_via_access_session(
     max_wear: float,
     max_pages: int,
     request_interval: float,
+    cookie: str = "",
+    token: str = "",
     progress: Callable[[str], None] | None = None,
     cancel_check: CancelCheck = None,
+    max_unit_price: float | None = None,
 ) -> list[dict[str, Any]]:
-    from core.market_access_session import get_access_session
+    """Collect via minimized system Chrome/Edge sniffing the sell-list XHR.
 
-    session = get_access_session("c5")
+    Risk / verify / hard failures pause C5 for this run immediately — no retry.
+    """
+    from core.c5_browser_collect import get_c5_browser_collector
+
+    del cookie, token  # Session injects saved login cookies itself.
+    price_cap = (
+        float(max_unit_price)
+        if max_unit_price is not None and float(max_unit_price) > 0
+        else None
+    )
+    collector = get_c5_browser_collector()
+    collector.ensure_open(progress=progress, cancel_check=cancel_check)
     out: list[dict[str, Any]] = []
-    for index, item_id in enumerate(ids):
-        for page in range(1, _effective_page_limit(max_pages) + 1):
-            raise_if_cancelled(cancel_check)
-            if index or page > 1:
-                interruptible_wait(max(1.0, request_interval), cancel_check)
-            payload = session.fetch_c5_list(
-                item_id=item_id,
-                min_wear=min_wear,
-                max_wear=max_wear,
-                page_no=page,
-                progress=progress,
-                display_name=display_name,
-                cancel_check=cancel_check,
-            )
-            out.extend(
-                _rows_from_c5_payload(
+    request_no = 0
+    try:
+        for item_id in ids:
+            for page in range(1, _effective_page_limit(max_pages) + 1):
+                raise_if_cancelled(cancel_check)
+                if _collection_window_row_limit_reached(len(out)):
+                    break
+                if request_no:
+                    interruptible_wait(max(1.0, request_interval), cancel_check)
+                request_no += 1
+                payload = collector.fetch_list_payload(
+                    item_id=int(item_id),
+                    min_wear=min_wear,
+                    max_wear=max_wear,
+                    page_no=page,
+                    display_name=display_name,
+                    progress=progress,
+                    cancel_check=cancel_check,
+                )
+                rows = _rows_from_c5_payload(
                     payload=payload,
                     item_id=item_id,
                     display_name=display_name,
                     min_wear=min_wear,
                     max_wear=max_wear,
                 )
-            )
-            if not _iter_listing_rows(payload):
+                if price_cap is not None:
+                    kept = [
+                        row
+                        for row in rows
+                        if float(row.get("price") or 0) <= price_cap
+                    ]
+                    hit_cap = len(kept) < len(rows)
+                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    out.extend(kept[:room])
+                    if hit_cap and not kept:
+                        break
+                else:
+                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    out.extend(rows[:room])
+                if _collection_window_row_limit_reached(len(out)):
+                    break
+                if not _iter_listing_rows(payload):
+                    break
+            if _collection_window_row_limit_reached(len(out)):
                 break
+    except C5AccessGateError as exc:
+        raise C5PlatformPausedError(
+            f"C5GAME 采集失败，本轮已停止该平台：{exc}"
+        ) from exc
     return out
 
 
@@ -2440,11 +2797,9 @@ def fetch_c5_candidates(
     cancel_check: CancelCheck = None,
     max_unit_price: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect C5 exact-wear listings for end users via website login cookies.
+    """Collect C5 exact-wear listings via minimized system-browser sniffing.
 
-    Order: current same-origin search API → legacy napi fallback.
-    Official OpenAPI is not used here (IP whitelist cannot ship to download users).
-    Wear ranges are split on MID buckets, same as Youpin/BUFF/ECO.
+    On failure / risk-control, pause C5 for the rest of this run with no retry.
     """
     wear_windows = _split_wear_windows(min_wear, max_wear)
     raise_if_cancelled(cancel_check)
@@ -2455,111 +2810,264 @@ def fetch_c5_candidates(
     cookie, token = _c5_auth()
     if not cookie and not token:
         raise RuntimeError("C5GAME 登录已失效，请重新登录后再采集")
-    # Drop any previously saved App-Version that would make sell list return 102.
-    try:
-        clear_c5_app_version()
-    except Exception:
-        pass
     price_cap = (
         float(max_unit_price)
         if max_unit_price is not None and float(max_unit_price) > 0
         else None
     )
 
-    def _login_really_dead() -> bool:
-        """Only trust user-check APIs for hard logout — sell HTML/102 is not logout."""
-        checked = validate_c5_credentials(cookie, token, timeout=4.0, quick=True)
-        return bool(not checked.get("ok") and not checked.get("indeterminate"))
-
-    def _collect_windows(
-        fetcher: Callable[..., list[dict[str, Any]]],
-        *,
-        stage_label: str,
-    ) -> list[dict[str, Any]]:
-        collected: list[dict[str, Any]] = []
-        seen_listing_ids: set[str] = set()
-        for window_low, window_high in wear_windows:
-            raise_if_cancelled(cancel_check)
-            ids = _merge_platform_ids(
-                template.c5,
-                window_low,
-                window_high,
-                extra_ids,
-            )
-            if not ids:
+    collected: list[dict[str, Any]] = []
+    seen_listing_ids: set[str] = set()
+    for window_low, window_high in wear_windows:
+        raise_if_cancelled(cancel_check)
+        ids = _merge_platform_ids(
+            template.c5,
+            window_low,
+            window_high,
+            extra_ids,
+        )
+        if not ids:
+            continue
+        if progress:
+            progress(f"C5GAME · 磨损 {window_low:g}–{window_high:g}")
+        rows = _fetch_c5_via_browser(
+            ids=ids,
+            display_name=display_name,
+            min_wear=window_low,
+            max_wear=window_high,
+            max_pages=max_pages,
+            request_interval=request_interval,
+            cookie=cookie,
+            token=token,
+            progress=progress,
+            cancel_check=cancel_check,
+            max_unit_price=price_cap,
+        )
+        window_kept = 0
+        for row in rows:
+            if not _in_range(float(row.get("float_value") or -1), min_wear, max_wear):
                 continue
+            if price_cap is not None and float(row.get("price") or 0) > price_cap:
+                continue
+            listing_id = str(row.get("listing_id") or "")
+            dedupe_key = listing_id or str(row.get("goods_id") or "")
+            if not dedupe_key or dedupe_key in seen_listing_ids:
+                continue
+            if _collection_window_row_limit_reached(window_kept):
+                break
+            seen_listing_ids.add(dedupe_key)
+            collected.append(row)
+            window_kept += 1
+        if _collection_window_row_limit_reached(window_kept) and progress:
+            progress(
+                f"C5GAME · {display_name} · 本磨损区间已满 "
+                f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
+            )
+    return collected
+
+
+def _c5_message_has_verify_signal(text: str) -> bool:
+    """True when C5 error text clearly indicates human / security verification."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    return any(
+        marker in raw or marker in low
+        for marker in (
+            "风控",
+            "虚拟设备",
+            "异常网络",
+            "高频",
+            "风险",
+            "滑块",
+            "安全验证",
+            "安全检查",
+            "人机",
+            "验证码",
+            "captcha",
+            "slider",
+            "访问校验",
+            "请完成验证",
+        )
+    )
+
+
+def _c5_error_needs_verify(exc: BaseException | None) -> bool:
+    if isinstance(exc, C5AccessGateError):
+        return bool(exc.needs_verify) or _c5_message_has_verify_signal(str(exc))
+    return _c5_message_has_verify_signal(str(exc or ""))
+
+
+def _c5_is_access_gate_error(exc: BaseException) -> bool:
+    if isinstance(exc, (C5AccessGateError, C5PlatformPausedError)):
+        return True
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in (
+            "暂时不可用",
+            "风控",
+            "频率",
+            "429",
+            "滑块",
+            "安全验证",
+            "napi 不可用",
+            "网页接口",
+        )
+    )
+
+
+def _c5_access_gate_probe_ok() -> bool:
+    """True when the same listing probe used by login validation succeeds."""
+    try:
+        cookie, token = _c5_auth()
+        result = _probe_c5_collection_login(cookie, token, timeout=8.0)
+        return bool(result.get("ok"))
+    except Exception:
+        return False
+
+
+def _c5_cookie_header_from_items(cookies: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if name and value:
+            parts.append(f"{name}={value}")
+    return "; ".join(parts)
+
+
+def _complete_c5_verify_system_browser(
+    *,
+    progress: Callable[[str], None] | None = None,
+    cancel_check: CancelCheck = None,
+) -> None:
+    """Open a real Chrome/Edge window (not Playwright) for C5 security checks."""
+    from core.market_external_browser import (
+        harvest_profile_cookies,
+        launch_system_browser,
+        wait_browser_closed,
+    )
+
+    raise_if_cancelled(cancel_check)
+    profile = CACHE_DIR / "market_browser_profiles" / "c5"
+    profile.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress(
+            "C5GAME · 检测到安全验证，已打开系统浏览器；"
+            "请完成验证，完成后窗口将自动关闭…"
+        )
+    try:
+        proc = launch_system_browser(
+            profile_dir=profile,
+            url="https://www.c5game.com/",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise C5PlatformPausedError(f"无法打开 C5 验证窗口：{exc}") from exc
+
+    def _auto_close() -> bool:
+        raise_if_cancelled(cancel_check)
+        return _c5_access_gate_probe_ok()
+
+    closed = wait_browser_closed(
+        proc,
+        timeout_s=300.0,
+        progress=progress,
+        progress_message="请在 C5 页面完成安全验证（滑块等）；完成后会自动继续采集…",
+        auto_close_when=_auto_close,
+        auto_close_message="已检测到 C5 接口恢复，正在关闭验证窗口…",
+    )
+    if not closed:
+        raise C5PlatformPausedError("等待 C5 安全验证超时")
+    time.sleep(1.0)
+    try:
+        cookies = harvest_profile_cookies(
+            profile,
+            domain_hints=("c5game.com", "zbt.com"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("C5 验证后读取 Cookie 失败：%s", exc)
+        return
+    cookie = _c5_cookie_header_from_items(cookies)
+    token = ""
+    for item in cookies:
+        name = str(item.get("name") or "").strip().lower()
+        value = str(item.get("value") or "").strip()
+        if name in {
+            "nc5_accesstoken",
+            "c5token",
+            "access_token",
+            "ncaccess",
+            "token",
+            "authorization",
+        } and len(value) > len(token):
+            token = value
+    if cookie or token:
+        try:
+            save_c5_auth(cookie, token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("C5 验证后保存凭证失败：%s", exc)
+
+
+def _resolve_c5_access_gate(
+    *,
+    progress: Callable[[str], None] | None = None,
+    cancel_check: CancelCheck = None,
+    request_interval: float = 5.0,
+    gate_error: BaseException | None = None,
+) -> None:
+    """Clear C5 access limits without unnecessary popups.
+
+    - Clear verify signal → system-browser window, wait for user, auto-close.
+    - Otherwise → silent wait/retry up to 2 rounds; still blocked → pause platform.
+    """
+    interval = max(5.0, float(request_interval or 5.0))
+    silent_rounds = 2
+    needs_verify = _c5_error_needs_verify(gate_error)
+
+    def _silent_wait_rounds() -> bool:
+        for round_i in range(1, silent_rounds + 1):
+            raise_if_cancelled(cancel_check)
+            if _c5_access_gate_probe_ok():
+                if progress:
+                    progress("C5GAME · 访问限制已解除，继续静默采集…")
+                return True
             if progress:
                 progress(
-                    f"{stage_label} · 磨损 {window_low:g}–{window_high:g}"
+                    f"C5GAME · 接口暂时不可用，后台等待 {interval:.0f}s 后重试"
+                    f"（{round_i}/{silent_rounds}）…"
                 )
-            rows = fetcher(
-                ids=ids,
-                display_name=display_name,
-                min_wear=window_low,
-                max_wear=window_high,
-                max_pages=max_pages,
-                request_interval=request_interval,
-                cookie=cookie,
-                token=token,
-                progress=progress,
-                cancel_check=cancel_check,
-                max_unit_price=price_cap,
-            )
-            for row in rows:
-                if not _in_range(float(row.get("float_value") or -1), min_wear, max_wear):
-                    continue
-                if price_cap is not None and float(row.get("price") or 0) > price_cap:
-                    continue
-                listing_id = str(row.get("listing_id") or "")
-                dedupe_key = listing_id or str(row.get("goods_id") or "")
-                if not dedupe_key or dedupe_key in seen_listing_ids:
-                    continue
-                seen_listing_ids.add(dedupe_key)
-                collected.append(row)
-        return collected
+            interruptible_wait(interval, cancel_check)
+        return _c5_access_gate_probe_ok()
 
-    errors: list[str] = []
-    # 1) Current C5 website same-origin sell list with captured client markers.
-    try:
-        if progress:
-            progress("C5GAME · 网页接口采集…")
-        rows = _collect_windows(
-            _fetch_c5_via_search_api,
-            stage_label="C5GAME · 网页接口",
+    if needs_verify:
+        _complete_c5_verify_system_browser(
+            progress=progress,
+            cancel_check=cancel_check,
         )
-        if rows:
-            return rows
-    except CollectionCancelled:
-        raise
-    except (RuntimeError, requests.RequestException) as exc:
-        text = str(exc)
-        errors.append(text)
-        if "登录已失效" in text and _login_really_dead():
-            raise
-
-    # 2) Legacy website napi fallback for short C5 outages.
-    try:
-        if progress:
-            progress("C5GAME · 备用接口采集…")
-        rows = _collect_windows(
-            _fetch_c5_via_napi,
-            stage_label="C5GAME · 备用接口",
+        if _c5_access_gate_probe_ok():
+            if progress:
+                progress("C5GAME · 安全验证通过，继续采集…")
+            return
+        logger.info("C5GAME 验证窗口结束后探针仍失败（此前：%s）", gate_error)
+        raise C5PlatformPausedError(
+            "C5GAME 安全验证后仍不可用，本轮已暂停该平台采集"
         )
-        if rows:
-            return rows
-    except CollectionCancelled:
-        raise
-    except (RuntimeError, requests.RequestException) as exc:
-        errors.append(str(exc))
 
-    # Headed Playwright windows hit C5 /console-ban；不再回落验证窗。
-    prior = "；".join(errors) if errors else "网页直连失败"
-    if _login_really_dead():
-        raise RuntimeError(f"C5GAME 登录已失效，请重新登录后再采集（此前：{prior}）")
-    raise RuntimeError(
-        "C5GAME 网页采集接口暂时不可用（登录仍有效）。"
-        "请点击“登录/打开”，在 C5 页面完成可能出现的安全验证后再试。"
-        f"（此前：{prior}）"
+    if _silent_wait_rounds():
+        return
+
+    logger.info(
+        "C5GAME 静默重试 %s 轮后仍受限（此前：%s），本轮暂停平台",
+        silent_rounds,
+        gate_error,
+    )
+    raise C5PlatformPausedError(
+        f"C5GAME 访问受限，已静默重试 {silent_rounds} 轮仍失败，"
+        "本轮已暂停该平台采集"
     )
 
 
@@ -2581,8 +3089,10 @@ def _eco_sell_query_body(
         "GameId": "730",
         "PageIndex": max(1, int(page)),
         "PageSize": max(1, min(100, int(page_size))),
+        # Live probe: SortType=1 + Sort=0 returns price ascending (page + across pages).
+        # Sort=1 is NOT price-asc and must not be used with 2.5× early-stop.
         "SortType": 1,
-        "Sort": 1,
+        "Sort": 0,
         "TradeType": 1,
         # Same wear field names as open-platform SellGoodsList.
         "StartPaintWear": float(min_wear),
@@ -2627,7 +3137,11 @@ def _post_eco_sell_query(
             last_error = exc
             continue
         if response.status_code == 429:
-            raise RuntimeError("ECOSteam 返回访问频率过高，已立即停止本平台采集")
+            raise EcoAccessGateError(
+                "ECOSteam 返回访问频率过高",
+                result_msg="频率过高",
+                needs_slider=False,
+            )
         if response.status_code in {401, 403}:
             raise RuntimeError("ECOSteam 登录已失效，请重新登录后再采集")
         if response.status_code == 404:
@@ -2656,8 +3170,154 @@ def _post_eco_sell_query(
 
 
 def _eco_is_access_gate_error(exc: BaseException) -> bool:
+    if isinstance(exc, (EcoAccessGateError, EcoPlatformPausedError)):
+        return True
     text = str(exc)
     return any(marker in text for marker in ("校验", "429", "滑块", "频率"))
+
+
+def _eco_message_has_slider_signal(text: str) -> bool:
+    """True when ECO response text clearly indicates a human slider challenge."""
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if any(
+        marker in low
+        for marker in (
+            "slider",
+            "frequent_slider",
+            "滑块",
+            "拖动",
+            "人机",
+            "captcha",
+        )
+    ):
+        return True
+    # GUID / challenge token (not a plain numeric code like 429).
+    if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", raw):
+        return True
+    if re.fullmatch(r"[0-9a-zA-Z_-]{12,}", raw) and not raw.isdigit():
+        return True
+    return False
+
+
+def _eco_gate_error_needs_slider(exc: BaseException | None) -> bool:
+    if isinstance(exc, EcoAccessGateError):
+        return bool(exc.needs_slider) or _eco_message_has_slider_signal(
+            exc.result_msg or str(exc)
+        )
+    return _eco_message_has_slider_signal(str(exc or ""))
+
+
+def _eco_payload_is_access_gate(payload: dict[str, Any]) -> bool:
+    body_payload = _eco_result_payload(payload)
+    result_code = str(
+        body_payload.get("ResultCode")
+        or body_payload.get("resultCode")
+        or payload.get("ResultCode")
+        or ""
+    )
+    return result_code == "429"
+
+
+def _eco_access_gate_probe_ok() -> bool:
+    """True when a SellGoodsQuery probe succeeds (gate / rate-limit cleared)."""
+    try:
+        token, cookie = _eco_auth()
+        payload = _post_eco_sell_query(
+            goods_id=_ECO_LOGIN_CHECK_GOODS_ID,
+            hash_name="",
+            min_wear=_LOGIN_CHECK_MIN_WEAR,
+            max_wear=_LOGIN_CHECK_MAX_WEAR,
+            page=1,
+            cookie=cookie,
+            token=token,
+        )
+        if not isinstance(payload, dict) or _eco_payload_is_access_gate(payload):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_eco_access_gate(
+    *,
+    progress: Callable[[str], None] | None = None,
+    cancel_check: CancelCheck = None,
+    request_interval: float = 3.0,
+    gate_error: BaseException | None = None,
+) -> None:
+    """Clear ECO access limits without unnecessary popups.
+
+    - Clear slider signal → open headed window, wait for user, auto-close.
+    - Otherwise → silent wait/retry up to 3 rounds; still blocked → pause platform.
+    """
+    interval = max(3.0, float(request_interval or 3.0))
+    silent_rounds = 3
+    needs_slider = _eco_gate_error_needs_slider(gate_error)
+
+    def _silent_wait_rounds(label: str) -> bool:
+        for round_i in range(1, silent_rounds + 1):
+            raise_if_cancelled(cancel_check)
+            if _eco_access_gate_probe_ok():
+                if progress:
+                    progress("ECOSteam · 访问限制已解除，继续静默采集…")
+                return True
+            if progress:
+                progress(
+                    f"ECOSteam · {label}，后台等待 {interval:.0f}s 后重试"
+                    f"（{round_i}/{silent_rounds}）…"
+                )
+            interruptible_wait(interval, cancel_check)
+        return _eco_access_gate_probe_ok()
+
+    if needs_slider:
+        if progress:
+            progress("ECOSteam · 检测到滑块验证，正在弹出验证窗口…")
+        from core.market_access_session import close_access_sessions, get_access_session
+
+        session = get_access_session("eco")
+        try:
+            raw = session.complete_eco_access_gate(
+                progress=progress,
+                cancel_check=cancel_check,
+                require_slider=True,
+            )
+            outcome = str(raw or "cleared")
+        except CollectionCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ECOSteam 滑块验证失败：%s", exc)
+            raise EcoPlatformPausedError(
+                f"ECOSteam 滑块验证未完成，本轮已暂停该平台采集：{exc}"
+            ) from exc
+        finally:
+            close_access_sessions("eco")
+        if outcome == "cleared" or _eco_access_gate_probe_ok():
+            if progress:
+                progress("ECOSteam · 滑块验证通过，继续采集…")
+            return
+        logger.info(
+            "ECOSteam 滑块窗口未通过（outcome=%s），本轮暂停平台",
+            outcome,
+        )
+        raise EcoPlatformPausedError(
+            "ECOSteam 滑块验证未通过，本轮已暂停该平台采集"
+        )
+
+    if _silent_wait_rounds("接口访问受限（无需滑块）"):
+        return
+
+    logger.info(
+        "ECOSteam 静默重试 %s 轮后仍受限（此前：%s），本轮暂停平台",
+        silent_rounds,
+        gate_error,
+    )
+    raise EcoPlatformPausedError(
+        f"ECOSteam 访问受限，已静默重试 {silent_rounds} 轮仍失败，"
+        "本轮已暂停该平台采集"
+    )
 
 
 def fetch_eco_candidates(
@@ -2672,12 +3332,41 @@ def fetch_eco_candidates(
     extra_ids: list[int] | None = None,
     cancel_check: CancelCheck = None,
     silent: bool = False,
+    max_unit_price: float | None = None,
 ) -> list[dict[str, Any]]:
     wear_windows = _split_wear_windows(min_wear, max_wear)
     if not wear_windows:
         return []
     token, cookie = _eco_auth()
     page_limit = _effective_page_limit(max_pages)
+    price_cap = (
+        float(max_unit_price)
+        if max_unit_price is not None and float(max_unit_price) > 0
+        else None
+    )
+
+    def _filter_window_rows(
+        page_rows: list[dict[str, Any]],
+        *,
+        window_low: float,
+        window_high: float,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Keep in-window rows under price_cap; second value is page_hit_cap."""
+        kept: list[dict[str, Any]] = []
+        page_hit_cap = False
+        for row in page_rows:
+            try:
+                wear = float(row.get("float_value") or -1)
+                price = float(row.get("price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not _in_range(wear, window_low, window_high):
+                continue
+            if price_cap is not None and price > price_cap:
+                page_hit_cap = True
+                continue
+            kept.append(row)
+        return kept, page_hit_cap
 
     def _collect_via_api(
         *,
@@ -2699,6 +3388,7 @@ def fetch_eco_candidates(
 
         for window_low, window_high in wear_windows:
             raise_if_cancelled(cancel_check)
+            window_start = len(collected)
             targets = _overlapping_steam_targets(template, window_low, window_high)
             if not targets:
                 for goods_id in _merge_platform_ids(
@@ -2710,9 +3400,17 @@ def fetch_eco_candidates(
                     targets.append(("", int(goods_id)))
             for hash_name, goods_id in targets:
                 raise_if_cancelled(cancel_check)
+                if _collection_window_row_limit_reached(
+                    len(collected) - window_start
+                ):
+                    break
                 skip_goods = False
                 for page in range(1, page_limit + 1):
                     raise_if_cancelled(cancel_check)
+                    if _collection_window_row_limit_reached(
+                        len(collected) - window_start
+                    ):
+                        break
                     if request_no:
                         interruptible_wait(max(1.0, request_interval), cancel_check)
                     request_no += 1
@@ -2752,16 +3450,37 @@ def fetch_eco_candidates(
                             skip_goods = True
                             break
                         raise
-                    page_rows = [
-                        row
-                        for row in page_rows
-                        if _in_range(
-                            float(row.get("float_value") or -1),
-                            window_low,
-                            window_high,
-                        )
-                    ]
-                    _append_rows(page_rows)
+                    page_rows, page_hit_cap = _filter_window_rows(
+                        page_rows,
+                        window_low=window_low,
+                        window_high=window_high,
+                    )
+                    room = max(
+                        0,
+                        _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+                        - (len(collected) - window_start),
+                    )
+                    before = len(collected)
+                    _append_rows(page_rows[:room])
+                    page_kept = len(collected) - before
+                    if _collection_window_row_limit_reached(
+                        len(collected) - window_start
+                    ):
+                        if progress:
+                            progress(
+                                f"ECOSteam · {display_name} · 本磨损区间已满 "
+                                f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
+                            )
+                        break
+                    # Price-asc pages: entire page above recipe cap → stop paging.
+                    if price_cap is not None and page_hit_cap and page_kept == 0:
+                        if progress:
+                            progress(
+                                f"ECOSteam · {display_name} · 已超过配方单价 "
+                                f"{_COLLECTION_ECO_PRICE_CAP_MULTIPLIER:g} 倍，"
+                                "停止本窗翻页"
+                            )
+                        break
                     if not _iter_listing_rows(payload):
                         break
                 if skip_goods:
@@ -2772,144 +3491,43 @@ def fetch_eco_candidates(
         return _collect_via_api(auth_token=token, auth_cookie=cookie)
     except CollectionCancelled:
         raise
+    except EcoPlatformPausedError:
+        raise
     except RuntimeError as exc:
         if not _eco_is_access_gate_error(exc):
             raise
         gate_error = exc
 
-    # One verification window, then resume API. Silent mode must not keep a
-    # headed browser open to scrape every goods page.
-    if progress:
-        progress(
-            "ECOSteam · 触发访问校验，正在弹出验证窗口"
-            "（完成后会关闭窗口并用接口继续采集）…"
-        )
-    from core.market_access_session import close_access_sessions, get_access_session
-
-    session = get_access_session("eco")
     try:
-        session.complete_eco_access_gate(
+        _resolve_eco_access_gate(
             progress=progress,
             cancel_check=cancel_check,
+            request_interval=request_interval,
+            gate_error=gate_error,
         )
     except CollectionCancelled:
         raise
+    except EcoPlatformPausedError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"{exc}（此前：{gate_error}）") from exc
-    finally:
-        close_access_sessions("eco")
+        raise EcoPlatformPausedError(
+            f"{exc}（此前：{gate_error}）"
+        ) from exc
 
     token, cookie = _eco_auth()
     try:
         return _collect_via_api(auth_token=token, auth_cookie=cookie)
     except CollectionCancelled:
         raise
-    except RuntimeError as exc:
-        if silent or not _eco_is_access_gate_error(exc):
-            raise RuntimeError(f"{exc}（此前：{gate_error}）") from exc
-        gate_error = exc
-
-    if progress:
-        progress("ECOSteam · 接口仍不可用，改用浏览器商品页采集…")
-    session = get_access_session("eco")
-    out: list[dict[str, Any]] = []
-    seen_listing_ids: set[str] = set()
-
-    def _append_rows(rows: list[dict[str, Any]]) -> None:
-        for row in rows:
-            listing_id = str(row.get("listing_id") or "")
-            dedupe_key = listing_id or str(row.get("goods_id") or "")
-            if not dedupe_key or dedupe_key in seen_listing_ids:
-                continue
-            seen_listing_ids.add(dedupe_key)
-            out.append(row)
-
-    try:
-        request_no = 0
-        for window_low, window_high in wear_windows:
-            targets = _overlapping_steam_targets(template, window_low, window_high)
-            if not targets:
-                for goods_id in _merge_platform_ids(
-                    template.eco,
-                    window_low,
-                    window_high,
-                    extra_ids,
-                ):
-                    targets.append(("", int(goods_id)))
-            for _hash_name, goods_id in targets:
-                page_goods_id = int(goods_id or 0) or next(
-                    iter(
-                        _merge_platform_ids(
-                            template.eco,
-                            window_low,
-                            window_high,
-                            extra_ids,
-                        )
-                    ),
-                    0,
-                )
-                if not page_goods_id:
-                    continue
-                for page in range(1, page_limit + 1):
-                    raise_if_cancelled(cancel_check)
-                    if request_no:
-                        interruptible_wait(max(1.0, request_interval), cancel_check)
-                    request_no += 1
-                    page_data = session.fetch_eco_list(
-                        goods_id=page_goods_id,
-                        min_wear=window_low,
-                        max_wear=window_high,
-                        page_no=page,
-                        progress=progress,
-                        display_name=display_name,
-                        cancel_check=cancel_check,
-                    )
-                    if isinstance(page_data, dict):
-                        page_rows = _rows_from_eco_payload(
-                            payload=page_data,
-                            goods_id=page_goods_id,
-                            display_name=display_name,
-                            min_wear=min_wear,
-                            max_wear=max_wear,
-                        )
-                        page_rows = [
-                            row
-                            for row in page_rows
-                            if _in_range(
-                                float(row.get("float_value") or -1),
-                                window_low,
-                                window_high,
-                            )
-                        ]
-                        _append_rows(page_rows)
-                        if not _iter_listing_rows(page_data):
-                            break
-                        continue
-                    html = str(page_data or "")
-                    page_rows = _rows_from_eco_html(
-                        html=html,
-                        goods_id=page_goods_id,
-                        display_name=display_name,
-                        min_wear=min_wear,
-                        max_wear=max_wear,
-                    )
-                    page_rows = [
-                        row
-                        for row in page_rows
-                        if _in_range(
-                            float(row.get("float_value") or -1),
-                            window_low,
-                            window_high,
-                        )
-                    ]
-                    _append_rows(page_rows)
-                    if "data-goodsnumber=" not in html:
-                        break
-    except CollectionCancelled:
+    except EcoPlatformPausedError:
         raise
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"{exc}（此前：{gate_error}）") from exc
-    return out
+    except RuntimeError as exc:
+        if _eco_is_access_gate_error(exc):
+            raise EcoPlatformPausedError(
+                f"ECOSteam 访问校验后仍受限，本轮已暂停该平台采集"
+                f"（此前：{gate_error}）"
+            ) from exc
+        raise
 
 
 def fetch_exact_wear_candidates(
@@ -2929,11 +3547,15 @@ def fetch_exact_wear_candidates(
     # ``silent`` / ``unit_price_cny`` are routing options, not shared by every fetcher.
     silent = bool(kwargs.pop("silent", False))
     unit_price_cny = kwargs.pop("unit_price_cny", None)
-    price_cap = (
-        _collection_max_unit_price(unit_price_cny)
-        if provider in {"buff", "yyyp", "c5"}
-        else None
-    )
+    if provider in {"buff", "yyyp", "c5"}:
+        price_cap = _collection_max_unit_price(unit_price_cny)
+    elif provider == "eco":
+        price_cap = _collection_max_unit_price(
+            unit_price_cny,
+            multiplier=_COLLECTION_ECO_PRICE_CAP_MULTIPLIER,
+        )
+    else:
+        price_cap = None
     if price_cap is not None:
         kwargs["max_unit_price"] = price_cap
     else:
@@ -2952,9 +3574,10 @@ def fetch_exact_wear_candidates(
     if cached is not None and now - cached[0] < _CANDIDATE_CACHE_TTL_SECONDS:
         raise_if_cancelled(cancel_check)
         return [dict(item) for item in cached[1]]
+    interval_floor = 5.0 if provider == "c5" else 3.0
     kwargs["request_interval"] = max(
-        2.0,
-        float(kwargs.get("request_interval") or 2.0),
+        interval_floor,
+        float(kwargs.get("request_interval") or interval_floor),
     )
     if provider == "buff":
         result = fetch_buff_candidates(**kwargs)
@@ -2967,5 +3590,8 @@ def fetch_exact_wear_candidates(
     else:
         raise RuntimeError(f"平台 {provider} 暂不支持精确磨损挂单采集")
     raise_if_cancelled(cancel_check)
-    _candidate_cache[cache_key] = (now, [dict(item) for item in result])
+    # Do not cache empty results: transient empty responses (soft rate-limit /
+    # brief stock gaps) would otherwise poison the next 180s for the same key.
+    if result:
+        _candidate_cache[cache_key] = (now, [dict(item) for item in result])
     return result

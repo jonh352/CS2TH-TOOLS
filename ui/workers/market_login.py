@@ -335,11 +335,7 @@ class MarketplaceLoginValidationWorker(QThread):
             return
 
         def check_one(provider: str) -> tuple[str, dict[str, Any]]:
-            # C5/ECO: silent browser session is the real check (not user-info APIs).
-            if provider in {"c5", "eco"}:
-                result = _validate_c5_eco_browser_session(provider)
-            else:
-                result = validate_provider_login(provider, timeout=5.0)
+            result = validate_provider_login(provider, timeout=5.0)
             if not isinstance(result, dict):
                 result = {
                     "provider": provider,
@@ -596,6 +592,7 @@ def provider_display_name_safe(provider: str) -> str:
 
 def _capture_c5_external(self) -> dict[str, Any]:
     """Open system Chrome/Edge for C5 login; harvest cookies after the window closes."""
+    from core.market_candidates import clear_c5_session_auth
     from core.market_external_browser import (
         c5_netlog_login_ready,
         harvest_c5_netlog_headers,
@@ -604,6 +601,7 @@ def _capture_c5_external(self) -> dict[str, Any]:
         wait_browser_closed,
     )
 
+    clear_c5_session_auth()
     profile = Path(CACHE_DIR) / "market_browser_profiles" / "c5"
     profile.mkdir(parents=True, exist_ok=True)
     net_log = profile.parent / "c5-login-netlog.json"
@@ -706,27 +704,16 @@ def _finish_c5_login(
     token: str,
     nickname: str = "",
 ) -> dict[str, Any]:
-    verified = validate_c5_credentials(cookie, token, timeout=3.0, quick=True)
-    if verified.get("ok"):
-        save_c5_auth(
-            cookie,
-            token,
-            nickname=str(verified.get("account_name") or nickname),
-            user_id=verified.get("user_id"),
-        )
+    verified = validate_c5_credentials(cookie, token, timeout=12.0, quick=False)
+    if not verified.get("ok"):
         return verified
-    saved = save_c5_auth(cookie, token, nickname=nickname, user_id=None)
-    if saved.get("ok"):
-        return {
-            "ok": True,
-            "provider": "c5",
-            "message": "C5GAME 登录凭证已保存",
-            "account_name": nickname,
-        }
-    return {
-        "ok": False,
-        "message": "未捕获到有效 C5GAME 登录凭证，请重新打开登录窗口",
-    }
+    save_c5_auth(
+        cookie,
+        token,
+        nickname=str(verified.get("account_name") or nickname),
+        user_id=verified.get("user_id"),
+    )
+    return verified
 
 
 def _finish_eco_login(

@@ -15,6 +15,10 @@ from urllib.parse import quote
 
 from config import CACHE_DIR
 from core.collection_cancel import CancelCheck, raise_if_cancelled
+from core.market_candidates import (
+    _C5_SELL_LIST_ORDER_BY_PRICE_ASC,
+    _C5_SELL_LIST_PAGE_SIZE,
+)
 from core.steam.errors import SteamBrowserLaunchError, SteamBrowserNotFoundError
 from core.steam.launch import focus_single_page, launch_persistent_chromium_context
 
@@ -185,7 +189,8 @@ class MarketAccessSession:
             )
         list_url = (
             f"https://api.c5game.com/search/v2/sell/{item_id}/list"
-            f"?page={page_no}&limit=20"
+            f"?page={page_no}&limit={_C5_SELL_LIST_PAGE_SIZE}"
+            f"&orderBy={_C5_SELL_LIST_ORDER_BY_PRICE_ASC}"
             f"&minWear={min_wear:.8f}&maxWear={max_wear:.8f}"
         )
         sell_page = (
@@ -400,60 +405,148 @@ class MarketAccessSession:
         *,
         progress: ProgressCb = None,
         cancel_check: CancelCheck = None,
-        timeout_ms: int = 180_000,
-    ) -> None:
-        """Open one headed window for slider/login, save cookies, then close.
+        timeout_ms: int = 300_000,
+        slider_detect_ms: int = 4_000,
+        require_slider: bool = False,
+    ) -> str:
+        """Open a headed window to handle an ECO slider challenge.
 
-        Used so silent collection can clear a gate without scraping every goods
-        page in a visible browser.
+        Returns:
+            ``"cleared"`` — slider finished (or gate already clear) / cookies saved.
+            ``"no_slider"`` — no slider appeared (only when ``require_slider`` is false,
+            or the challenge never showed up before timeout).
         """
         raise_if_cancelled(cancel_check)
         self.open(progress=progress)
         assert self._page is not None and self._context is not None
         if progress:
-            progress(
-                "ECOSteam · 请在弹出窗口完成访问验证（有滑块就拖一下）；"
-                "验证通过后窗口会自动关闭并继续静默采集…"
-            )
+            if require_slider:
+                progress("ECOSteam · 请在弹出窗口完成滑块验证…")
+            else:
+                progress("ECOSteam · 正在检查是否出现滑块验证…")
         page = self._page
         page.goto(
             "https://www.ecosteam.cn/",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
+        opened_at = time.monotonic()
+        # When API already said slider is required, wait longer for it to appear.
+        detect_ms = 60_000 if require_slider else slider_detect_ms
+        detect_until = opened_at + max(1.0, detect_ms / 1000.0)
         deadline = time.monotonic() + max(30.0, timeout_ms / 1000.0)
         last_progress = 0.0
-        while time.monotonic() < deadline:
-            raise_if_cancelled(cancel_check)
-            href = str(page.url or "")
-            now = time.monotonic()
-            on_slider = "frequent_slider" in href.lower()
-            if on_slider and progress and now - last_progress >= 2.0:
-                progress("ECOSteam · 请在弹出窗口拖动完成滑块验证…")
-                last_progress = now
+        last_probe = 0.0
+        last_cookie = ""
+        saw_slider = False
+
+        def _read_cookie() -> str:
             try:
                 cookies = list(self._context.cookies())
             except Exception:
-                cookies = []
-            cookie = "; ".join(
+                return ""
+            return "; ".join(
                 f"{item.get('name')}={item.get('value')}"
                 for item in cookies
                 if item.get("name") and item.get("value") is not None
             )
-            has_refresh = "refreshtoken=" in cookie.lower()
-            if has_refresh and not on_slider:
-                try:
-                    from core.market_candidates import save_eco_auth
 
-                    save_eco_auth("", cookie)
-                except Exception:
-                    pass
+        def _save_cookie(cookie: str) -> None:
+            if not cookie:
                 return
+            try:
+                from core.market_candidates import save_eco_auth
+
+                save_eco_auth("", cookie)
+            except Exception:
+                pass
+
+        def _on_slider_page() -> bool:
+            href = str(page.url or "").lower()
+            if "frequent_slider" in href:
+                return True
+            try:
+                html = (page.content() or "").lower()
+            except Exception:
+                html = ""
+            return "frequent_slider" in html
+
+        def _probe_ok() -> bool:
+            from core.market_candidates import _eco_access_gate_probe_ok
+
+            return bool(_eco_access_gate_probe_ok())
+
+        # Phase 1: wait for slider (or early probe clear).
+        while time.monotonic() < detect_until:
+            raise_if_cancelled(cancel_check)
             if not self._context.pages:
-                raise RuntimeError("ECOSteam 验证窗口已关闭，采集中断")
+                _save_cookie(last_cookie)
+                return "cleared" if last_cookie else "no_slider"
+
+            cookie = _read_cookie()
+            if cookie:
+                last_cookie = cookie
+            if _on_slider_page():
+                saw_slider = True
+                break
+
+            now = time.monotonic()
+            if now - last_probe >= 1.5:
+                last_probe = now
+                _save_cookie(last_cookie)
+                if _probe_ok():
+                    if progress:
+                        progress("ECOSteam · 接口已恢复，无需滑块…")
+                    return "cleared"
+            if progress and require_slider and now - last_progress >= 3.0:
+                progress("ECOSteam · 等待滑块页面出现…")
+                last_progress = now
+            page.wait_for_timeout(400)
+
+        if not saw_slider:
+            if progress:
+                progress("ECOSteam · 未检测到滑块，关闭窗口…")
+            _save_cookie(last_cookie)
+            return "no_slider"
+
+        # Phase 2: slider present — wait until user finishes, then auto-close.
+        if progress:
+            progress(
+                "ECOSteam · 请拖动完成滑块验证；完成后窗口将自动关闭并继续采集…"
+            )
+        while time.monotonic() < deadline:
+            raise_if_cancelled(cancel_check)
+            if not self._context.pages:
+                _save_cookie(last_cookie)
+                return "cleared"
+
+            cookie = _read_cookie()
+            if cookie:
+                last_cookie = cookie
+            on_slider = _on_slider_page()
+            now = time.monotonic()
+
+            if not on_slider:
+                _save_cookie(last_cookie)
+                if now - last_probe >= 1.5:
+                    last_probe = now
+                    if _probe_ok():
+                        if progress:
+                            progress(
+                                "ECOSteam · 滑块验证完成，关闭窗口并继续采集…"
+                            )
+                        return "cleared"
+
+            if progress and now - last_progress >= 3.0:
+                if on_slider:
+                    progress("ECOSteam · 请在弹出窗口拖动完成滑块验证…")
+                else:
+                    progress("ECOSteam · 滑块已完成，正在确认接口…")
+                last_progress = now
             page.wait_for_timeout(500)
+
         raise RuntimeError(
-            "等待 ECOSteam 访问验证超时：请在弹出窗口完成滑块后保持页面打开"
+            "等待 ECOSteam 滑块验证超时：请在弹出窗口完成滑块后保持页面打开"
         )
 
 

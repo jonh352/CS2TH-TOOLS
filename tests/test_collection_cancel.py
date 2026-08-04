@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import unittest
 import time
+from contextlib import nullcontext
 from threading import Lock
 from unittest.mock import patch
 
 from core.collection_cancel import CollectionCancelled, interruptible_wait
-from ui.workers.material_collection import MaterialCollectionWorker
+from ui.workers.material_collection import (
+    MaterialCollectionWorker,
+    dedupe_candidates_keep_cheapest,
+)
 
 
 class CollectionCancellationTests(unittest.TestCase):
@@ -42,7 +46,7 @@ class CollectionCancellationTests(unittest.TestCase):
         self.assertEqual(callback_seen, [True])
         self.assertTrue(worker._is_stop_requested())
 
-    def test_material_worker_collects_platforms_in_parallel(self) -> None:
+    def test_material_worker_collects_in_buff_yyyp_then_c5_eco_waves(self) -> None:
         worker = MaterialCollectionWorker(
             materials=[{"name": "skin", "min_wear": 0.1, "max_wear": 0.2}],
             providers=["buff", "yyyp", "c5", "eco"],
@@ -50,6 +54,8 @@ class CollectionCancellationTests(unittest.TestCase):
         )
         active = 0
         max_active = 0
+        started: dict[str, float] = {}
+        ended: dict[str, float] = {}
         lock = Lock()
         page_limits: list[int] = []
 
@@ -58,10 +64,12 @@ class CollectionCancellationTests(unittest.TestCase):
             with lock:
                 active += 1
                 max_active = max(max_active, active)
+                started[provider] = time.monotonic()
                 page_limits.append(kwargs["max_pages"])
-            time.sleep(0.05)
+            time.sleep(0.08)
             with lock:
                 active -= 1
+                ended[provider] = time.monotonic()
             return [
                 {
                     "platform": provider,
@@ -78,11 +86,73 @@ class CollectionCancellationTests(unittest.TestCase):
                 side_effect=fake_fetch,
             ),
             patch("ui.workers.material_collection.close_access_sessions"),
+            patch(
+                "ui.workers.material_collection.c5_signer_collection_scope",
+                return_value=nullcontext(),
+            ),
         ):
             worker.run()
 
-        self.assertGreaterEqual(max_active, 2)
+        self.assertEqual(max_active, 2)
         self.assertEqual(page_limits, [0, 0, 0, 0])
+        wave1_done = max(ended["buff"], ended["yyyp"])
+        self.assertGreaterEqual(started["c5"], wave1_done)
+        self.assertGreaterEqual(started["eco"], wave1_done)
+
+    def test_provider_collection_waves_order(self) -> None:
+        from ui.workers.material_collection import _provider_collection_waves
+
+        self.assertEqual(
+            _provider_collection_waves(["eco", "buff", "c5", "yyyp"]),
+            [["buff", "yyyp"], ["eco", "c5"]],
+        )
+        self.assertEqual(_provider_collection_waves(["c5"]), [["c5"]])
+        self.assertEqual(_provider_collection_waves(["buff", "yyyp"]), [["buff", "yyyp"]])
+
+    def test_dedupe_candidates_keep_cheapest_across_platforms(self) -> None:
+        rows = [
+            {
+                "goods_name": "P90 | 风蚀流光",
+                "float_value": 0.079459,
+                "price": 3.5,
+                "platform": "buff",
+                "listing_id": "b1",
+            },
+            {
+                "goods_name": "P90 | 风蚀流光",
+                "float_value": 0.079459,
+                "price": 2.8,
+                "platform": "eco",
+                "listing_id": "e1",
+            },
+            {
+                "goods_name": "P90 | 风蚀流光",
+                "float_value": 0.079459,
+                "price": 2.9,
+                "platform": "yyyp",
+                "listing_id": "y1",
+            },
+            {
+                "goods_name": "P90 | 风蚀流光",
+                "float_value": 0.08,
+                "price": 4.0,
+                "platform": "buff",
+                "listing_id": "b2",
+            },
+            {
+                "goods_name": "P90 | 风蚀流光",
+                "float_value": 0.079459,
+                "price": 2.8,
+                "platform": "eco",
+                "listing_id": "e1",
+            },
+        ]
+        out = dedupe_candidates_keep_cheapest(rows)
+        self.assertEqual(len(out), 2)
+        by_wear = {round(float(r["float_value"]), 8): r for r in out}
+        self.assertEqual(by_wear[0.079459]["platform"], "eco")
+        self.assertEqual(by_wear[0.079459]["price"], 2.8)
+        self.assertEqual(by_wear[0.08]["platform"], "buff")
 
 
 if __name__ == "__main__":

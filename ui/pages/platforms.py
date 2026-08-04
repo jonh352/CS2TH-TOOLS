@@ -58,11 +58,13 @@ from core.market_candidates import (
     APP_LOGIN_PROVIDERS,
     EXACT_WEAR_PROVIDERS,
     clear_provider_auth,
+    clear_c5_session_auth,
     provider_display_name,
 )
 from core.special_wear_names import get_skin_full_names_without_appearance
 from ui.components import panel
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
+from ui.feedback import ask_confirmation
 from ui.widgets.eliding_label import ElidingLabel
 from ui.widgets.toast import show_toast
 from ui.widgets.wear_interval_bar import WearIntervalBar, WearRangeSelector
@@ -71,7 +73,10 @@ from ui.workers.market_login import (
     MarketplaceLoginCaptureWorker,
     MarketplaceLoginValidationWorker,
 )
-from ui.workers.material_collection import MaterialCollectionWorker
+from ui.workers.material_collection import (
+    MaterialCollectionWorker,
+    dedupe_candidates_keep_cheapest,
+)
 from ui.workers.special_collection import SpecialCollectionWorker
 
 
@@ -143,6 +148,11 @@ class PlatformPage(QWidget):
         self._pending_alchemy_import: list[dict] = []
         self._collected_items: list[dict] = []
         self._last_scrape_message = ""
+        self._eco_retry_materials: list[dict] = []
+        self._c5_retry_materials: list[dict] = []
+        self._eco_retry_base_items: list[dict] = []
+        self._allow_platform_retry_prompt = False
+        self._pending_retry_provider: str = ""
         self._collection_scrape_pending = False
         self._collection_started_at: float | None = None
         self._special_payload: dict = {}
@@ -205,8 +215,7 @@ class PlatformPage(QWidget):
             self.mode_buttons.append(button)
         self.login_validate_button = QPushButton("校验登录")
         self.login_validate_button.setToolTip(
-            "校验本 APP 采集用登录态。"
-            "BUFF / 悠悠走平台接口；C5 / ECO 静默读取 APP 浏览器会话（不用用户信息接口）"
+            "校验本 APP 采集用登录态；各平台均走与「开始采集」相同的在售接口"
         )
         self.login_validate_button.clicked.connect(self._validate_marketplace_logins)
         self.clear_login_button = QPushButton("清除登录")
@@ -250,11 +259,25 @@ class PlatformPage(QWidget):
             interval_label = QLabel("间隔")
             interval_label.setObjectName("muted")
             interval = QSpinBox()
-            interval.setRange(2, 120)
+            min_interval = 5 if market.key == "c5" else 3
+            default_interval = min_interval
+            interval.setRange(min_interval, 120)
             interval.setSuffix(" 秒")
-            interval.setValue(int(self._saved_intervals.get(market.key, 2)))
+            saved_interval = int(
+                self._saved_intervals.get(market.key, default_interval)
+            )
+            interval.setValue(max(min_interval, saved_interval))
             interval.setFixedWidth(76)
-            interval.setToolTip("连续处理同一平台不同材料链接的间隔，默认 2 秒（最短 2 秒）")
+            if market.key == "c5":
+                interval.setToolTip(
+                    "同一平台：翻页间隔，以及换下一种材料前的额外等待；"
+                    "默认 5 秒（最短 5 秒）"
+                )
+            else:
+                interval.setToolTip(
+                    "同一平台：翻页间隔，以及换下一种材料前的额外等待；"
+                    "默认 3 秒（最短 3 秒）"
+                )
             interval.valueChanged.connect(self._save_collection_settings)
             source = QCheckBox("候选源")
             source.setChecked(
@@ -286,9 +309,11 @@ class PlatformPage(QWidget):
         self.silent_collection = QCheckBox("静默采集")
         self.silent_collection.setChecked(self._saved_silent)
         self.silent_collection.setToolTip(
-            "勾选：不自动打开商品页；ECO 仅在触发访问校验/滑块时弹一次验证窗，"
-            "通过后关闭并用接口继续采集。"
-            "不勾选：可额外打开材料商品页，ECO 校验失败时也可用浏览器页兜底"
+            "勾选：不自动打开商品页；C5 用最小化系统窗口拉取挂单（采完即关），"
+            "失败或风控则本轮停止 C5、不重试；"
+            "ECO 遇访问限制时：有明确验证信号才弹窗，否则静默重试最多 3 轮，"
+            "仍失败则本轮暂停该平台，其他平台采完后可询问是否重试。"
+            "不勾选：可额外打开材料商品页"
         )
         self.silent_collection.toggled.connect(self._save_collection_settings)
         self.include_alternatives = QCheckBox("备选材料")
@@ -475,7 +500,7 @@ class PlatformPage(QWidget):
         summary_top.addWidget(self.special_solve_button, 0, Qt.AlignmentFlag.AlignTop)
         summary_layout.addLayout(summary_top)
         self.special_collection_status = QLabel(
-            "勾选已登录且支持精确磨损的候选源后开始；默认每个平台每次请求间隔2秒。"
+            "勾选已登录且支持精确磨损的候选源后开始；默认间隔 3 秒（C5 最短 5 秒）。"
         )
         self.special_collection_status.setObjectName("muted")
         self.special_collection_status.setWordWrap(True)
@@ -534,10 +559,21 @@ class PlatformPage(QWidget):
         target.addWidget(self.collection_controls_widget)
         self.collection_controls_widget.show()
 
+    def _uncheck_candidate_source(self, provider: str) -> None:
+        """Clear「候选源」for one platform and persist the preference."""
+        source = self._source_checks.get(provider)
+        if source is None or not source.isChecked():
+            return
+        source.blockSignals(True)
+        source.setChecked(False)
+        source.blockSignals(False)
+        self._save_collection_settings()
+
     def _refresh_login_states(self) -> None:
         steam_ready = steam_session_available()
         for market in MARKETPLACES:
             button = self._login_buttons[market.key]
+            checking = False
             if market.key == "steam":
                 state = "confirmed" if steam_ready else "missing"
                 logged_in = steam_ready
@@ -569,8 +605,7 @@ class PlatformPage(QWidget):
                     text = f"○ {result.get('message') or '未登录'}"
                 button.setToolTip(
                     "请点击上方「校验登录」确认 APP 登录态。"
-                    "BUFF / 悠悠走接口；C5 / ECO 静默读取浏览器会话。"
-                    "无法读取系统浏览器 Cookie。"
+                    "各平台校验与采集使用相同在售接口。"
                 )
             else:
                 logged_in = False
@@ -585,11 +620,23 @@ class PlatformPage(QWidget):
             if source is not None:
                 exact_supported = market.key in EXACT_WEAR_PROVIDERS
                 app_login = market.key in APP_LOGIN_PROVIDERS
-                source.setEnabled(app_login and logged_in)
+                if app_login:
+                    # Keep勾选 only while login is verified. Uncheck when:
+                    # 未登录 / 校验未成功 / （清除登录后也会走到这里）.
+                    if logged_in:
+                        source.setEnabled(True)
+                    else:
+                        if not checking:
+                            self._uncheck_candidate_source(market.key)
+                        source.setEnabled(False)
+                else:
+                    source.setEnabled(False)
                 if market.key == "steam":
                     source.setToolTip("Steam 原生挂单不提供精确磨损，不能作为采集候选源")
                 elif not app_login:
                     source.setToolTip("该平台暂不支持 APP 登录校验，不能作为采集候选源")
+                elif checking:
+                    source.setToolTip("登录处理中，稍后可再勾选候选源")
                 elif not logged_in:
                     source.setToolTip("请先「登录 / 打开」并完成校验，再勾选候选源")
                 elif exact_supported:
@@ -647,6 +694,7 @@ class PlatformPage(QWidget):
         self._verified_logins.pop(provider, None)
         self._login_confirmed.pop(provider, None)
         set_marketplace_login_confirmed(provider, False)
+        self._uncheck_candidate_source(provider)
         self._refresh_login_states()
         if result.get("profile_error"):
             show_toast(
@@ -698,6 +746,12 @@ class PlatformPage(QWidget):
         self._login_validation_worker = worker
         worker.start()
 
+    def _apply_c5_real_login_failure(self) -> None:
+        clear_c5_session_auth()
+        self._uncheck_candidate_source("c5")
+        self._login_confirmed.pop("c5", None)
+        set_marketplace_login_confirmed("c5", False)
+
     def _marketplace_login_checked(self, provider: str, result: object) -> None:
         if isinstance(result, dict):
             self._verified_logins[provider] = dict(result)
@@ -707,6 +761,12 @@ class PlatformPage(QWidget):
                 "indeterminate": True,
                 "message": "校验返回格式异常",
             }
+        state = self._verified_logins[provider]
+        # 校验未成功（失败 / 无法确认）→ 取消候选源勾选
+        if not state.get("ok"):
+            self._uncheck_candidate_source(provider)
+        if provider == "c5" and not state.get("ok") and not state.get("indeterminate"):
+            self._apply_c5_real_login_failure()
         self._refresh_login_states()
 
     def _marketplace_login_validation_completed(self) -> None:
@@ -749,8 +809,11 @@ class PlatformPage(QWidget):
         # Avoid two Chromium windows fighting over the same market profile.
         try:
             from core.market_access_session import close_access_sessions
+            from core.c5_browser_collect import close_c5_browser_collector
 
             close_access_sessions(provider)
+            if provider == "c5":
+                close_c5_browser_collector()
         except Exception:
             pass
         market = next(item for item in MARKETPLACES if item.key == provider)
@@ -795,6 +858,12 @@ class PlatformPage(QWidget):
             }
         self._refresh_login_states()
         state = self._verified_logins[provider]
+        if not state.get("ok"):
+            self._uncheck_candidate_source(provider)
+        if provider == "c5" and not state.get("ok") and not state.get("indeterminate"):
+            self._apply_c5_real_login_failure()
+            self._refresh_login_states()
+            state = self._verified_logins[provider]
         if state.get("ok"):
             show_toast(self, "平台登录成功，凭证已安全保存", style="success")
         else:
@@ -1258,7 +1327,7 @@ class PlatformPage(QWidget):
         )
         self.special_collection_status.setText(
             "可选精确候选源：BUFF、悠悠、C5、ECO；Steam 原生挂单不提供精确磨损；"
-            "智能配单强制至少2秒间隔、结果缓存3分钟。"
+            "智能配单强制至少 3 秒间隔（C5 至少 5 秒）、结果缓存 3 分钟。"
         )
         self._collected_items = []
         self.collection_import_button.hide()
@@ -1741,6 +1810,7 @@ class PlatformPage(QWidget):
             for market in MARKETPLACES
             if self._source_checks.get(market.key) is not None
             and self._source_checks[market.key].isChecked()
+            and self._source_checks[market.key].isEnabled()
         ]
 
     def _collection_items_for_platform(self, key: str) -> list[tuple[str, str]]:
@@ -1858,6 +1928,11 @@ class PlatformPage(QWidget):
         self.collection_import_button.hide()
         self.collection_save_json_button.hide()
         self._last_scrape_message = ""
+        self._eco_retry_materials = []
+        self._c5_retry_materials = []
+        self._eco_retry_base_items = []
+        self._allow_platform_retry_prompt = True
+        self._pending_retry_provider = ""
         self._collection_scrape_pending = can_scrape
         self._collection_queue = queue
         self.collection_toggle_button.setText("停止采集")
@@ -1898,13 +1973,22 @@ class PlatformPage(QWidget):
         else:
             self._finish_collection()
 
-    def _material_collection_scraped(self, candidates: object, message: str) -> None:
+    def _material_collection_scraped(
+        self,
+        candidates: object,
+        message: str,
+        retry_meta: object = None,
+    ) -> None:
         self._material_worker = None
         if self._collection_stopping:
             self._collection_stopping = False
             self._collection_running = False
             self._collection_scrape_pending = False
             self._pending_alchemy_import = []
+            self._eco_retry_materials = []
+            self._c5_retry_materials = []
+            self._eco_retry_base_items = []
+            self._pending_retry_provider = ""
             self._collection_started_at = None
             self.collection_toggle_button.setEnabled(True)
             self.collection_toggle_button.setText("开始采集")
@@ -1916,14 +2000,81 @@ class PlatformPage(QWidget):
         rows = [item for item in candidates if isinstance(item, dict)] if isinstance(
             candidates, list
         ) else []
+        base = [
+            item
+            for item in getattr(self, "_eco_retry_base_items", [])
+            if isinstance(item, dict)
+        ]
+        self._eco_retry_base_items = []
+        if base:
+            rows = dedupe_candidates_keep_cheapest([*base, *rows])
         self._pending_alchemy_import = rows
         self._last_scrape_message = str(message or "").strip()
+        eco_retry: list[dict] = []
+        c5_retry: list[dict] = []
+        if isinstance(retry_meta, dict):
+            eco_raw = retry_meta.get("eco") or []
+            c5_raw = retry_meta.get("c5") or []
+            if isinstance(eco_raw, list):
+                eco_retry = [dict(item) for item in eco_raw if isinstance(item, dict)]
+            if isinstance(c5_raw, list):
+                c5_retry = [dict(item) for item in c5_raw if isinstance(item, dict)]
+        elif isinstance(retry_meta, list):
+            # Backward compatible: old workers emitted ECO-only list.
+            eco_retry = [dict(item) for item in retry_meta if isinstance(item, dict)]
+        # After a targeted retry, don't re-queue the same provider from meta
+        # (worker may still report leftovers); keep other platform's pending list.
+        finished_retry = str(getattr(self, "_pending_retry_provider", "") or "")
+        self._pending_retry_provider = ""
+        if finished_retry == "eco":
+            self._eco_retry_materials = eco_retry
+        elif finished_retry == "c5":
+            self._c5_retry_materials = c5_retry
+        else:
+            self._eco_retry_materials = eco_retry
+            self._c5_retry_materials = c5_retry
         detail = f"已抓取 {len(rows)} 条挂单"
         if self._last_scrape_message:
             detail += f"；{self._last_scrape_message}"
         self.collection_status.setText(detail)
         if not self._collection_queue and not self._collection_timer.isActive():
             self._finish_collection()
+
+    def _start_platform_retry_collection(
+        self,
+        provider: str,
+        materials: list[dict],
+    ) -> None:
+        """Re-run one paused platform for materials skipped after a pause."""
+        if not materials or provider not in {"eco", "c5"}:
+            self._finish_collection()
+            return
+        self._collection_running = True
+        self._collection_stopping = False
+        self._collection_scrape_pending = True
+        self._pending_retry_provider = provider
+        self.collection_toggle_button.setText("停止采集")
+        self.collection_toggle_button.setEnabled(True)
+        self._set_collection_status_state("running")
+        display = "ECOSteam" if provider == "eco" else "C5GAME"
+        self.collection_status.setText(
+            f"正在重试 {display} · {len(materials)} 种未完成材料"
+        )
+        interval = self._collection_intervals.get(provider)
+        worker = MaterialCollectionWorker(
+            materials=materials,
+            providers=[provider],
+            provider_intervals={
+                provider: interval.value() if interval is not None else (5 if provider == "c5" else 3),
+            },
+            silent=self.silent_collection.isChecked(),
+            parent=self,
+        )
+        worker.progress.connect(self._set_collection_status_text)
+        worker.completed.connect(self._material_collection_scraped)
+        worker.finished.connect(worker.deleteLater)
+        self._material_worker = worker
+        worker.start()
 
     def _process_next_collection_link(self) -> None:
         if not self._collection_queue:
@@ -1961,6 +2112,62 @@ class PlatformPage(QWidget):
     def _finish_collection(self) -> None:
         self._collection_timer.stop()
         self._collection_queue = []
+        items = [
+            item for item in self._pending_alchemy_import if isinstance(item, dict)
+        ]
+        scrape_message = str(getattr(self, "_last_scrape_message", "") or "").strip()
+        selected = set(self._selected_collection_platforms())
+        allow_prompt = bool(getattr(self, "_allow_platform_retry_prompt", False))
+        c5_retry = [
+            dict(item)
+            for item in getattr(self, "_c5_retry_materials", [])
+            if isinstance(item, dict)
+        ]
+        eco_retry = [
+            dict(item)
+            for item in getattr(self, "_eco_retry_materials", [])
+            if isinstance(item, dict)
+        ]
+
+        def _retry_names(materials: list[dict]) -> tuple[str, str]:
+            names = "、".join(
+                str(item.get("name") or "").strip() or "?"
+                for item in materials[:5]
+            )
+            more = "" if len(materials) <= 5 else f" 等 {len(materials)} 种"
+            return names, more
+
+        if (
+            c5_retry
+            and allow_prompt
+            and not self._collection_stopping
+            and "c5" in selected
+        ):
+            # C5 failures stop the platform for this run; no post-run retry prompt.
+            self._c5_retry_materials = []
+
+        if (
+            eco_retry
+            and allow_prompt
+            and not self._collection_stopping
+            and "eco" in selected
+        ):
+            names, more = _retry_names(eco_retry)
+            if ask_confirmation(
+                self,
+                "ECO 未采集成功",
+                f"ECOSteam 有 {len(eco_retry)} 种材料未采到（{names}{more}）。\n"
+                "是否只重试这些 ECO 材料？\n"
+                "其他平台已采到的结果会保留。",
+            ):
+                self._eco_retry_materials = []
+                self._eco_retry_base_items = [dict(item) for item in items]
+                self._pending_alchemy_import = items
+                self._start_platform_retry_collection("eco", eco_retry)
+                return
+            self._eco_retry_materials = []
+
+        self._allow_platform_retry_prompt = False
         self._collection_running = False
         self._collection_stopping = False
         self._collection_scrape_pending = False
@@ -1968,14 +2175,14 @@ class PlatformPage(QWidget):
         self._collection_platform = ""
         started_at = self._collection_started_at
         self._collection_started_at = None
+        self._pending_alchemy_import = []
+        self._last_scrape_message = ""
+        self._eco_retry_materials = []
+        self._c5_retry_materials = []
+        self._eco_retry_base_items = []
+        self._pending_retry_provider = ""
         elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
         elapsed_text = f"，共计 {elapsed:.1f} 秒"
-        items = [
-            item for item in self._pending_alchemy_import if isinstance(item, dict)
-        ]
-        self._pending_alchemy_import = []
-        scrape_message = str(getattr(self, "_last_scrape_message", "") or "").strip()
-        self._last_scrape_message = ""
         counts_text = format_collection_platform_counts(items)
         status = f"采集完成 · {counts_text}{elapsed_text}"
         if scrape_message:
@@ -2052,6 +2259,11 @@ class PlatformPage(QWidget):
             self._collection_scrape_pending = False
             self._collection_started_at = None
             self._pending_alchemy_import = []
+            self._eco_retry_materials = []
+            self._c5_retry_materials = []
+            self._eco_retry_base_items = []
+            self._allow_platform_retry_prompt = False
+            self._pending_retry_provider = ""
             self.collection_toggle_button.setText("开始采集")
             self._set_collection_status_text("已停止采集", state="complete")
         self._collection_platform = ""

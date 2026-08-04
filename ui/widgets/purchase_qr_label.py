@@ -555,6 +555,100 @@ class PurchaseActionCell(QWidget):
             style.polish(btn)
 
 
+class SubstrateActionColumnHeader(QWidget):
+    """锁定/排除批量操作图标（作用于当前配方全部材料）。"""
+
+    def __init__(
+        self,
+        *,
+        on_lock_all: Callable[[], None] | None = None,
+        on_exclude_all: Callable[[], None] | None = None,
+        show_label: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("substrateActionColumnHeader")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        if show_label:
+            self._label = QLabel("操作")
+            self._label.setObjectName("substrateActionColumnHeaderLabel")
+            self._label.setAlignment(
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            )
+            lay.addWidget(self._label, 0, Qt.AlignmentFlag.AlignVCenter)
+            lay.addStretch(1)
+        else:
+            self._label = None
+        self._lock_btn = _icon_button("锁定全部底物")
+        self._ban_btn = _icon_button("排除全部底物")
+        if on_lock_all is not None:
+            self._lock_btn.clicked.connect(on_lock_all)
+        if on_exclude_all is not None:
+            self._ban_btn.clicked.connect(on_exclude_all)
+        lay.addWidget(self._lock_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._ban_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._all_locked = False
+        self._all_excluded = False
+        self._last_visual_key: tuple[bool, bool, str] | None = None
+        self._theme_refresh_pending = False
+        self.refresh_state(all_locked=False, all_excluded=False)
+
+    def refresh_state(self, *, all_locked: bool, all_excluded: bool) -> None:
+        self._all_locked = bool(all_locked)
+        self._all_excluded = bool(all_excluded)
+        normal_color = self.palette().color(QPalette.ColorRole.WindowText).name()
+        visual_key = (self._all_locked, self._all_excluded, normal_color)
+        if visual_key == self._last_visual_key:
+            return
+        self._last_visual_key = visual_key
+        PurchaseActionCell._apply_button_state(
+            self._lock_btn,
+            active=self._all_locked,
+            normal_icon=_LOCK_ICON_PATH,
+            active_icon=_LOCK_ICON_ACTIVE_PATH,
+            normal_color=normal_color,
+            inactive_tip="锁定全部底物",
+            active_tip="取消全部锁定",
+        )
+        PurchaseActionCell._apply_button_state(
+            self._ban_btn,
+            active=self._all_excluded,
+            normal_icon=_BAN_ICON_PATH,
+            active_icon=_BAN_ICON_ACTIVE_PATH,
+            normal_color=normal_color,
+            inactive_tip="排除全部底物",
+            active_tip="取消全部排除",
+        )
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() not in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            return
+        if not self.isVisible():
+            self._last_visual_key = None
+            return
+        if self._theme_refresh_pending:
+            return
+        self._theme_refresh_pending = True
+        QTimer.singleShot(0, self._run_deferred_theme_refresh)
+
+    def _run_deferred_theme_refresh(self) -> None:
+        self._theme_refresh_pending = False
+        if not self.isVisible():
+            return
+        self._last_visual_key = None
+        self.refresh_state(
+            all_locked=self._all_locked,
+            all_excluded=self._all_excluded,
+        )
+
+
 class PurchaseGoButtonCell(QWidget):
     """表格内「查看」；已查看为灰字样式，仍可再次打开弹窗。"""
 

@@ -45,7 +45,7 @@ class SpecialCollectionWorker(QThread):
         return self._stop_event.is_set() or self.isInterruptionRequested()
 
     def run(self) -> None:
-        candidates, errors = collect_candidates_parallel(
+        candidates, errors, _retry_meta = collect_candidates_parallel(
             materials=self.materials,
             providers=self.providers,
             provider_intervals=self.provider_intervals,

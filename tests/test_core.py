@@ -42,6 +42,8 @@ from core.alchemy_calc import (
 from core.data_utils import SkinTemplate
 from core.platform_links import links_for_recipe_material, links_for_template
 from core.market_candidates import (
+    c5_signer_collection_scope,
+    clear_c5_session_auth,
     clear_provider_auth,
     fetch_buff_candidates,
     fetch_c5_candidates,
@@ -57,6 +59,7 @@ from core.market_candidates import (
     validate_provider_login,
     validate_youpin_credentials,
     _c5_request_headers,
+    _c5_client_headers,
     _collection_max_unit_price,
     _merge_platform_ids,
 )
@@ -203,6 +206,8 @@ class MetadataTests(unittest.TestCase):
         buff_params = buff_get.call_args.kwargs["params"]
         self.assertEqual(buff_params["min_paintwear"], "0.15")
         self.assertEqual(buff_params["max_paintwear"], "0.179999999")
+        self.assertEqual(buff_params["sort_by"], "price.asc")
+        self.assertEqual(buff_params["page_size"], 50)
         buff_windows = [
             (
                 call.kwargs["params"]["min_paintwear"],
@@ -253,46 +258,35 @@ class MetadataTests(unittest.TestCase):
             [(0.15, 0.18)],
         )
 
-        class NapiResponse:
-            status_code = 200
-            headers = {"content-type": "application/json"}
-            text = '{"success":true}'
-
-            @staticmethod
-            def raise_for_status() -> None:
-                return None
-
-            @staticmethod
-            def json() -> dict:
-                return {
-                    "success": True,
-                    "errorCode": 0,
-                    "data": {
-                        "list": [
-                            {
-                                "id": "c5-order-1",
-                                "price": "18.5",
-                                "assetInfo": {"wear": "0.164862"},
-                            },
-                            {
-                                "id": "outside",
-                                "price": "1",
-                                "assetInfo": {"wear": "0.3"},
-                            },
-                        ]
-                    },
-                }
+        def _fake_c5_browser_fetch(**kwargs):
+            return [
+                {
+                    "goods_name": kwargs.get("display_name") or "",
+                    "float_value": 0.164862,
+                    "price": 18.5,
+                    "goods_id": "c5:c5-order-1:0.164862",
+                    "platform": "c5",
+                    "listing_id": "c5-order-1",
+                    "purchase_link": "https://www.c5game.com/",
+                },
+                {
+                    "goods_name": kwargs.get("display_name") or "",
+                    "float_value": 0.3,
+                    "price": 1.0,
+                    "goods_id": "c5:outside:0.3",
+                    "platform": "c5",
+                    "listing_id": "outside",
+                    "purchase_link": "https://www.c5game.com/",
+                },
+            ]
 
         with patch(
             "core.market_candidates._c5_auth",
             return_value=("c5token=abc12345token; path=/", "c5-access-token-value"),
         ), patch(
-            "core.market_candidates._c5_client_headers",
-            return_value={"x-app-channel": "WEB", "x-source": "1", "x-area": "1"},
-        ), patch(
-            "core.market_candidates.requests.get",
-            return_value=NapiResponse(),
-        ) as get:
+            "core.market_candidates._fetch_c5_via_browser",
+            side_effect=_fake_c5_browser_fetch,
+        ) as browser_fetch:
             c5_rows = fetch_c5_candidates(
                 template=bare,
                 display_name="USP消音版 | 破颚者",
@@ -305,68 +299,31 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(len(c5_rows), 1)
         self.assertEqual(c5_rows[0]["platform"], "c5")
         self.assertAlmostEqual(c5_rows[0]["float_value"], 0.164862)
-        self.assertIn("/api/v1/search/v2/sell/", get.call_args.args[0])
+        self.assertEqual(browser_fetch.call_count, 1)
         self.assertEqual(
-            get.call_args.kwargs["params"].get("itemId"),
-            1098059387020423168,
+            browser_fetch.call_args.kwargs.get("ids"),
+            [1098059387020423168],
         )
-        self.assertEqual(get.call_args.kwargs["headers"].get("x-app-channel"), "WEB")
 
-        class HtmlLoginResponse:
-            status_code = 200
-            headers = {"content-type": "text/html; charset=utf-8"}
-            text = "<!doctype html><html><title>登录注册</title>"
-
-            @staticmethod
-            def raise_for_status() -> None:
-                return None
-
-            @staticmethod
-            def json() -> dict:
-                raise ValueError("not json")
-
-        class SearchApiResponse:
-            status_code = 200
-            headers = {"content-type": "application/json"}
-            text = '{"success":true}'
-
-            @staticmethod
-            def raise_for_status() -> None:
-                return None
-
-            @staticmethod
-            def json() -> dict:
-                return {
-                    "success": True,
-                    "errorCode": 0,
-                    "data": {
-                        "list": [
-                            {
-                                "id": "c5-order-2",
-                                "price": "22.0",
-                                "assetInfo": {"wear": "0.155"},
-                            }
-                        ]
-                    },
+        def _fake_c5_browser_fallback(**kwargs):
+            return [
+                {
+                    "goods_name": kwargs.get("display_name") or "",
+                    "float_value": 0.155,
+                    "price": 22.0,
+                    "goods_id": "c5:c5-order-2:0.155",
+                    "platform": "c5",
+                    "listing_id": "c5-order-2",
+                    "purchase_link": "https://www.c5game.com/",
                 }
-
-        def _c5_get_side_effect(url, *args, **kwargs):
-            if "napi/trade" in str(url):
-                return HtmlLoginResponse()
-            return SearchApiResponse()
+            ]
 
         with patch(
             "core.market_candidates._c5_auth",
             return_value=("c5token=abc12345token; path=/", "c5-access-token-value"),
         ), patch(
-            "core.market_candidates._c5_client_headers",
-            return_value={"x-app-channel": "WEB", "x-source": "1", "x-area": "1"},
-        ), patch(
-            "core.market_candidates.requests.get",
-            side_effect=_c5_get_side_effect,
-        ), patch(
-            "core.market_candidates._fetch_c5_via_access_session",
-            side_effect=AssertionError("access session must not run for C5"),
+            "core.market_candidates._fetch_c5_via_browser",
+            side_effect=_fake_c5_browser_fallback,
         ):
             fallback_rows = fetch_c5_candidates(
                 template=bare,
@@ -437,6 +394,8 @@ class MetadataTests(unittest.TestCase):
         )
         eco_body = eco_post.call_args.kwargs["json"]
         self.assertEqual(eco_body["GoodsId"], 7332)
+        self.assertEqual(eco_body["SortType"], 1)
+        self.assertEqual(eco_body["Sort"], 0)
         self.assertAlmostEqual(eco_body["StartPaintWear"], 0.15)
         self.assertAlmostEqual(eco_body["EndPaintWear"], 0.18)
 
@@ -529,24 +488,13 @@ class MetadataTests(unittest.TestCase):
 
             def complete_eco_access_gate(self, **kwargs):
                 self.gate_calls += 1
+                return "cleared"
 
             def fetch_eco_list(self, **kwargs):
                 self.list_calls += 1
-                return {
-                    "StatusCode": "0",
-                    "StatusData": {
-                        "ResultCode": "0",
-                        "ResultData": {
-                            "PageResult": [
-                                {
-                                    "GoodsNum": "eco-order-browser",
-                                    "Price": "21.5",
-                                    "Abrade": "0.160001",
-                                }
-                            ]
-                        },
-                    },
-                }
+                return {}
+
+        from core.market_candidates import EcoPlatformPausedError
 
         fake_session = FakeEcoSession()
         with patch(
@@ -559,6 +507,8 @@ class MetadataTests(unittest.TestCase):
             "core.market_candidates.requests.post",
             return_value=EcoSliderApiResponse(),
         ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
             "core.market_access_session.get_access_session",
             return_value=fake_session,
         ), patch(
@@ -567,21 +517,20 @@ class MetadataTests(unittest.TestCase):
             "core.market_candidates._candidate_cache",
             {},
         ):
-            eco_fallback_rows = fetch_eco_candidates(
-                template=bare,
-                display_name="USP消音版 | 破颚者",
-                min_wear=0.15,
-                max_wear=0.18,
-                max_pages=1,
-                request_interval=1,
-                extra_ids=[7332],
-                silent=False,
-            )
-        self.assertEqual(len(eco_fallback_rows), 1)
-        self.assertEqual(eco_fallback_rows[0]["listing_id"], "eco-order-browser")
-        self.assertAlmostEqual(eco_fallback_rows[0]["float_value"], 0.160001)
+            with self.assertRaises(EcoPlatformPausedError):
+                fetch_eco_candidates(
+                    template=bare,
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=1,
+                    extra_ids=[7332],
+                    silent=False,
+                )
+        # ResultMsg "slider-guid" is a clear slider signal → must open gate.
         self.assertGreaterEqual(fake_session.gate_calls, 1)
-        self.assertGreaterEqual(fake_session.list_calls, 1)
+        self.assertEqual(fake_session.list_calls, 0)
 
         silent_session = FakeEcoSession()
         with patch(
@@ -594,6 +543,8 @@ class MetadataTests(unittest.TestCase):
             "core.market_candidates.requests.post",
             return_value=EcoSliderApiResponse(),
         ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
             "core.market_access_session.get_access_session",
             return_value=silent_session,
         ), patch(
@@ -602,7 +553,7 @@ class MetadataTests(unittest.TestCase):
             "core.market_candidates._candidate_cache",
             {},
         ):
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertRaises(EcoPlatformPausedError) as raised:
                 fetch_eco_candidates(
                     template=bare,
                     display_name="USP消音版 | 破颚者",
@@ -614,10 +565,68 @@ class MetadataTests(unittest.TestCase):
                     silent=True,
                 )
         self.assertTrue(
-            any(marker in str(raised.exception) for marker in ("访问校验", "429", "滑块"))
+            any(
+                marker in str(raised.exception)
+                for marker in ("访问校验", "429", "滑块", "暂停")
+            )
         )
         self.assertGreaterEqual(silent_session.gate_calls, 1)
         self.assertEqual(silent_session.list_calls, 0)
+
+        # Pure rate-limit (no slider token) → silent retries only, no popup.
+        class EcoRateLimitApiResponse:
+            status_code = 200
+            text = json.dumps(
+                {
+                    "StatusCode": "0",
+                    "StatusData": {
+                        "ResultCode": "429",
+                        "ResultMsg": "频率过高",
+                        "ResultData": None,
+                    },
+                }
+            )
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            def json(self):
+                return json.loads(self.text)
+
+        rate_session = FakeEcoSession()
+        with patch(
+            "core.market_candidates._eco_auth",
+            return_value=(
+                "eco-login-token-value",
+                "loginToken=eco-login-token-value; refreshToken=eco-refresh",
+            ),
+        ), patch(
+            "core.market_candidates.requests.post",
+            return_value=EcoRateLimitApiResponse(),
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
+            "core.market_access_session.get_access_session",
+            return_value=rate_session,
+        ), patch(
+            "core.market_access_session.close_access_sessions",
+        ), patch(
+            "core.market_candidates._candidate_cache",
+            {},
+        ):
+            with self.assertRaises(EcoPlatformPausedError):
+                fetch_eco_candidates(
+                    template=bare,
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=1,
+                    extra_ids=[7332],
+                    silent=True,
+                )
+        self.assertEqual(rate_session.gate_calls, 0)
 
         class EcoMissingThenOkResponse:
             status_code = 200
@@ -686,9 +695,174 @@ class MetadataTests(unittest.TestCase):
     def test_collection_price_cap_helper(self) -> None:
         self.assertEqual(_collection_max_unit_price(10), 20.0)
         self.assertEqual(_collection_max_unit_price("12.5"), 25.0)
+        self.assertEqual(
+            _collection_max_unit_price(10, multiplier=2.5),
+            25.0,
+        )
         self.assertIsNone(_collection_max_unit_price(0))
         self.assertIsNone(_collection_max_unit_price(None))
         self.assertIsNone(_collection_max_unit_price("bad"))
+
+    def test_c5_access_gate_verify_vs_silent(self) -> None:
+        from core.market_candidates import (
+            C5AccessGateError,
+            C5PlatformPausedError,
+            _c5_message_has_verify_signal,
+            _resolve_c5_access_gate,
+        )
+
+        self.assertTrue(_c5_message_has_verify_signal("触发风控，请完成安全验证"))
+        self.assertFalse(_c5_message_has_verify_signal("网页采集接口暂时不可用"))
+
+        browser_calls: list[str] = []
+
+        def fake_complete(**_kwargs):
+            browser_calls.append("opened")
+
+        with patch(
+            "core.market_candidates._complete_c5_verify_system_browser",
+            side_effect=fake_complete,
+        ), patch(
+            "core.market_candidates._c5_access_gate_probe_ok",
+            return_value=False,
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ):
+            with self.assertRaises(C5PlatformPausedError):
+                _resolve_c5_access_gate(
+                    request_interval=1.0,
+                    gate_error=C5AccessGateError("请完成安全验证", needs_verify=True),
+                )
+        self.assertEqual(browser_calls, ["opened"])
+
+        browser_calls.clear()
+        with patch(
+            "core.market_candidates._complete_c5_verify_system_browser",
+            side_effect=fake_complete,
+        ), patch(
+            "core.market_candidates._c5_access_gate_probe_ok",
+            return_value=False,
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ) as wait_mock:
+            with self.assertRaises(C5PlatformPausedError) as raised:
+                _resolve_c5_access_gate(
+                    request_interval=1.0,
+                    gate_error=C5AccessGateError(
+                        "C5GAME 网页采集接口暂时不可用（登录仍有效）。",
+                        needs_verify=False,
+                    ),
+                )
+        self.assertEqual(browser_calls, [])
+        self.assertGreaterEqual(wait_mock.call_count, 2)
+        self.assertIn("静默重试", str(raised.exception))
+
+    def test_eco_filters_and_stops_at_price_cap(self) -> None:
+        template = get_name_map()["USP消音版 | 破颚者"]
+        bare = SkinTemplate(
+            paint_index=template.paint_index,
+            weapon_name=template.weapon_name,
+            skin_name=template.skin_name,
+            quality=template.quality,
+            stat_trak=template.stat_trak,
+            min_float=template.min_float,
+            max_float=template.max_float,
+        )
+        calls: list[int] = []
+
+        class EcoPageResponse:
+            status_code = 200
+
+            def __init__(self, page: int):
+                self._page = page
+                if page == 1:
+                    items = [
+                        {
+                            "GoodsNum": "eco-cheap",
+                            "SellingPrice": "5.0",
+                            "PaintWear": "0.16",
+                        },
+                        {
+                            "GoodsNum": "eco-mid",
+                            "SellingPrice": "7.0",
+                            "PaintWear": "0.161",
+                        },
+                    ]
+                else:
+                    items = [
+                        {
+                            "GoodsNum": "eco-expensive",
+                            "SellingPrice": "30.0",
+                            "PaintWear": "0.162",
+                        }
+                    ]
+                self.text = json.dumps(
+                    {
+                        "StatusCode": "0",
+                        "StatusData": {
+                            "ResultCode": "0",
+                            "ResultData": {"PageResult": items},
+                        },
+                    }
+                )
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            def json(self):
+                return json.loads(self.text)
+
+        def post_side_effect(*_args, **kwargs):
+            page = int(kwargs["json"]["PageIndex"])
+            calls.append(page)
+            return EcoPageResponse(page)
+
+        with patch(
+            "core.market_candidates._eco_auth",
+            return_value=("eco-login-token-value", "loginToken=eco-login-token-value"),
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
+            "core.market_candidates.requests.post",
+            side_effect=post_side_effect,
+        ):
+            rows = fetch_eco_candidates(
+                template=bare,
+                display_name="USP消音版 | 破颚者",
+                min_wear=0.15,
+                max_wear=0.18,
+                max_pages=0,
+                request_interval=1,
+                extra_ids=[7332],
+                max_unit_price=25.0,
+            )
+        self.assertEqual([row["listing_id"] for row in rows], ["eco-cheap", "eco-mid"])
+        self.assertEqual(calls, [1, 2])
+
+        calls.clear()
+        with patch(
+            "core.market_candidates._eco_auth",
+            return_value=("eco-login-token-value", "loginToken=eco-login-token-value"),
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
+            "core.market_candidates.requests.post",
+            side_effect=post_side_effect,
+        ):
+            rows = fetch_eco_candidates(
+                template=bare,
+                display_name="USP消音版 | 破颚者",
+                min_wear=0.15,
+                max_wear=0.18,
+                max_pages=0,
+                request_interval=1,
+                extra_ids=[7332],
+                max_unit_price=6.0,
+            )
+        self.assertEqual([row["listing_id"] for row in rows], ["eco-cheap"])
+        # Page 1 keeps cheap; page 2 is entirely over cap → early stop (no page 3).
+        self.assertEqual(calls, [1, 2])
 
     def test_buff_stops_paging_after_price_cap(self) -> None:
         template = get_name_map()["USP消音版 | 破颚者"]
@@ -779,7 +953,152 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual([row["listing_id"] for row in rows], ["cheap"])
         self.assertEqual(buff_get.call_count, 2)
 
-    def test_fetch_exact_wear_applies_cap_for_buff_not_eco(self) -> None:
+    def test_youpin_stops_at_wear_window_row_limit(self) -> None:
+        from core.market_candidates import _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+
+        template = get_name_map()["USP消音版 | 破颚者"]
+        bare = SkinTemplate(
+            paint_index=template.paint_index,
+            weapon_name=template.weapon_name,
+            skin_name=template.skin_name,
+            quality=template.quality,
+            stat_trak=template.stat_trak,
+            min_float=template.min_float,
+            max_float=template.max_float,
+        )
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        page_size = 40
+        pages_needed = (_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW // page_size) + 2
+
+        def make_page(page_index: int) -> FakeResponse:
+            start = (page_index - 1) * page_size
+            items = [
+                {
+                    "Id": f"yp-{start + i}",
+                    "Price": "10",
+                    "Abrade": f"{0.16 + (i % 10) * 0.0001:.6f}",
+                }
+                for i in range(page_size)
+            ]
+            return FakeResponse(
+                {"Code": 0, "Data": {"CommodityList": items}}
+            )
+
+        responses = [make_page(i) for i in range(1, pages_needed + 1)]
+        with patch(
+            "core.market_candidates._youpin_auth",
+            return_value=("tok", ""),
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
+            "core.market_candidates.requests.post",
+            side_effect=responses,
+        ) as youpin_post:
+            rows = fetch_youpin_candidates(
+                template=bare,
+                display_name="USP消音版 | 破颚者",
+                min_wear=0.15,
+                max_wear=0.18,
+                max_pages=0,
+                request_interval=1,
+                extra_ids=[125007],
+            )
+        self.assertEqual(len(rows), _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW)
+        self.assertLessEqual(
+            youpin_post.call_count,
+            (_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW // page_size) + 1,
+        )
+
+    def test_youpin_continues_when_first_page_outside_wear_window(self) -> None:
+        """Full first page filtered by wear must not abort paging (unlike empty list)."""
+        template = get_name_map()["USP消音版 | 破颚者"]
+        bare = SkinTemplate(
+            paint_index=template.paint_index,
+            weapon_name=template.weapon_name,
+            skin_name=template.skin_name,
+            quality=template.quality,
+            stat_trak=template.stat_trak,
+            min_float=template.min_float,
+            max_float=template.max_float,
+        )
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        page_size = 40
+        out_of_window = FakeResponse(
+            {
+                "Code": 0,
+                "Data": {
+                    "CommodityList": [
+                        {
+                            "Id": f"yp-out-{i}",
+                            "Price": "10",
+                            "Abrade": "0.05",
+                        }
+                        for i in range(page_size)
+                    ]
+                },
+            }
+        )
+        in_window = FakeResponse(
+            {
+                "Code": 0,
+                "Data": {
+                    "CommodityList": [
+                        {
+                            "Id": "yp-in-1",
+                            "Price": "10",
+                            "Abrade": "0.16",
+                        }
+                    ]
+                },
+            }
+        )
+        with patch(
+            "core.market_candidates._youpin_auth",
+            return_value=("tok", ""),
+        ), patch(
+            "core.market_candidates.interruptible_wait",
+        ), patch(
+            "core.market_candidates.requests.post",
+            side_effect=[out_of_window, in_window],
+        ) as youpin_post:
+            rows = fetch_youpin_candidates(
+                template=bare,
+                display_name="USP消音版 | 破颚者",
+                min_wear=0.15,
+                max_wear=0.18,
+                max_pages=0,
+                request_interval=1,
+                extra_ids=[125007],
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["listing_id"], "yp-in-1")
+        self.assertEqual(youpin_post.call_count, 2)
+
+    def test_fetch_exact_wear_applies_price_cap_for_buff_and_eco(self) -> None:
         template = get_name_map()["USP消音版 | 破颚者"]
         bare = SkinTemplate(
             paint_index=template.paint_index,
@@ -825,7 +1144,7 @@ class MetadataTests(unittest.TestCase):
                 silent=True,
             )
         self.assertEqual(buff_fetch.call_args.kwargs["max_unit_price"], 20.0)
-        self.assertNotIn("max_unit_price", eco_fetch.call_args.kwargs)
+        self.assertEqual(eco_fetch.call_args.kwargs["max_unit_price"], 25.0)
         self.assertTrue(eco_fetch.call_args.kwargs["silent"])
 
     def test_wear_windows_split_by_exterior_buckets(self) -> None:
@@ -938,6 +1257,37 @@ class MetadataTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertIn("Cookie", get.call_args.kwargs["headers"])
+        params = get.call_args.kwargs["params"]
+        self.assertIn("min_paintwear", params)
+        self.assertIn("max_paintwear", params)
+
+    def test_buff_login_validation_rejects_unauthenticated_wear_query(self) -> None:
+        class FakeResponse:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict:
+                return {"code": "Login Required", "error": "请先登录"}
+
+        with (
+            patch(
+                "core.market_candidates._buff_cookie",
+                return_value="session=invalid-session; csrf_token=token",
+            ),
+            patch(
+                "core.market_candidates.requests.get",
+                return_value=FakeResponse(),
+            ),
+        ):
+            result = validate_provider_login("buff")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["indeterminate"])
+        self.assertIn("登录", result["message"])
 
     def test_buff_login_validation_rejects_browser_only_hint(self) -> None:
         with patch("core.market_candidates._buff_cookie", return_value=""):
@@ -948,7 +1298,18 @@ class MetadataTests(unittest.TestCase):
         self.assertIn("APP 未获取", result["message"])
 
     def test_youpin_login_validation_returns_account_name(self) -> None:
-        class FakeResponse:
+        class CollectionResponse:
+            status_code = 200
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict:
+                return {"Code": 0, "Data": {"CommodityList": []}}
+
+        class ProfileResponse:
             status_code = 200
 
             @staticmethod
@@ -968,18 +1329,21 @@ class MetadataTests(unittest.TestCase):
                 return_value=("valid-token", "yp_cookie=1"),
             ),
             patch(
+                "core.market_candidates.requests.post",
+                return_value=CollectionResponse(),
+            ) as post,
+            patch(
                 "core.market_candidates.requests.get",
-                return_value=FakeResponse(),
-            ) as get,
+                return_value=ProfileResponse(),
+            ),
         ):
             result = validate_provider_login("yyyp")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["account_name"], "测试用户")
-        self.assertEqual(
-            get.call_args.kwargs["headers"]["Authorization"],
-            "Bearer valid-token",
-        )
+        body = post.call_args.kwargs["json"]
+        self.assertIn("minAbrade", body)
+        self.assertIn("maxAbrade", body)
 
     def test_c5_login_validation_rejects_missing_credentials(self) -> None:
         with patch(
@@ -992,10 +1356,57 @@ class MetadataTests(unittest.TestCase):
         self.assertFalse(result["indeterminate"])
         self.assertIn("APP 未获取", result["message"])
 
-    def test_c5_login_validation_uses_platform_response(self) -> None:
-        class FakeResponse:
+    def test_c5_session_clear_keeps_client_headers(self) -> None:
+        with TemporaryDirectory() as directory, patch(
+            "core.market_candidates.CACHE_DIR",
+            Path(directory),
+        ):
+            save_c5_client_headers(
+                {
+                    "x-device-id": "persist-device-123",
+                    "x-area": "1",
+                }
+            )
+            save_c5_auth("C5Token=session-value-12345", "c5-access-token-value")
+            profile = Path(directory) / "market_browser_profiles" / "c5"
+            profile.mkdir(parents=True)
+            (profile / "Cookies").write_text("placeholder", encoding="utf-8")
+
+            result = clear_c5_session_auth()
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(provider_auth_available("c5"))
+            self.assertFalse(profile.exists())
+            headers = _c5_client_headers()
+            self.assertEqual(headers.get("x-device-id"), "persist-device-123")
+            self.assertEqual(headers.get("x-area"), "1")
+
+    def test_c5_signer_reused_within_collection_scope(self) -> None:
+        from core.market_candidates import _fetch_c5_via_search_api
+
+        enter_count = 0
+        close_count = 0
+
+        class FakeSigner:
+            def __enter__(self) -> "FakeSigner":
+                nonlocal enter_count
+                enter_count += 1
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def close(self) -> None:
+                nonlocal close_count
+                close_count += 1
+
+            def sign(self, *_args, **_kwargs) -> str:
+                return "fake-signature"
+
+        class SearchApiResponse:
             status_code = 200
-            text = '{"success":true,"data":{"nickname":"C5用户","userId":12}}'
+            headers = {"content-type": "application/json"}
+            text = '{"success":true}'
 
             @staticmethod
             def raise_for_status() -> None:
@@ -1005,74 +1416,168 @@ class MetadataTests(unittest.TestCase):
             def json() -> dict:
                 return {
                     "success": True,
-                    "data": {"nickname": "C5用户", "userId": 12},
+                    "errorCode": 0,
+                    "data": {
+                        "list": [
+                            {
+                                "id": "c5-order-scope",
+                                "price": "18.5",
+                                "assetInfo": {"wear": "0.164862"},
+                            }
+                        ]
+                    },
                 }
 
-        with (
+        fetch_kwargs = {
+            "ids": [1098059387020423168],
+            "display_name": "USP消音版 | 破颚者",
+            "min_wear": 0.15,
+            "max_wear": 0.18,
+            "max_pages": 1,
+            "request_interval": 0,
+            "cookie": "c5token=abc12345token; path=/",
+            "token": "c5-access-token-value",
+        }
+        patches = (
             patch(
-                "core.market_candidates._c5_openapi_auth",
-                return_value=("", ""),
+                "core.market_candidates._c5_client_headers",
+                return_value={
+                    "x-device-id": "device-scope-123",
+                    "x-app-channel": "WEB",
+                    "x-source": "1",
+                    "x-area": "1",
+                },
             ),
+            patch(
+                "core.market_candidates.requests.get",
+                return_value=SearchApiResponse(),
+            ),
+            patch("core.c5_web_signer.C5WebSigner", FakeSigner),
+            patch("core.market_candidates.interruptible_wait"),
+        )
+
+        with patches[0], patches[1], patches[2], patches[3]:
+            with c5_signer_collection_scope():
+                _fetch_c5_via_search_api(**fetch_kwargs)
+                _fetch_c5_via_search_api(**fetch_kwargs)
+        self.assertEqual(enter_count, 1)
+        self.assertEqual(close_count, 1)
+
+        enter_count = 0
+        close_count = 0
+        with patches[0], patches[1], patches[2], patches[3]:
+            _fetch_c5_via_search_api(**fetch_kwargs)
+            _fetch_c5_via_search_api(**fetch_kwargs)
+        self.assertEqual(enter_count, 2)
+        self.assertEqual(close_count, 2)
+
+    def test_c5_browser_risk_pauses_platform(self) -> None:
+        from core.market_candidates import C5AccessGateError, C5PlatformPausedError
+        from core import market_candidates as mc
+
+        source = get_name_map()["USP消音版 | 破颚者"]
+        template = SkinTemplate(
+            paint_index=source.paint_index,
+            weapon_name=source.weapon_name,
+            skin_name=source.skin_name,
+            quality=source.quality,
+            stat_trak=source.stat_trak,
+            min_float=source.min_float,
+            max_float=source.max_float,
+        )
+        with patch(
+            "core.market_candidates._c5_auth",
+            return_value=("c5token=abc12345token; path=/", "c5-access-token-value"),
+        ), patch(
+            "core.market_candidates._fetch_c5_via_browser",
+            side_effect=C5PlatformPausedError("C5GAME 采集失败，本轮已停止该平台"),
+        ):
+            with self.assertRaises(C5PlatformPausedError) as raised:
+                fetch_c5_candidates(
+                    template=template,
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=0,
+                    extra_ids=[1098059387020423168],
+                )
+        self.assertIn("停止", str(raised.exception))
+
+        class FakeCollector:
+            def ensure_open(self, **_kwargs):
+                return None
+
+            def fetch_list_payload(self, **_kwargs):
+                raise C5AccessGateError("请完成安全验证", needs_verify=True)
+
+        with patch(
+            "core.c5_browser_collect.get_c5_browser_collector",
+            return_value=FakeCollector(),
+        ), patch(
+            "core.market_candidates._complete_c5_verify_system_browser",
+        ) as verify_mock:
+            with self.assertRaises(C5PlatformPausedError):
+                mc._fetch_c5_via_browser(
+                    ids=[1098059387020423168],
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=0,
+                )
+        # Failures stop immediately — no verify popup / retry.
+        self.assertEqual(verify_mock.call_count, 0)
+
+    def test_c5_login_validation_uses_platform_response(self) -> None:
+        with (
             patch(
                 "core.market_candidates._c5_auth",
                 return_value=("C5Token=abc12345678; path=/", "c5-access-token-value"),
             ),
             patch(
-                "core.market_candidates.requests.get",
-                return_value=FakeResponse(),
-            ) as get,
+                "core.market_candidates._probe_c5_collection_login",
+                return_value={
+                    "provider": "c5",
+                    "ok": True,
+                    "indeterminate": False,
+                    "message": "C5GAME 登录有效",
+                },
+            ),
+            patch(
+                "core.market_candidates._lookup_c5_user_profile",
+                return_value=("C5用户", 12),
+            ),
         ):
             result = validate_provider_login("c5")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["account_name"], "C5用户")
-        self.assertEqual(
-            get.call_args.kwargs["headers"]["x-access-token"],
-            "c5-access-token-value",
-        )
-        self.assertIn("api.c5game.com", get.call_args.args[0])
 
     def test_eco_login_validation_returns_account_name(self) -> None:
-        class FakeResponse:
-            status_code = 200
-            text = (
-                '{"StatusCode":"0","StatusData":'
-                '{"ResultCode":"0","ResultData":{"NickName":"ECO用户","UserId":9}}}'
-            )
-
-            @staticmethod
-            def raise_for_status() -> None:
-                return None
-
-            @staticmethod
-            def json() -> dict:
-                return {
-                    "StatusCode": "0",
-                    "StatusData": {
-                        "ResultCode": "0",
-                        "ResultData": {"NickName": "ECO用户", "UserId": 9},
-                    },
-                }
-
         with (
             patch(
                 "core.market_candidates._eco_auth",
                 return_value=("eco-token-value-that-is-long", "eco_cookie=1"),
             ),
             patch(
-                "core.market_candidates.requests.get",
-                return_value=FakeResponse(),
-            ) as get,
+                "core.market_candidates._probe_eco_collection_login",
+                return_value={
+                    "provider": "eco",
+                    "ok": True,
+                    "indeterminate": False,
+                    "message": "ECOSteam 登录有效",
+                },
+            ),
+            patch(
+                "core.market_candidates._lookup_eco_user_profile",
+                return_value=("ECO用户", 9),
+            ),
         ):
             result = validate_provider_login("eco")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["account_name"], "ECO用户")
-        self.assertEqual(
-            get.call_args.kwargs["headers"]["Authorization"],
-            "Bearer eco-token-value-that-is-long",
-        )
-        self.assertNotIn("json", get.call_args.kwargs)
 
     def test_c5_eco_auth_persist_and_clear(self) -> None:
         with TemporaryDirectory() as directory, patch(
@@ -1299,48 +1804,44 @@ class MetadataTests(unittest.TestCase):
             self.assertFalse(profile.exists())
             self.assertIn('"cleared": true', payload)
 
-    def test_c5_validation_uses_silent_browser_not_api(self) -> None:
+    def test_c5_validation_uses_collection_probe(self) -> None:
         results: list[dict] = []
         worker = MarketplaceLoginValidationWorker(["c5"])
         worker.provider_checked.connect(
             lambda _provider, result: results.append(dict(result))
         )
-        with (
-            patch("ui.workers.market_login.validate_provider_login") as validate_mock,
-            patch(
-                "ui.workers.market_login._refresh_saved_browser_login",
-                return_value={"refreshed": True, "message": ""},
-            ),
-        ):
+        with patch(
+            "ui.workers.market_login.validate_provider_login",
+            return_value={
+                "provider": "c5",
+                "ok": True,
+                "message": "C5GAME 登录有效",
+            },
+        ) as validate_mock:
             worker.run()
-        validate_mock.assert_not_called()
+        validate_mock.assert_called_once_with("c5", timeout=5.0)
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0]["ok"])
-        self.assertTrue(results[0].get("browser_session"))
-        self.assertIn("静默读取", results[0]["message"])
 
-    def test_eco_validation_silent_browser_failure_skips_api(self) -> None:
+    def test_eco_validation_uses_collection_probe(self) -> None:
         results: list[dict] = []
         worker = MarketplaceLoginValidationWorker(["eco"])
         worker.provider_checked.connect(
             lambda _provider, result: results.append(dict(result))
         )
-        with (
-            patch("ui.workers.market_login.validate_provider_login") as validate_mock,
-            patch(
-                "ui.workers.market_login._refresh_saved_browser_login",
-                return_value={
-                    "refreshed": False,
-                    "message": "尚无 APP 浏览器登录记录",
-                },
-            ),
-        ):
+        with patch(
+            "ui.workers.market_login.validate_provider_login",
+            return_value={
+                "provider": "eco",
+                "ok": False,
+                "message": "ECOSteam 登录已失效，请重新登录",
+            },
+        ) as validate_mock:
             worker.run()
-        validate_mock.assert_not_called()
+        validate_mock.assert_called_once_with("eco", timeout=5.0)
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0]["ok"])
-        self.assertFalse(results[0].get("indeterminate"))
-        self.assertIn("尚无 APP 浏览器登录记录", results[0]["message"])
+        self.assertIn("登录", results[0]["message"])
 
     def test_login_validation_checks_providers_in_parallel(self) -> None:
         order: list[str] = []
@@ -1352,27 +1853,15 @@ class MetadataTests(unittest.TestCase):
             order.append(f"end:{provider}")
             return {"provider": provider, "ok": True, "message": provider}
 
-        def fake_refresh(provider: str) -> dict:
-            order.append(f"start:{provider}")
-            time.sleep(0.25)
-            order.append(f"end:{provider}")
-            return {"refreshed": True, "message": ""}
-
         results: list[str] = []
         worker = MarketplaceLoginValidationWorker(["buff", "yyyp", "c5", "eco"])
         worker.provider_checked.connect(
             lambda provider, _result: results.append(provider)
         )
-        with (
-            patch(
-                "ui.workers.market_login.validate_provider_login",
-                side_effect=lambda provider, timeout=5.0: fake_validate(
-                    provider, timeout
-                ),
-            ),
-            patch(
-                "ui.workers.market_login._refresh_saved_browser_login",
-                side_effect=fake_refresh,
+        with patch(
+            "ui.workers.market_login.validate_provider_login",
+            side_effect=lambda provider, timeout=5.0: fake_validate(
+                provider, timeout
             ),
         ):
             worker.run()

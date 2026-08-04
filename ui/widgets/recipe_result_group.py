@@ -32,9 +32,15 @@ from core.saved_recipes import (
 from ..icons import expand_section_triangle_icon
 
 from .collapsible_group import AlchemyRecipeRowHoverTableWidget
+from .toast import show_toast
 
 _DISCLOSURE_ICON_PX = 14
-from .purchase_qr_label import PurchaseActionCell, PurchaseGoButtonCell, QrSlot
+from .purchase_qr_label import (
+    PurchaseActionCell,
+    PurchaseGoButtonCell,
+    QrSlot,
+    SubstrateActionColumnHeader,
+)
 
 
 def _platform_display_name(platform: object) -> str:
@@ -115,6 +121,7 @@ class RecipeResultGroup(QFrame):
         self._recipe_storage_path = recipe_storage_path
         self._purchase_cells: list[PurchaseGoButtonCell] = []
         self._action_cells: list[PurchaseActionCell] = []
+        self._action_header: SubstrateActionColumnHeader | None = None
         self._get_substrate_action_state = get_substrate_action_state
         self._set_substrate_action_state = set_substrate_action_state
         self._manage_substrate_disk_actions = bool(
@@ -158,6 +165,13 @@ class RecipeResultGroup(QFrame):
         self._rate_color = "#10b981" if recipe.get("rate", 0) >= 0 else "#ef4444"
         self.title_label.setStyleSheet(f"color: {self._rate_color};")
         header_layout.addWidget(self.title_label, 1, Qt.AlignVCenter)
+        if self._show_substrate_actions:
+            self._action_header = SubstrateActionColumnHeader(
+                on_lock_all=self._on_lock_all_substrates,
+                on_exclude_all=self._on_exclude_all_substrates,
+                parent=self.header,
+            )
+            header_layout.addWidget(self._action_header, 0, Qt.AlignVCenter)
         if enable_save:
             self.save_btn = QPushButton("保存配方")
             self.save_btn.setObjectName("alchemySelectFileBtn")
@@ -291,6 +305,8 @@ class RecipeResultGroup(QFrame):
                 it6 = QTableWidgetItem("-")
                 it6.setTextAlignment(align)
                 sub_table.setItem(row, 6, it6)
+        if self._show_substrate_actions:
+            self._refresh_action_header_state()
         content_layout.addWidget(sub_table)
 
         prod_label = QLabel("产物")
@@ -438,6 +454,77 @@ class RecipeResultGroup(QFrame):
         del _slot
         for c in self._action_cells:
             c.refresh_state()
+        self._refresh_action_header_state()
+
+    def _refresh_action_header_state(self) -> None:
+        if self._action_header is None or not self._action_cells:
+            return
+        states = [c._state() for c in self._action_cells]
+        self._action_header.refresh_state(
+            all_locked=bool(states) and all(s == "locked" for s in states),
+            all_excluded=bool(states) and all(s == "excluded" for s in states),
+        )
+
+    def _apply_cell_action_state(
+        self, cell: PurchaseActionCell, target_state: str, *, notify: bool
+    ) -> None:
+        setter = cell._set_slot_action_state
+        if setter is None:
+            return
+        try:
+            setter(cell._slot, target_state, notify=notify)  # type: ignore[call-arg]
+        except TypeError:
+            setter(cell._slot, target_state)
+
+    def _bulk_set_substrates(self, target_state: str) -> int:
+        n = 0
+        for cell in self._action_cells:
+            if cell._set_slot_action_state is None:
+                continue
+            if cell._state() == target_state:
+                continue
+            self._apply_cell_action_state(cell, target_state, notify=False)
+            n += 1
+        self._refresh_action_cells()
+        return n
+
+    def _on_lock_all_substrates(self) -> None:
+        if not self._action_cells:
+            return
+        all_locked = all(c._state() == "locked" for c in self._action_cells)
+        if all_locked:
+            n = self._bulk_set_substrates("neutral")
+            show_toast(
+                self,
+                f"已取消全部锁定（{n} 条）" if n else "当前没有锁定的底物",
+                style="info",
+            )
+            return
+        n = self._bulk_set_substrates("locked")
+        show_toast(
+            self,
+            f"已锁定全部底物（{n} 条）" if n else "底物均已锁定",
+            style="success",
+        )
+
+    def _on_exclude_all_substrates(self) -> None:
+        if not self._action_cells:
+            return
+        all_excluded = all(c._state() == "excluded" for c in self._action_cells)
+        if all_excluded:
+            n = self._bulk_set_substrates("neutral")
+            show_toast(
+                self,
+                f"已取消全部排除（{n} 条）" if n else "当前没有排除的底物",
+                style="info",
+            )
+            return
+        n = self._bulk_set_substrates("excluded")
+        show_toast(
+            self,
+            f"已排除全部底物（{n} 条）" if n else "底物均已排除",
+            style="error",
+        )
 
     def _on_save_clicked(self):
         self.save_requested.emit(self._rank, copy.deepcopy(self._recipe))
