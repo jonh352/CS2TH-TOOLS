@@ -1854,17 +1854,8 @@ def fetch_buff_candidates(
                 )
             # Price-asc pages: once the page is entirely above the recipe cap, stop.
             if price_cap is not None and page_hit_cap and page_kept == 0:
-                if progress:
-                    progress(
-                        f"BUFF · {display_name} · 已超过配方单价 2 倍，停止本窗翻页"
-                    )
                 break
             if _collection_window_row_limit_reached(window_kept[0]):
-                if progress:
-                    progress(
-                        f"BUFF · {display_name} · 本磨损区间已满 "
-                        f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
-                    )
                 break
             try:
                 total_page = int(data.get("total_page") or 0)
@@ -2028,17 +2019,8 @@ def fetch_youpin_candidates(
             # Do not stop merely because page_kept==0 (wear/parse filters); that
             # incorrectly aborts when the first page is all out-of-window.
             if price_cap is not None and page_hit_cap and page_kept == 0:
-                if progress:
-                    progress(
-                        f"悠悠有品 · {display_name} · 已超过配方单价 2 倍，停止本窗翻页"
-                    )
                 break
             if _collection_window_row_limit_reached(window_kept[0]):
-                if progress:
-                    progress(
-                        f"悠悠有品 · {display_name} · 本磨损区间已满 "
-                        f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
-                    )
                 break
             if len(items) < page_size:
                 break
@@ -2858,11 +2840,6 @@ def fetch_c5_candidates(
             seen_listing_ids.add(dedupe_key)
             collected.append(row)
             window_kept += 1
-        if _collection_window_row_limit_reached(window_kept) and progress:
-            progress(
-                f"C5GAME · {display_name} · 本磨损区间已满 "
-                f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
-            )
     return collected
 
 
@@ -3466,20 +3443,9 @@ def fetch_eco_candidates(
                     if _collection_window_row_limit_reached(
                         len(collected) - window_start
                     ):
-                        if progress:
-                            progress(
-                                f"ECOSteam · {display_name} · 本磨损区间已满 "
-                                f"{_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW} 条，停止本窗"
-                            )
                         break
                     # Price-asc pages: entire page above recipe cap → stop paging.
                     if price_cap is not None and page_hit_cap and page_kept == 0:
-                        if progress:
-                            progress(
-                                f"ECOSteam · {display_name} · 已超过配方单价 "
-                                f"{_COLLECTION_ECO_PRICE_CAP_MULTIPLIER:g} 倍，"
-                                "停止本窗翻页"
-                            )
                         break
                     if not _iter_listing_rows(payload):
                         break
