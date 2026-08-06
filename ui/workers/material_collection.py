@@ -144,7 +144,8 @@ def collect_candidates_parallel(
     """Collect in waves: BUFF∥悠悠 first, then C5∥ECO (each provider still serial).
 
     Returns ``(candidates, errors, retry_by_provider)``.
-    ``retry_by_provider`` maps ``eco`` / ``c5`` to materials skipped after a pause.
+    ``retry_by_provider`` stays empty for ``eco`` / ``c5`` (pause stops the platform
+    for this run with no post-run retry queue).
     """
     name_map = get_name_map()
 
@@ -172,8 +173,6 @@ def collect_candidates_parallel(
                     if cancel_check():
                         break
                     if provider in {"eco", "c5"} and platform_paused:
-                        if provider == "eco":
-                            paused_retry.append(dict(material))
                         continue
                     if index > 0:
                         if progress:
@@ -210,20 +209,12 @@ def collect_candidates_parallel(
                         provider_errors.append(f"{provider}·{name}：{exc}")
                         if provider in {"eco", "c5"}:
                             platform_paused = True
-                            # C5: stop remaining materials, but do not queue post-run retry.
-                            if provider == "eco":
-                                paused_retry.append(dict(material))
+                            # Stop remaining materials; do not queue post-run retry.
                             if progress:
-                                if provider == "c5":
-                                    progress(
-                                        f"{provider_display_name(provider)} · "
-                                        "本轮已停止该平台采集"
-                                    )
-                                else:
-                                    progress(
-                                        f"{provider_display_name(provider)} · "
-                                        "本轮已暂停该平台，其余材料将留待结束后询问是否重试"
-                                    )
+                                progress(
+                                    f"{provider_display_name(provider)} · "
+                                    "本轮已停止该平台采集"
+                                )
                         continue
                     except Exception as exc:  # noqa: BLE001 - keep other materials going
                         provider_errors.append(f"{provider}·{name}：{exc}")

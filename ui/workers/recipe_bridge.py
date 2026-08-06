@@ -1,4 +1,4 @@
-"""Background loading for CS2TH recipe links."""
+"""Background loading for CS2TH recipe links and alternatives."""
 
 from __future__ import annotations
 
@@ -29,5 +29,28 @@ class RecipeLoadThread(QThread):
             if self.include_alternatives:
                 payload = attach_recipe_alternatives(payload, self.access_token)
             self.completed.emit(payload, "")
+        except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            self.completed.emit(None, str(exc))
+
+
+class RecipeAlternativesThread(QThread):
+    """Attach alternatives onto an existing bridge payload (saved or link-loaded)."""
+
+    completed = Signal(object, str)
+
+    def __init__(
+        self,
+        payload: dict,
+        access_token: str = "",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.payload = dict(payload)
+        self.access_token = str(access_token or "")
+
+    def run(self) -> None:
+        try:
+            result = attach_recipe_alternatives(self.payload, self.access_token)
+            self.completed.emit(result, "")
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
             self.completed.emit(None, str(exc))

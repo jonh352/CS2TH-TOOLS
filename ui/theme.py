@@ -933,12 +933,14 @@ QHeaderView::section {{
 }}
 QListWidget#recipeFolderList {{
   background: transparent;
+  font-size: 15px;
 }}
 QListWidget#recipeFolderList::item {{
-  min-height: 28px;
-  padding: 7px 10px;
-  margin: 1px 0;
+  min-height: 34px;
+  padding: 8px 10px;
+  margin: 2px 0;
   border-radius: 8px;
+  font-size: 15px;
 }}
 QListWidget#recipeFolderList::item:hover {{
   background: {card_hover};
@@ -946,6 +948,17 @@ QListWidget#recipeFolderList::item:hover {{
 QListWidget#recipeFolderList::item:selected {{
   color: {cyan};
   background: {cyan_dim};
+}}
+QLineEdit#recipeFolderListInlineEdit {{
+  font-size: 15px;
+  padding: 2px 6px;
+  border: 1px solid {cyan};
+  border-radius: 6px;
+  background: {input};
+  color: {text};
+}}
+QLabel#recipeFolderHeading {{
+  font-size: 13px;
 }}
 QFrame#recipeFolderInsertLine {{
   background: {cyan};

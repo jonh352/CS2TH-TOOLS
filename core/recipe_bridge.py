@@ -173,10 +173,13 @@ def alternative_to_recipe_material(alt: dict, primary: dict) -> dict:
 def attach_recipe_alternatives(payload: dict, access_token: str = "") -> dict:
     """Fetch and attach alternatives for each primary input onto the recipe payload."""
     inputs = [item for item in payload.get("inputs", []) if isinstance(item, dict)]
-    rarity = str(payload.get("input_rarity") or "").strip()
+    default_rarity = str(payload.get("input_rarity") or "").strip()
     market = str(payload.get("_market") or "spot")
     alternatives: dict[int, list[dict]] = {}
     for index, item in enumerate(inputs):
+        rarity = str(
+            item.get("quality") or item.get("rarity") or default_rarity or ""
+        ).strip()
         try:
             normalized = item.get("unit_normalized")
             normalized_value = (
@@ -198,6 +201,102 @@ def attach_recipe_alternatives(payload: dict, access_token: str = "") -> dict:
         ]
     payload["_alternatives_by_input"] = alternatives
     return payload
+
+
+def saved_recipe_to_bridge_payload(recipe: dict, *, title: str = "") -> dict:
+    """Build a CS2TH-style bridge payload from a local saved recipe.
+
+    Enables the same material-card / alternatives UI used by link-loaded recipes.
+    """
+    from core.alchemy_quality import (
+        get_name_map,
+        normalize_name,
+        strip_appearance_suffix_from_goods_name,
+    )
+    from core.data_utils import SkinInstance, get_interval_value
+
+    substrates = recipe.get("substrates_display")
+    if not isinstance(substrates, list):
+        substrates = []
+    grouped: dict[tuple[str, float, float], dict] = {}
+    for substrate in substrates:
+        if not isinstance(substrate, dict):
+            continue
+        name = strip_appearance_suffix_from_goods_name(
+            str(substrate.get("name") or "").strip()
+        )
+        if not name:
+            continue
+        try:
+            wear_value = float(substrate.get("float_value"))
+        except (TypeError, ValueError):
+            continue
+        template = get_name_map().get(normalize_name(name))
+        min_float = float(template.min_float) if template is not None else 0.0
+        max_float = float(template.max_float) if template is not None else 1.0
+        low, high = get_interval_value(wear_value)
+        low = max(min_float, float(low))
+        high = min(max_float, float(high))
+        key = (name, low, high)
+        if key not in grouped:
+            box = str(substrate.get("weapon_box") or "").strip()
+            if not box and template is not None and template.weapon_box_name:
+                box = str(template.weapon_box_name[0] or "").strip()
+            quality = str(template.quality) if template is not None else ""
+            span = max_float - min_float
+            try:
+                normalized = (
+                    (wear_value - min_float) / span if span > 1e-12 else None
+                )
+            except (TypeError, ValueError):
+                normalized = None
+            appearance = SkinInstance.get_appearance(wear_value) or ""
+            grouped[key] = {
+                "name": name,
+                "count": 0,
+                "wear": appearance,
+                "wear_value": wear_value,
+                "unit_float": wear_value,
+                "min_wear": low,
+                "max_wear": high,
+                "float_range": f"{low:g} ~ {high:g}",
+                "collection_name": box,
+                "quality": quality,
+                "unit_normalized": normalized,
+                "unit_price_cny": float(substrate.get("price") or 0),
+            }
+        grouped[key]["count"] += 1
+        price = float(substrate.get("price") or 0)
+        if price > 0:
+            grouped[key]["unit_price_cny"] = price
+
+    inputs = list(grouped.values())
+    rarities = [
+        str(item.get("quality") or "").strip()
+        for item in inputs
+        if str(item.get("quality") or "").strip()
+    ]
+    input_rarity = rarities[0] if rarities else ""
+    boxes = [
+        str(item.get("collection_name") or "").strip()
+        for item in inputs
+        if str(item.get("collection_name") or "").strip()
+    ]
+    collection_label = title.strip() or (
+        " × ".join(dict.fromkeys(boxes)) if boxes else "保存配方"
+    )
+    return {
+        "inputs": inputs,
+        "input_rarity": input_rarity,
+        "collection_name": collection_label,
+        "input_cost": float(recipe.get("cost") or 0),
+        "roi": float(recipe.get("rate") or 0),
+        "_market": "spot",
+        "_recipe_id": str(
+            recipe.get("cs2th_recipe_id") or recipe.get("id") or ""
+        ),
+        "outcomes": [],
+    }
 
 
 def cs2th_detail_to_saved_recipe(payload: dict) -> dict:

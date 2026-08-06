@@ -70,6 +70,7 @@ from core.saved_recipes import (
     load_recipe_folders,
     move_recipes_to_folder,
     rename_recipe_folder,
+    rename_saved_recipe_title,
     reorder_recipe_folders,
     save_recipe_file,
 )
@@ -674,6 +675,19 @@ def _build_recipe_summary_header_row(
     return frame
 
 
+class _RecipeTitleLabel(QLabel):
+    """Title label that emits ``double_clicked`` for inline rename."""
+
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class _SavedRecipeRow(QWidget):
     def _recipe_manage_page(self) -> RecipeManagePage | None:
         if self._recipe_page is not None:
@@ -713,16 +727,34 @@ class _SavedRecipeRow(QWidget):
         meta.setSpacing(4)
         self._can_sim_import = self._simulation_import_slot_count_label() is not None
         self._can_collect_import = bool(self._inner_recipe_dict().get("substrates_display"))
+        self._renaming = False
+        self._title_edit: QLineEdit | None = None
         title_text = _display_row_title(payload)
-        tl = QLabel(title_text)
-        tl.setObjectName("alchemyStep2NormLabel")
-        tl.setWordWrap(True)
-        tl.setMinimumWidth(0)
-        tl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._title_label = _RecipeTitleLabel(title_text)
+        self._title_label.setObjectName("alchemyStep2NormLabel")
+        self._title_label.setWordWrap(True)
+        self._title_label.setMinimumWidth(0)
+        self._title_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._title_label.setCursor(Qt.PointingHandCursor)
+        self._title_label.setToolTip("双击重命名配方")
+        self._title_label.double_clicked.connect(self._begin_title_rename)
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
         title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.addWidget(tl, 1)
+        title_row.addWidget(self._title_label, 1)
+        self._title_row = title_row
+        self._rename_btn = QPushButton("重命名", self)
+        self._rename_btn.setObjectName("recipeSimImportBtn")
+        self._rename_btn.setCursor(Qt.PointingHandCursor)
+        self._rename_btn.setToolTip("重命名配方")
+        self._rename_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._rename_btn.setAutoDefault(False)
+        self._rename_btn.setDefault(False)
+        self._rename_btn.setVisible(not batch_mode)
+        self._rename_btn.clicked.connect(self._begin_title_rename)
+        title_row.addWidget(self._rename_btn, 0, Qt.AlignTop)
         self._sim_import_btn = QPushButton("导入模拟", self)
         self._sim_import_btn.setObjectName("recipeSimImportBtn")
         self._sim_import_btn.setCursor(Qt.PointingHandCursor)
@@ -914,7 +946,65 @@ class _SavedRecipeRow(QWidget):
             self._sim_import_btn.setVisible(not visible)
         if self._can_collect_import:
             self._collect_import_btn.setVisible(not visible)
+        self._rename_btn.setVisible(not visible)
+        if visible and self._renaming:
+            self._cancel_title_rename()
         self._update_batch_click_filters()
+
+    def _begin_title_rename(self) -> None:
+        if self._batch_mode or self._renaming:
+            return
+        self._renaming = True
+        self._rename_btn.hide()
+        self._sim_import_btn.hide()
+        self._collect_import_btn.hide()
+        self._title_row.removeWidget(self._title_label)
+        self._title_label.hide()
+        edit = QLineEdit(self)
+        edit.setObjectName("recipeFolderListInlineEdit")
+        edit.setText(_display_row_title(self._payload))
+        edit.setPlaceholderText("配方名称")
+        edit.returnPressed.connect(self._commit_title_rename)
+        edit.installEventFilter(self)
+        self._title_row.insertWidget(0, edit, 1)
+        self._title_edit = edit
+        edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        edit.selectAll()
+
+    def _cancel_title_rename(self) -> None:
+        if not self._renaming:
+            return
+        edit = self._title_edit
+        if edit is not None:
+            self._title_row.removeWidget(edit)
+            edit.deleteLater()
+        self._title_edit = None
+        self._title_row.insertWidget(0, self._title_label, 1)
+        self._title_label.show()
+        self._renaming = False
+        self._rename_btn.show()
+        if self._can_sim_import and not self._batch_mode:
+            self._sim_import_btn.show()
+        if self._can_collect_import and not self._batch_mode:
+            self._collect_import_btn.show()
+
+    def _commit_title_rename(self) -> None:
+        if not self._renaming or self._title_edit is None:
+            return
+        raw = self._title_edit.text().strip()
+        try:
+            stored = rename_saved_recipe_title(self._path, raw)
+        except Exception as exc:  # noqa: BLE001
+            show_toast(self, f"重命名失败：{exc}", style="warning")
+            self._cancel_title_rename()
+            return
+        self._payload["title"] = stored
+        self._title_label.setText(stored)
+        self._cancel_title_rename()
+
+    def _commit_title_rename_if_still_editing(self) -> None:
+        if self._renaming and self._title_edit is not None:
+            self._commit_title_rename()
 
     def _update_batch_click_filters(self) -> None:
         for w in self.findChildren(QWidget):
@@ -928,6 +1018,15 @@ class _SavedRecipeRow(QWidget):
             w.installEventFilter(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if self._renaming and watched is self._title_edit:
+            et = event.type()
+            if et == QEvent.Type.KeyPress and hasattr(event, "key"):
+                if event.key() == Qt.Key.Key_Escape:
+                    self._cancel_title_rename()
+                    return True
+            if et == QEvent.Type.FocusOut:
+                QTimer.singleShot(0, self._commit_title_rename_if_still_editing)
+            return super().eventFilter(watched, event)
         if not self._check.isVisible():
             return super().eventFilter(watched, event)
         et = event.type()
@@ -1087,7 +1186,7 @@ class RecipeManagePage(QWidget):
         card_lay = QVBoxLayout(folder_card)
         card_lay.setContentsMargins(12, 12, 12, 12)
         card_lay.setSpacing(10)
-        folder_heading = QLabel("文件夹（拖动可排序）")
+        folder_heading = QLabel("文件夹（拖动排序，双击/右键改名）")
         folder_heading.setObjectName("recipeFolderHeading")
         card_lay.addWidget(folder_heading)
 
@@ -1096,6 +1195,7 @@ class RecipeManagePage(QWidget):
             self._on_folder_sidebar_order_committed
         )
         self._folder_list.currentItemChanged.connect(self._on_folder_item_changed)
+        self._folder_list.itemDoubleClicked.connect(self._on_folder_item_double_clicked)
         self._folder_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._folder_list.customContextMenuRequested.connect(self._on_folder_list_context_menu)
         card_lay.addWidget(self._folder_list, 1)
@@ -1902,6 +2002,12 @@ class RecipeManagePage(QWidget):
                 0,
                 lambda t=tok: self._apply_deferred_batch_resume_after_folder_change(t),
             )
+
+    def _on_folder_item_double_clicked(self, item: QListWidgetItem) -> None:
+        key = _folder_list_item_role_key(item)
+        if key in (None, _LEGACY_FOLDER_KEY_ALL, FOLDER_KEY_UNCAT, FOLDER_SIDEBAR_PENDING_NEW_KEY):
+            return
+        self._begin_folder_inline_rename(str(key))
 
     def _on_folder_list_context_menu(self, pos: QPoint) -> None:
         item = self._folder_list.itemAt(pos)

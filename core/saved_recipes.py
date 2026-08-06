@@ -535,6 +535,19 @@ def update_recipe_recipe_dict(path: Path, recipe: dict[str, Any]) -> None:
     invalidate_saved_recipes_cache()
 
 
+def rename_saved_recipe_title(path: Path, title: str) -> str:
+    """Update the display ``title`` of a saved recipe file. Returns the stored title."""
+    rp, data = _load_recipe_payload(path)
+    recipe = data.get("recipe") if isinstance(data.get("recipe"), dict) else {}
+    cleaned = str(title or "").strip()
+    if not cleaned:
+        cleaned = default_save_recipe_dialog_title(recipe)
+    data["title"] = cleaned
+    _write_recipe_payload(rp, data)
+    invalidate_saved_recipes_cache()
+    return cleaned
+
+
 def delete_recipe_files(paths: list[Path]) -> int:
     """删除给定路径的配方文件，返回成功删除数量（仅允许删除 recipes 目录内 .json）。"""
     base = RECIPES_DIR.resolve()

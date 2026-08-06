@@ -71,9 +71,11 @@ from core.market_external_browser import (
 )
 from core.product_price_sync import sync_product_price_cache
 from core.recipe_bridge import (
+    attach_recipe_alternatives,
     cs2th_detail_to_saved_recipe,
     material_wear_range,
     parse_recipe_reference,
+    saved_recipe_to_bridge_payload,
 )
 from core.special_wear_names import get_skin_full_names_without_appearance
 from core.special_wear_materials import (
@@ -1970,6 +1972,50 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(len(converted["substrates_display"]), 2)
         self.assertEqual(converted["simulation_slot_count"], 2)
         self.assertAlmostEqual(converted["rate"], 0.25)
+
+    def test_saved_recipe_to_bridge_payload_and_alternatives(self) -> None:
+        name_map = get_name_map()
+        sample = next(iter(name_map.values()))
+        full_name = f"{sample.weapon_name} | {sample.skin_name}"
+        box = (
+            str(sample.weapon_box_name[0])
+            if sample.weapon_box_name
+            else "测试收藏品"
+        )
+        mid = (float(sample.min_float) + float(sample.max_float)) / 2.0
+        recipe = {
+            "cost": 10.0,
+            "rate": 0.1,
+            "substrates_display": [
+                {
+                    "name": full_name,
+                    "float_value": mid,
+                    "price": 5.0,
+                    "weapon_box": box,
+                }
+            ],
+        }
+        payload = saved_recipe_to_bridge_payload(recipe, title="单测配方")
+        self.assertEqual(payload["collection_name"], "单测配方")
+        self.assertEqual(len(payload["inputs"]), 1)
+        self.assertTrue(payload["inputs"][0].get("wear"))
+
+        with patch(
+            "core.recipe_bridge.fetch_material_alternatives",
+            return_value=[
+                {
+                    "name": f"{full_name} 备选",
+                    "equiv_float": mid,
+                    "float_range": "0.1 ~ 0.2",
+                    "unit_price_cny": 4.0,
+                    "supports_wear": True,
+                }
+            ],
+        ):
+            attached = attach_recipe_alternatives(dict(payload), access_token="")
+        alts = attached["_alternatives_by_input"][0]
+        self.assertEqual(len(alts), 1)
+        self.assertTrue(alts[0].get("is_alternative"))
 
     def test_product_price_payload_builds_expected_map(self) -> None:
         raw = {

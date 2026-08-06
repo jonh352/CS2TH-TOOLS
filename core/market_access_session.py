@@ -3,10 +3,14 @@
 When HTTP collection is blocked (client-version gate / slider), open the same
 login browser profile in a visible window so the user can finish verification.
 Successful sell-list XHRs from that window are reused for the rest of the run.
+
+ECO slider windows start minimized to the taskbar; when a real slider is
+detected the window is restored and the assistant prompts the user to complete it.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +26,8 @@ from core.market_candidates import (
 from core.steam.errors import SteamBrowserLaunchError, SteamBrowserNotFoundError
 from core.steam.launch import focus_single_page, launch_persistent_chromium_context
 
+logger = logging.getLogger(__name__)
+
 ProgressCb = Callable[[str], None] | None
 
 
@@ -29,6 +35,48 @@ def _profile_dir(provider: str) -> Path:
     path = CACHE_DIR / "market_browser_profiles" / provider
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _set_page_window_state(page: Any, state: str, *, width: int = 960, height: int = 720) -> None:
+    """Minimize or restore the Chromium window attached to ``page`` via CDP."""
+    if page is None:
+        return
+    try:
+        session = page.context.new_cdp_session(page)
+    except Exception:
+        return
+    try:
+        target = session.send("Browser.getWindowForTarget")
+        window_id = target.get("windowId") if isinstance(target, dict) else None
+        if window_id is None:
+            return
+        bounds: dict[str, Any] = {"windowState": state}
+        if state == "normal":
+            bounds["width"] = width
+            bounds["height"] = height
+        session.send(
+            "Browser.setWindowBounds",
+            {"windowId": window_id, "bounds": bounds},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("access-session windowState=%s failed: %s", state, exc)
+    finally:
+        try:
+            session.detach()
+        except Exception:
+            pass
+
+
+def _minimize_access_window(page: Any) -> None:
+    _set_page_window_state(page, "minimized")
+
+
+def _restore_access_window(page: Any) -> None:
+    _set_page_window_state(page, "normal")
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
 
 
 def _filter_request_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -417,19 +465,25 @@ class MarketAccessSession:
             or the challenge never showed up before timeout).
         """
         raise_if_cancelled(cancel_check)
-        self.open(progress=progress)
+        # Suppress generic "please complete in popup" open text; we drive status below.
+        self.open(progress=None)
         assert self._page is not None and self._context is not None
+        page = self._page
+        # Keep the ECO verify browser on the taskbar until a real slider shows up.
+        _minimize_access_window(page)
         if progress:
             if require_slider:
-                progress("ECOSteam · 请在弹出窗口完成滑块验证…")
+                progress(
+                    "ECOSteam · 验证窗口已最小化到任务栏，正在等待滑块出现…"
+                )
             else:
-                progress("ECOSteam · 正在检查是否出现滑块验证…")
-        page = self._page
+                progress("ECOSteam · 正在后台检查是否出现滑块验证…")
         page.goto(
             "https://www.ecosteam.cn/",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
+        _minimize_access_window(page)
         opened_at = time.monotonic()
         # When API already said slider is required, wait longer for it to appear.
         detect_ms = 60_000 if require_slider else slider_detect_ms
@@ -499,7 +553,9 @@ class MarketAccessSession:
                         progress("ECOSteam · 接口已恢复，无需滑块…")
                     return "cleared"
             if progress and require_slider and now - last_progress >= 3.0:
-                progress("ECOSteam · 等待滑块页面出现…")
+                progress(
+                    "ECOSteam · 验证窗口在任务栏；等待滑块页面出现…"
+                )
                 last_progress = now
             page.wait_for_timeout(400)
 
@@ -509,10 +565,12 @@ class MarketAccessSession:
             _save_cookie(last_cookie)
             return "no_slider"
 
-        # Phase 2: slider present — wait until user finishes, then auto-close.
+        # Phase 2: real slider — restore taskbar window and prompt in the app.
+        _restore_access_window(page)
         if progress:
             progress(
-                "ECOSteam · 请拖动完成滑块验证；完成后窗口将自动关闭并继续采集…"
+                "ECOSteam · 检测到滑块：已打开任务栏窗口，请完成滑动验证；"
+                "完成后窗口会自动关闭并继续采集…"
             )
         while time.monotonic() < deadline:
             raise_if_cancelled(cancel_check)
@@ -539,14 +597,17 @@ class MarketAccessSession:
 
             if progress and now - last_progress >= 3.0:
                 if on_slider:
-                    progress("ECOSteam · 请在弹出窗口拖动完成滑块验证…")
+                    _restore_access_window(page)
+                    progress(
+                        "ECOSteam · 请在已打开的窗口中拖动完成滑块验证…"
+                    )
                 else:
                     progress("ECOSteam · 滑块已完成，正在确认接口…")
                 last_progress = now
             page.wait_for_timeout(500)
 
         raise RuntimeError(
-            "等待 ECOSteam 滑块验证超时：请在弹出窗口完成滑块后保持页面打开"
+            "等待 ECOSteam 滑块验证超时：请在任务栏打开的窗口完成滑块后保持页面打开"
         )
 
 

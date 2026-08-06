@@ -3274,7 +3274,7 @@ def _resolve_eco_access_gate(
 
     if needs_slider:
         if progress:
-            progress("ECOSteam · 检测到滑块验证，正在弹出验证窗口…")
+            progress("ECOSteam · 检测到滑块验证，验证窗口已开到任务栏…")
         from core.market_access_session import close_access_sessions, get_access_session
 
         session = get_access_session("eco")

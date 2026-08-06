@@ -51,7 +51,7 @@ from core.platform_login_state import (
     set_marketplace_login_confirmed,
     steam_session_available,
 )
-from core.recipe_bridge import material_wear_range
+from core.recipe_bridge import material_wear_range, saved_recipe_to_bridge_payload
 from core.saved_recipes import list_saved_recipes
 from core.json_store import read_json_dict, write_json
 from core.market_candidates import (
@@ -64,11 +64,10 @@ from core.market_candidates import (
 from core.special_wear_names import get_skin_full_names_without_appearance
 from ui.components import panel
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
-from ui.feedback import ask_confirmation
 from ui.widgets.eliding_label import ElidingLabel
 from ui.widgets.toast import show_toast
 from ui.widgets.wear_interval_bar import WearIntervalBar, WearRangeSelector
-from ui.workers.recipe_bridge import RecipeLoadThread
+from ui.workers.recipe_bridge import RecipeAlternativesThread, RecipeLoadThread
 from ui.workers.market_login import (
     MarketplaceLoginCaptureWorker,
     MarketplaceLoginValidationWorker,
@@ -121,7 +120,7 @@ class PlatformPage(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._recipe_thread: RecipeLoadThread | None = None
+        self._recipe_thread: RecipeLoadThread | RecipeAlternativesThread | None = None
         self._login_confirmed = confirmed_marketplace_logins()
         self._verified_logins: dict[str, dict] = {}
         self._login_validation_worker: MarketplaceLoginValidationWorker | None = None
@@ -964,15 +963,62 @@ class PlatformPage(QWidget):
     def _on_include_alternatives_toggled(self, *_args) -> None:
         self._save_collection_settings()
         if self._last_recipe_payload is not None:
-            # Re-read so alternatives are fetched when newly enabled.
+            # Re-fetch so alternatives are loaded when newly enabled.
             if self.include_alternatives.isChecked() and not isinstance(
                 self._last_recipe_payload.get("_alternatives_by_input"),
                 dict,
             ):
                 if self.recipe_edit.text().strip():
                     self._load_recipe()
+                else:
+                    self._start_attach_alternatives(self._last_recipe_payload)
                 return
             self._render_loaded_recipe_materials(self._last_recipe_payload)
+
+    def _start_attach_alternatives(self, payload: dict) -> None:
+        if self._recipe_thread is not None and self._recipe_thread.isRunning():
+            return
+        session = AuthClient().load_local_session()
+        token = session.access_token if session is not None else ""
+        self.recipe_status.setText("正在拉取备选材料…")
+        thread = RecipeAlternativesThread(payload, token, self)
+        thread.completed.connect(self._alternatives_attached)
+        thread.finished.connect(thread.deleteLater)
+        self._recipe_thread = thread
+        thread.start()
+
+    def _alternatives_attached(self, payload: object, error: str) -> None:
+        self._recipe_thread = None
+        if error or not isinstance(payload, dict):
+            if self._last_recipe_payload is not None:
+                self._render_loaded_recipe_materials(self._last_recipe_payload)
+            show_toast(self, error or "备选材料读取失败", style="warning")
+            return
+        self._apply_recipe_payload(payload)
+        if not self.recipe_edit.text().strip():
+            self.recipe_summary_meta.setText("来自配方管理 · 可调整磨损采集")
+            self.open_recipe_button.hide()
+
+    def _apply_recipe_payload(self, payload: dict) -> None:
+        self._last_recipe_payload = dict(payload)
+        materials = [item for item in payload.get("inputs", []) if isinstance(item, dict)]
+        alt_map = payload.get("_alternatives_by_input")
+        alt_count = 0
+        if isinstance(alt_map, dict):
+            alt_count = sum(
+                len(items) for items in alt_map.values() if isinstance(items, list)
+            )
+        status = (
+            "已读取配方。默认展开每条材料磨损档的前一档与后一档，可拖动调整；"
+            "平台采集请勾选上方候选源后点「开始采集」；"
+            "采集完成后可选择导入计算或保存为 JSON。"
+        )
+        if self.include_alternatives.isChecked():
+            status += f" 已附带 {alt_count} 条备选材料。"
+        self.recipe_status.setText(status)
+        self._render_loaded_recipe_materials(payload)
+        if not materials:
+            show_toast(self, "配方中没有可采集材料", style="warning")
 
     def _recipe_loaded(self, payload: object, error: str) -> None:
         self.recipe_load_button.setEnabled(True)
@@ -1014,6 +1060,8 @@ class PlatformPage(QWidget):
         self.recipe_summary.show()
         self.open_recipe_button.show()
         self._render_loaded_recipe_materials(payload)
+        if not materials:
+            show_toast(self, "配方中没有可采集材料", style="warning")
 
     def _iter_recipe_display_materials(
         self,
@@ -1652,71 +1700,31 @@ class PlatformPage(QWidget):
         """Render a saved recipe in recipe mode, using only each wear's own bucket."""
         if not isinstance(recipe, dict):
             return "配方数据无效"
-        substrates = recipe.get("substrates_display")
-        if not isinstance(substrates, list) or not substrates:
-            return "配方中没有可采集材料"
-        grouped: dict[tuple[str, float, float], dict] = {}
-        for substrate in substrates:
-            if not isinstance(substrate, dict):
-                continue
-            name = strip_appearance_suffix_from_goods_name(
-                str(substrate.get("name") or "").strip()
-            )
-            try:
-                wear_value = float(substrate.get("float_value"))
-            except (TypeError, ValueError):
-                continue
-            template = get_name_map().get(normalize_name(name))
-            min_float = float(template.min_float) if template is not None else 0.0
-            max_float = float(template.max_float) if template is not None else 1.0
-            low, high = get_interval_value(wear_value)
-            low = max(min_float, float(low))
-            high = min(max_float, float(high))
-            key = (name, low, high)
-            if key not in grouped:
-                grouped[key] = {
-                    "name": name,
-                    "wear_value": wear_value,
-                    "min_wear": low,
-                    "max_wear": high,
-                    "count": 0,
-                }
-            grouped[key]["count"] += 1
-        if not grouped:
-            return "配方材料缺少有效名称或磨损"
-        materials = list(grouped.values())
         display_title = title.strip() or "保存配方"
-        self._last_recipe_payload = None
+        payload = saved_recipe_to_bridge_payload(recipe, title=display_title)
+        inputs = [
+            item for item in payload.get("inputs", []) if isinstance(item, dict)
+        ]
+        if not inputs:
+            return "配方中没有可采集材料"
         self.recipe_edit.clear()
-        self.recipe_status.setText(
-            f"当前显示配方管理中的“{display_title}”；"
-            "默认展开材料所在磨损档的前一档与后一档，可拖动调整。"
-        )
+        self._current_recipe_url = ""
+        self._set_mode(1)
+        if self.include_alternatives.isChecked():
+            self._last_recipe_payload = payload
+            self.recipe_summary_title.setText(display_title)
+            self.recipe_summary_meta.setText("来自配方管理 · 正在拉取备选材料…")
+            self.recipe_summary.show()
+            self.open_recipe_button.hide()
+            # Show primaries immediately, then enrich with alternatives.
+            self._render_loaded_recipe_materials(payload)
+            self._start_attach_alternatives(payload)
+            return None
+        self._apply_recipe_payload(payload)
         self.recipe_summary_title.setText(display_title)
         self.recipe_summary_meta.setText("来自配方管理 · 可调整磨损采集")
         self.recipe_summary.show()
         self.open_recipe_button.hide()
-        self.material_count.setText(
-            f"{len(materials)} 种材料 · 共 {sum(int(item['count']) for item in materials)} 件"
-        )
-        _clear_layout(self.materials_layout)
-        self._recipe_material_states = []
-        self._reset_collection_links()
-        for index, material in enumerate(materials, start=1):
-            # Reuse recipe-link cards: expand to neighboring three MID grades.
-            card_material = {
-                "name": material["name"],
-                "count": material["count"],
-                "wear_value": material["wear_value"],
-                "min_wear": material["min_wear"],
-                "max_wear": material["max_wear"],
-                "float_range": (
-                    f"{material['min_wear']:g} ~ {material['max_wear']:g}"
-                ),
-            }
-            self.materials_layout.addWidget(self._material_card(index, card_material))
-        self._rebuild_recipe_collection_links()
-        self._set_mode(1)
         return None
 
     def _special_material_card(self, index: int, material: dict) -> QFrame:
@@ -2040,42 +2048,6 @@ class PlatformPage(QWidget):
         if not self._collection_queue and not self._collection_timer.isActive():
             self._finish_collection()
 
-    def _start_platform_retry_collection(
-        self,
-        provider: str,
-        materials: list[dict],
-    ) -> None:
-        """Re-run one paused platform for materials skipped after a pause."""
-        if not materials or provider not in {"eco", "c5"}:
-            self._finish_collection()
-            return
-        self._collection_running = True
-        self._collection_stopping = False
-        self._collection_scrape_pending = True
-        self._pending_retry_provider = provider
-        self.collection_toggle_button.setText("停止采集")
-        self.collection_toggle_button.setEnabled(True)
-        self._set_collection_status_state("running")
-        display = "ECOSteam" if provider == "eco" else "C5GAME"
-        self.collection_status.setText(
-            f"正在重试 {display} · {len(materials)} 种未完成材料"
-        )
-        interval = self._collection_intervals.get(provider)
-        worker = MaterialCollectionWorker(
-            materials=materials,
-            providers=[provider],
-            provider_intervals={
-                provider: interval.value() if interval is not None else (5 if provider == "c5" else 3),
-            },
-            silent=self.silent_collection.isChecked(),
-            parent=self,
-        )
-        worker.progress.connect(self._set_collection_status_text)
-        worker.completed.connect(self._material_collection_scraped)
-        worker.finished.connect(worker.deleteLater)
-        self._material_worker = worker
-        worker.start()
-
     def _process_next_collection_link(self) -> None:
         if not self._collection_queue:
             if not self._collection_scrape_pending:
@@ -2129,14 +2101,6 @@ class PlatformPage(QWidget):
             if isinstance(item, dict)
         ]
 
-        def _retry_names(materials: list[dict]) -> tuple[str, str]:
-            names = "、".join(
-                str(item.get("name") or "").strip() or "?"
-                for item in materials[:5]
-            )
-            more = "" if len(materials) <= 5 else f" 等 {len(materials)} 种"
-            return names, more
-
         if (
             c5_retry
             and allow_prompt
@@ -2152,19 +2116,7 @@ class PlatformPage(QWidget):
             and not self._collection_stopping
             and "eco" in selected
         ):
-            names, more = _retry_names(eco_retry)
-            if ask_confirmation(
-                self,
-                "ECO 未采集成功",
-                f"ECOSteam 有 {len(eco_retry)} 种材料未采到（{names}{more}）。\n"
-                "是否只重试这些 ECO 材料？\n"
-                "其他平台已采到的结果会保留。",
-            ):
-                self._eco_retry_materials = []
-                self._eco_retry_base_items = [dict(item) for item in items]
-                self._pending_alchemy_import = items
-                self._start_platform_retry_collection("eco", eco_retry)
-                return
+            # ECO failures stop the platform for this run; no post-run retry prompt.
             self._eco_retry_materials = []
 
         self._allow_platform_retry_prompt = False
