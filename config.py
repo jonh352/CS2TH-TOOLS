@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "CS2TH 汰换小助手"
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 # HTTP/1.1 headers are encoded as Latin-1 by requests/urllib3. Keep the
 # transport identifier ASCII-only even though the visible application name is Chinese.
 APP_HTTP_USER_AGENT = f"CS2TH-Tradeup-Assistant/{APP_VERSION}"

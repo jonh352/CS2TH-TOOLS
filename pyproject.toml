@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs2th-tools"
-version = "0.3.2"
+version = "0.3.3"
 description = "CS2TH desktop tools for float lookup, marketplace links and Steam inventory."
 requires-python = ">=3.10"
 dependencies = [

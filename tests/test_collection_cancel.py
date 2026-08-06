@@ -18,33 +18,62 @@ class CollectionCancellationTests(unittest.TestCase):
         with self.assertRaises(CollectionCancelled):
             interruptible_wait(30, lambda: True)
 
-    def test_material_worker_passes_live_cancel_callback(self) -> None:
+    def test_material_worker_emits_partial_rows_when_stopped(self) -> None:
         worker = MaterialCollectionWorker(
-            materials=[{"name": "AK-47 | 传承", "min_wear": 0.1, "max_wear": 0.2}],
+            materials=[
+                {"name": "skin-a", "min_wear": 0.1, "max_wear": 0.2},
+                {"name": "skin-b", "min_wear": 0.1, "max_wear": 0.2},
+            ],
             providers=["buff"],
             provider_intervals={"buff": 5},
         )
-        callback_seen: list[bool] = []
+        emitted: list[tuple] = []
+        worker.completed.connect(
+            lambda rows, message, retry: emitted.append((rows, message, retry))
+        )
+        calls = {"n": 0}
 
         def fake_fetch(_provider: str, **kwargs):
-            cancel_check = kwargs["cancel_check"]
-            callback_seen.append(callable(cancel_check))
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [
+                    {
+                        "platform": "buff",
+                        "listing_id": "kept-1",
+                        "goods_id": "kept-1",
+                        "goods_name": "skin-a",
+                        "float_value": 0.15,
+                        "price": 1.2,
+                    }
+                ]
             worker.request_stop()
-            if cancel_check():
-                raise CollectionCancelled("stopped")
-            return []
+            raise CollectionCancelled("stopped")
 
         with (
+            patch(
+                "ui.workers.material_collection.get_name_map",
+                return_value={"skin-a": object(), "skin-b": object()},
+            ),
+            patch(
+                "ui.workers.material_collection.normalize_name",
+                side_effect=lambda name: name,
+            ),
             patch(
                 "ui.workers.material_collection.fetch_exact_wear_candidates",
                 side_effect=fake_fetch,
             ),
             patch("ui.workers.material_collection.close_access_sessions"),
+            patch(
+                "ui.workers.material_collection.interruptible_wait",
+            ),
         ):
             worker.run()
 
-        self.assertEqual(callback_seen, [True])
-        self.assertTrue(worker._is_stop_requested())
+        self.assertEqual(len(emitted), 1)
+        rows, message, _retry = emitted[0]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["listing_id"], "kept-1")
+        self.assertIn("已停止", message)
 
     def test_material_worker_collects_in_buff_yyyp_then_c5_eco_waves(self) -> None:
         worker = MaterialCollectionWorker(

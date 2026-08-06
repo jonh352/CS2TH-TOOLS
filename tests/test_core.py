@@ -2376,7 +2376,7 @@ class AuthTests(unittest.TestCase):
     def test_auth_http_headers_are_latin1_safe(self) -> None:
         client = AuthClient(enabled=True)
         user_agent = client._http.headers["User-Agent"]
-        self.assertEqual(user_agent, "CS2TH-Tradeup-Assistant/0.3.2")
+        self.assertEqual(user_agent, "CS2TH-Tradeup-Assistant/0.3.3")
         user_agent.encode("latin-1")
 
     def test_product_price_conditional_request_uses_etag(self) -> None:

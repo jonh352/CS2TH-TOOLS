@@ -37,7 +37,7 @@
 ```text
 Authorization: Bearer <access_token>
 X-CS2TH-Client: cs2th-tools
-X-CS2TH-Version: 0.3.2
+X-CS2TH-Version: 0.3.3
 ```
 
 响应沿用炼金引擎价格结构，根对象至少包含 `ordinary` 或 `stat_trak`，

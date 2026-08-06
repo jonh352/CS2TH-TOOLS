@@ -1492,12 +1492,18 @@ class PlatformPage(QWidget):
         self._collection_started_at = None
         elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
         if was_stopping:
-            self._collected_items = []
-            self._set_collection_status_text(
-                f"已停止采集，共计 {elapsed:.1f} 秒",
-                state="complete",
+            kept = [
+                dict(item) for item in candidate_rows if isinstance(item, dict)
+            ]
+            self._apply_stopped_collection_results(
+                kept,
+                message=str(message or "").strip(),
+                elapsed=elapsed,
             )
-            self.special_collection_status.setText("采集已停止")
+            status = self.collection_status.text()
+            self.special_collection_status.setText(
+                status if kept else "采集已停止（无已抓取挂单）"
+            )
             return
         self._collected_items = [
             dict(item) for item in candidate_rows if isinstance(item, dict)
@@ -1988,23 +1994,6 @@ class PlatformPage(QWidget):
         retry_meta: object = None,
     ) -> None:
         self._material_worker = None
-        if self._collection_stopping:
-            self._collection_stopping = False
-            self._collection_running = False
-            self._collection_scrape_pending = False
-            self._pending_alchemy_import = []
-            self._eco_retry_materials = []
-            self._c5_retry_materials = []
-            self._eco_retry_base_items = []
-            self._pending_retry_provider = ""
-            self._collection_started_at = None
-            self.collection_toggle_button.setEnabled(True)
-            self.collection_toggle_button.setText("开始采集")
-            self._set_collection_status_text("已停止采集", state="complete")
-            return
-        if not self._collection_running:
-            return
-        self._collection_scrape_pending = False
         rows = [item for item in candidates if isinstance(item, dict)] if isinstance(
             candidates, list
         ) else []
@@ -2016,6 +2005,30 @@ class PlatformPage(QWidget):
         self._eco_retry_base_items = []
         if base:
             rows = dedupe_candidates_keep_cheapest([*base, *rows])
+        if self._collection_stopping:
+            self._collection_stopping = False
+            self._collection_running = False
+            self._collection_scrape_pending = False
+            self._pending_alchemy_import = []
+            self._eco_retry_materials = []
+            self._c5_retry_materials = []
+            self._pending_retry_provider = ""
+            self._allow_platform_retry_prompt = False
+            self._last_scrape_message = ""
+            started_at = self._collection_started_at
+            self._collection_started_at = None
+            elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
+            self.collection_toggle_button.setEnabled(True)
+            self.collection_toggle_button.setText("开始采集")
+            self._apply_stopped_collection_results(
+                rows,
+                message=str(message or "").strip(),
+                elapsed=elapsed,
+            )
+            return
+        if not self._collection_running:
+            return
+        self._collection_scrape_pending = False
         self._pending_alchemy_import = rows
         self._last_scrape_message = str(message or "").strip()
         eco_retry: list[dict] = []
@@ -2195,6 +2208,32 @@ class PlatformPage(QWidget):
             return
         show_toast(self, f"已保存 {path.name}，可在配方管理中查看", style="success")
 
+    def _apply_stopped_collection_results(
+        self,
+        items: list[dict],
+        *,
+        message: str = "",
+        elapsed: float = 0.0,
+    ) -> None:
+        """Keep partial scrape results after the user stops collection."""
+        kept = [dict(item) for item in items if isinstance(item, dict)]
+        self._collected_items = kept
+        counts_text = format_collection_platform_counts(kept)
+        elapsed_text = f"，共计 {elapsed:.1f} 秒" if elapsed > 0 else ""
+        status = f"已停止采集 · {counts_text}{elapsed_text}"
+        detail = str(message or "").strip()
+        if detail.startswith("已停止"):
+            detail = detail[len("已停止") :].lstrip("；;")
+        if detail:
+            status += f"；{detail}"
+        self._set_collection_status_text(status, state="complete")
+        if kept:
+            self.collection_import_button.show()
+            self.collection_save_json_button.show()
+        else:
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+
     def _stop_collection(self) -> None:
         self._collection_timer.stop()
         self._collection_queue = []
@@ -2206,6 +2245,15 @@ class PlatformPage(QWidget):
             self.collection_toggle_button.setText("正在停止…")
             self._set_collection_status_text("正在停止采集…")
         else:
+            kept = [
+                item
+                for item in self._pending_alchemy_import
+                if isinstance(item, dict)
+            ]
+            started_at = self._collection_started_at
+            elapsed = (
+                max(0.0, time.monotonic() - started_at) if started_at else 0.0
+            )
             self._collection_stopping = False
             self._collection_running = False
             self._collection_scrape_pending = False
@@ -2216,8 +2264,9 @@ class PlatformPage(QWidget):
             self._eco_retry_base_items = []
             self._allow_platform_retry_prompt = False
             self._pending_retry_provider = ""
+            self._last_scrape_message = ""
             self.collection_toggle_button.setText("开始采集")
-            self._set_collection_status_text("已停止采集", state="complete")
+            self._apply_stopped_collection_results(kept, elapsed=elapsed)
         self._collection_platform = ""
 
     def _stop_special_collection(self) -> None:

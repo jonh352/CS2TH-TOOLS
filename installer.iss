@@ -3,7 +3,7 @@
 ; 需安装 Inno Setup 6：https://jrsoftware.org/isinfo.php
 
 #define MyAppName "CS2TH汰换小助手"
-#define MyAppVersion "0.3.2"
+#define MyAppVersion "0.3.3"
 #define MyAppPublisher "CS2TH"
 #define MyAppExeName "CS2TH-Tools.exe"
 #define MyAppId "{{A7C2E91B-4D5F-4A8E-9B1C-2E3F4A5B6C7D}"

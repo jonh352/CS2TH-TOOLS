@@ -90,6 +90,56 @@ class MaterialCollectionFlowTests(unittest.TestCase):
             "BUFF 2 条｜悠悠 0 条｜C5 26 条｜ECO 1 条，共 29 条",
         )
 
+    def test_stop_keeps_partial_material_scrape_results(self) -> None:
+        page = PlatformPage()
+        page._collection_running = True
+        page._collection_stopping = True
+        page._collection_scrape_pending = True
+        page._collection_started_at = 10.0
+        page._eco_retry_base_items = []
+        with patch("ui.pages.platforms.time.monotonic", return_value=14.5):
+            page._material_collection_scraped(
+                [_candidate(1), _candidate(2)],
+                "已停止；buff·测试：cancelled",
+                {"eco": [], "c5": []},
+            )
+        self.assertFalse(page._collection_running)
+        self.assertFalse(page._collection_stopping)
+        self.assertEqual(len(page._collected_items), 2)
+        self.assertIn("已停止采集", page.collection_status.text())
+        self.assertIn("共 2 条", page.collection_status.text())
+        self.assertIn("共计 4.5 秒", page.collection_status.text())
+        self.assertEqual(page.collection_toggle_button.text(), "开始采集")
+        self.assertFalse(page.collection_import_button.isHidden())
+        self.assertFalse(page.collection_save_json_button.isHidden())
+
+    def test_special_stop_keeps_partial_candidates(self) -> None:
+        page = PlatformPage()
+        page._special_stopping = True
+        page._collection_started_at = 5.0
+        with patch("ui.pages.platforms.time.monotonic", return_value=8.0):
+            page._special_collection_completed(
+                [_candidate(3)],
+                [],
+                "已停止采集",
+            )
+        self.assertEqual(len(page._collected_items), 1)
+        self.assertIn("已停止采集", page.collection_status.text())
+        self.assertIn("共 1 条", page.collection_status.text())
+        self.assertFalse(page.collection_import_button.isHidden())
+
+    def test_stop_without_worker_keeps_pending_import(self) -> None:
+        page = PlatformPage()
+        page._collection_running = True
+        page._collection_started_at = 1.0
+        page._pending_alchemy_import = [_candidate(4)]
+        page._material_worker = None
+        with patch("ui.pages.platforms.time.monotonic", return_value=3.0):
+            page._stop_collection()
+        self.assertEqual(len(page._collected_items), 1)
+        self.assertIn("已停止采集", page.collection_status.text())
+        self.assertFalse(page.collection_import_button.isHidden())
+
     def test_special_collection_uses_same_completion_actions(self) -> None:
         page = PlatformPage()
         page._collection_started_at = 20.0
