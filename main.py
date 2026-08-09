@@ -5,7 +5,7 @@ from __future__ import annotations
 import ctypes
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -50,13 +50,6 @@ def main() -> int:
     forwarded_command = protocol_command or FOCUS_COMMAND
     if send_to_running_instance(forwarded_command):
         return 0
-    if protocol_command:
-        QMessageBox.information(
-            None,
-            "请先打开汰换小助手",
-            "未检测到正在运行的汰换小助手。\n\n请先打开小助手，再回到 CS2TH 点击“导入配方到小助手”。",
-        )
-        return 0
     instance_server = SingleInstanceServer(app)
     if not instance_server.listen():
         QMessageBox.warning(None, APP_NAME, "小助手启动失败：无法建立单实例通信。")
@@ -64,6 +57,8 @@ def main() -> int:
     window = MainWindow()
     instance_server.command_received.connect(window.handle_external_command)
     window.show()
+    if protocol_command:
+        QTimer.singleShot(0, lambda: window.handle_external_command(protocol_command))
     return app.exec()
 
 

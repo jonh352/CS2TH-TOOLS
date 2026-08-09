@@ -3,6 +3,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from pathlib import Path
 from urllib.parse import quote
 from unittest.mock import patch
 
@@ -39,6 +40,16 @@ class AppProtocolTests(unittest.TestCase):
         command = "cs2th-tools://import-recipe?url=x"
         self.assertEqual(protocol_command_from_argv(["app.exe", "--flag", command]), command)
         self.assertEqual(protocol_command_from_argv(["app.exe", "--flag"]), "")
+
+    def test_cold_start_keeps_protocol_command_for_main_window(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "main.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "QTimer.singleShot(0, lambda: window.handle_external_command(protocol_command))",
+            source,
+        )
+        self.assertNotIn("请先打开汰换小助手", source)
 
     def test_single_instance_server_receives_forwarded_command(self) -> None:
         app = QCoreApplication.instance() or QCoreApplication([])
