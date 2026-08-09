@@ -592,23 +592,31 @@ def provider_display_name_safe(provider: str) -> str:
 
 def _capture_c5_external(self) -> dict[str, Any]:
     """Open system Chrome/Edge for C5 login; harvest cookies after the window closes."""
-    from core.market_candidates import clear_c5_session_auth
     from core.market_external_browser import (
         c5_netlog_login_ready,
+        c5_profile_login_marker,
+        c5_profile_login_ready,
         harvest_c5_netlog_headers,
         harvest_profile_cookies,
         launch_system_browser,
         wait_browser_closed,
     )
 
-    clear_c5_session_auth()
     profile = Path(CACHE_DIR) / "market_browser_profiles" / "c5"
     profile.mkdir(parents=True, exist_ok=True)
+    initial_cookie_marker = c5_profile_login_marker(profile)
     net_log = profile.parent / "c5-login-netlog.json"
     try:
         net_log.unlink(missing_ok=True)
     except OSError:
         pass
+
+    def login_ready() -> bool:
+        current_marker = c5_profile_login_marker(profile)
+        return bool(current_marker and current_marker != initial_cookie_marker) or (
+            c5_netlog_login_ready(net_log)
+        )
+
     self.progress.emit(
         "c5",
         "已打开系统浏览器，请完成登录后关闭该浏览器窗口…",
@@ -636,7 +644,7 @@ def _capture_c5_external(self) -> dict[str, Any]:
         progress_message=(
             "请在 C5 页面完成登录或安全验证；成功后助手会自动关闭窗口…"
         ),
-        auto_close_when=lambda: c5_netlog_login_ready(net_log),
+        auto_close_when=login_ready,
         auto_close_message="已检测到 C5GAME 登录成功，正在自动关闭登录窗口…",
     )
     if not closed:
@@ -696,15 +704,42 @@ def _capture_c5_external(self) -> dict[str, Any]:
             "message": "未捕获到有效 C5GAME 登录凭证，请重新打开登录窗口并完成登录",
         }
     self.progress.emit("c5", "已捕获登录状态，正在快速确认…")
-    return _finish_c5_login(cookie, token, "")
+    browser_login_confirmed = (
+        c5_profile_login_ready(profile) or c5_netlog_login_ready(net_log)
+    )
+    return _finish_c5_login(
+        cookie,
+        token,
+        "",
+        browser_login_confirmed=browser_login_confirmed,
+    )
 
 
 def _finish_c5_login(
     cookie: str,
     token: str,
     nickname: str = "",
+    *,
+    browser_login_confirmed: bool = False,
 ) -> dict[str, Any]:
+    saved = save_c5_auth(cookie, token, nickname=nickname)
+    if not saved.get("ok"):
+        return {
+            "ok": False,
+            "message": "未捕获到有效 C5GAME 登录凭证，请重新打开登录窗口",
+        }
     verified = validate_c5_credentials(cookie, token, timeout=12.0, quick=False)
+    if not verified.get("ok") and browser_login_confirmed:
+        message = str(verified.get("message") or "")
+        if not any(marker in message for marker in ("登录已失效", "请重新登录")):
+            return {
+                "provider": "c5",
+                "ok": True,
+                "indeterminate": False,
+                "message": "C5GAME 浏览器登录已确认，凭证已保存",
+                "account_name": nickname,
+                "user_id": None,
+            }
     if not verified.get("ok"):
         return verified
     save_c5_auth(

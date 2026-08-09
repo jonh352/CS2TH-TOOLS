@@ -65,6 +65,7 @@ from core.market_candidates import (
 )
 from core.market_external_browser import (
     c5_netlog_login_ready,
+    c5_profile_login_ready,
     harvest_c5_netlog_headers,
     launch_system_browser,
     wait_browser_closed,
@@ -96,6 +97,7 @@ from ui.pages.alchemy_simulation import (
 )
 from ui.workers.market_login import (
     MarketplaceLoginValidationWorker,
+    _finish_c5_login,
     _tokens_from_storage,
 )
 
@@ -1783,6 +1785,56 @@ class MetadataTests(unittest.TestCase):
         self.assertNotIn("x-sign", headers)
         self.assertNotIn("x-access-token", headers)
         self.assertTrue(login_ready)
+
+    def test_c5_profile_cookie_detects_login_before_browser_closes(self) -> None:
+        with TemporaryDirectory() as directory:
+            profile = Path(directory)
+            cookie_db = profile / "Default" / "Network" / "Cookies"
+            cookie_db.parent.mkdir(parents=True)
+            connection = sqlite3.connect(cookie_db)
+            connection.execute(
+                "CREATE TABLE cookies ("
+                "host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, "
+                "last_update_utc INTEGER)"
+            )
+            connection.execute(
+                "INSERT INTO cookies VALUES (?, ?, ?, ?, ?)",
+                (
+                    "www.c5game.com",
+                    "NC5_accessToken",
+                    "",
+                    b"encrypted-token",
+                    123,
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            self.assertTrue(c5_profile_login_ready(profile))
+
+    def test_c5_login_saves_captured_credentials_when_http_check_is_blocked(self) -> None:
+        validation = {
+            "provider": "c5",
+            "ok": False,
+            "indeterminate": False,
+            "message": "C5GAME 触发风控，请完成安全验证",
+        }
+        with patch(
+            "ui.workers.market_login.save_c5_auth",
+            return_value={"ok": True},
+        ) as save, patch(
+            "ui.workers.market_login.validate_c5_credentials",
+            return_value=validation,
+        ):
+            result = _finish_c5_login(
+                "NC5_accessToken=captured-token-value",
+                "captured-token-value",
+                browser_login_confirmed=True,
+            )
+
+        save.assert_called_once()
+        self.assertTrue(result["ok"])
+        self.assertIn("已保存", result["message"])
 
     def test_c5_login_browser_size_and_auto_close(self) -> None:
         sentinel = object()

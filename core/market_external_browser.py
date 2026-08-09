@@ -10,6 +10,7 @@ import os
 import mmap
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 import ctypes
@@ -173,6 +174,84 @@ def c5_netlog_login_ready(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     return False
+
+
+def c5_profile_login_marker(profile_dir: Path) -> tuple[tuple[str, int, int, str], ...]:
+    """Return a non-secret marker for C5 auth cookies in a live profile.
+
+    Chromium may buffer NetLog writes until shutdown. Cookie names and encrypted
+    value lengths are readable from its SQLite database without decrypting or
+    copying the credential. The update stamp lets login capture distinguish a
+    newly written token from a stale cookie that was already present at launch.
+    """
+    profile = Path(profile_dir)
+    candidates = (
+        profile / "Default" / "Network" / "Cookies",
+        profile / "Default" / "Cookies",
+    )
+    auth_names = {
+        "nc5_accesstoken",
+        "c5token",
+        "access_token",
+        "ncaccess",
+        "token",
+        "authorization",
+    }
+    for path in candidates:
+        if not path.is_file():
+            continue
+        connection = None
+        try:
+            connection = sqlite3.connect(
+                f"file:{path.as_posix()}?mode=ro",
+                uri=True,
+                timeout=0.5,
+            )
+            columns = {
+                str(row[1]).lower()
+                for row in connection.execute("PRAGMA table_info(cookies)")
+            }
+            stamp_column = (
+                "last_update_utc"
+                if "last_update_utc" in columns
+                else "expires_utc"
+                if "expires_utc" in columns
+                else "''"
+            )
+            rows = connection.execute(
+                "SELECT name, length(value), length(encrypted_value), "
+                f"{stamp_column} "
+                "FROM cookies "
+                "WHERE (lower(host_key) LIKE '%c5game.com%' "
+                "OR lower(host_key) LIKE '%zbt.com%')"
+            )
+            markers: list[tuple[str, int, int, str]] = []
+            for name, value_size, encrypted_size, stamp in rows:
+                if (
+                    str(name or "").strip().lower() in auth_names
+                    and (int(value_size or 0) > 0 or int(encrypted_size or 0) > 0)
+                ):
+                    markers.append(
+                        (
+                            str(name or "").strip().lower(),
+                            int(value_size or 0),
+                            int(encrypted_size or 0),
+                            str(stamp or ""),
+                        )
+                    )
+            if markers:
+                return tuple(sorted(markers))
+        except (OSError, sqlite3.Error, ValueError):
+            continue
+        finally:
+            if connection is not None:
+                connection.close()
+    return ()
+
+
+def c5_profile_login_ready(profile_dir: Path) -> bool:
+    """Return whether the profile currently contains a C5 auth cookie."""
+    return bool(c5_profile_login_marker(profile_dir))
 
 
 def _close_browser_window(proc: subprocess.Popen) -> bool:
