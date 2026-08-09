@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from html import escape
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from config import (
     APP_NAME,
     APP_VERSION,
+    CACHE_DIR,
     CLOSE_BEHAVIOR_EXIT,
     CLOSE_BEHAVIOR_MINIMIZE,
 )
@@ -104,11 +105,182 @@ PRIVACY_POLICY = _document(
     """,
 )
 
-ABOUT_FLOW_STEPS: tuple[str, ...] = (
-    "在 Steam 库存登录或添加账号，获取库存后筛选饰品并导入炼金计算或炼金模拟",
-    "在炼金计算中导入库存或 JSON / JSONL 数据，勾选底物后计算配方",
-    "在配方管理中保存与分类结果，并导入炼金模拟查看产物磨损分布",
-    "查询特殊磨损后前往材料采集，校验平台登录并抓取候选材料",
+# 关于页操作说明：title + 可选 summary + groups[(小组标题|None, 条目…)]
+ABOUT_FLOW_STEPS: tuple[dict[str, object], ...] = (
+    {
+        "title": "Steam 库存",
+        "summary": "整理账号库存，并导入计算或模拟。",
+        "groups": (
+            (
+                None,
+                (
+                    "登录或添加 Steam 账号，点「获取库存」。",
+                    "可用搜索、品质、状态筛选饰品。",
+                    "勾选后点「导入计算」（追加 / 替换）或「导入模拟」。",
+                    "右键可打开各平台商品页；库存会话只保存在本机。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "炼金计算",
+        "summary": "按页面上的三步完成配方计算。",
+        "groups": (
+            (
+                "① 底物数据",
+                (
+                    "可「选择文件」（JSON / JSONL）、「导入库存」、「自定义饰品」。",
+                    "也可对照已保存配方做对齐 / 排除。",
+                    "勾选参与计算的行；需要时再勾「必选」。",
+                ),
+            ),
+            (
+                "② 产物磨损",
+                (
+                    "「扫描模式」：在区间内找较高 ROI。",
+                    "「目标模式」：对准某个目标磨损。",
+                    "「特殊磨损」：按产物磨损区间搜低成本方案。",
+                ),
+            ),
+            (
+                "③ 配方计算",
+                (
+                    "设最低保本率等条件后点「开始计算」。",
+                    "满意就「保存配方」（进入配方管理，默认可放「未分类」）。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "采集预设",
+        "summary": "把常用「材料 + 磨损区间」存成方案，方便反复采集。",
+        "groups": (
+            (
+                None,
+                (
+                    "「新建采集方案」起名 →「修改方案」添加饰品并调磨损 →「保存方案」。",
+                    "也支持按武器箱批量添加。",
+                    "「导入采集」会跳到材料采集页。",
+                    "预设磨损按你设的区间，不会像配方那样自动扩到相邻磨损档。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "配方管理",
+        "summary": "管理已保存配方，以及采集下来的 JSON。",
+        "groups": (
+            (
+                "已保存配方",
+                (
+                    "来自炼金计算 / 模拟的保存结果。",
+                    "可建文件夹、改名、拖拽排序。",
+                    "单条可「导入模拟」或「导入采集」；也支持链接导入与批量移动删除。",
+                ),
+            ),
+            (
+                "已保存 JSON",
+                (
+                    "来自材料采集里的「保存为 JSON」。",
+                    "可打开文件，或「导入计算」（会替换当前底物数据）。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "炼金模拟",
+        "summary": "填槽后模拟产物磨损与概率。",
+        "groups": (
+            (
+                None,
+                (
+                    "在「五合一 / 十合一」之间切换（各自槽位与结果分开记）。",
+                    "槽位可从搜索、库存、已保存配方或特殊磨损智能配单结果填入。",
+                    "点「开始模拟」查看磨损、概率与区间底价参考；可「保存配方」。",
+                    "「清除数据」只清当前模式。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "特殊磨损",
+        "summary": "查目标磨损可用哪些底物，再送到材料采集。",
+        "groups": (
+            (
+                None,
+                (
+                    "输入目标饰品和目标磨损，点「查询」。",
+                    "查看 float32 可达区间，以及可用底物、对应磨损、可采购区间。",
+                    "点「前往材料采集」进入「特殊磨损材料」模式。",
+                    "抓取挂单后可智能配 5 / 10 件；结果可导入模拟或打开购买。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "材料采集",
+        "summary": "打开本页默认进入「配方链接」。先登录校验，再勾候选源开始采集。",
+        "groups": (
+            (
+                "三种模式",
+                (
+                    "配方链接：粘贴 URL「读取配方」，或从配方管理 / 采集预设导入。",
+                    "可选「备选材料」；读完后可调每条磨损滑条（配方导入常带相邻档）。",
+                    "单件饰品：搜一件皮肤，拖采集磨损区间后生成平台链接再采。",
+                    "特殊磨损材料：通常从「特殊磨损」页带入，可采集或智能配 N 件。",
+                ),
+            ),
+            (
+                "采之前",
+                (
+                    "对 BUFF / 悠悠 / C5 / ECO 点「登录 / 打开」，再点「校验登录」。",
+                    "校验通过后勾「候选源」；间隔一般 ≥ 3 秒，C5 ≥ 5 秒。",
+                    "Steam 没有精确磨损挂单，不能作为候选源。",
+                ),
+            ),
+            (
+                "静默采集",
+                (
+                    "尽量不自动打开商品页。",
+                    "C5：最小化系统窗口拉挂单，采完即关；失败或风控则本轮不再采 C5。",
+                    "ECO：有明确验证信号时打开可见窗口（可能是滑块，也可能要重新登录）；"
+                    "否则静默重试最多约 3 轮，仍失败则本轮暂停。",
+                    "不勾静默时，必要时会打开材料页。",
+                ),
+            ),
+            (
+                "开始与结果",
+                (
+                    "点「开始采集」；采集中再点可「停止采集」（已抓到的可保留）。",
+                    "若刚采完又点开始，会先弹窗确认，避免误点覆盖。",
+                    "完成后可「导入计算」（替换底物），或「保存为 JSON」供以后导入。",
+                ),
+            ),
+        ),
+    },
+    {
+        "title": "设置与本地数据",
+        "summary": "右上角齿轮里可改浏览器、关闭行为，并管理本机数据。",
+        "groups": (
+            (
+                None,
+                (
+                    "平台登录浏览器可选 Edge 或 Chrome。",
+                    "关闭主窗口：缩到任务栏，或直接退出。",
+                    "「数据目录」在「设置」中显示"
+                    "（配方、采集 JSON、采集预设、缓存等）。",
+                    "清除缓存 / 清除所有数据前请确认；清完后有时需重启软件。",
+                ),
+            ),
+        ),
+    },
+)
+
+ABOUT_FLOW_TIPS: tuple[str, ...] = (
+    "计算结果、挂单价格与行情只作参考；下单或合成前请再对一下平台页面。",
+    "材料采集按「平台 × 材料 × 磨损窗口」抓取，单窗数量有上限；"
+    "须在本软件完成平台登录并校验通过，「候选源」才能勾选；",
+    "CS2TH.CN 对软件功能与说明拥有最终解释权。",
 )
 
 
@@ -304,6 +476,22 @@ class SettingsDialog(QDialog):
         self.usage_label = QLabel()
         self.usage_label.setObjectName("settingsUsage")
         layout.addWidget(self.usage_label)
+        self.data_dir_label = QLabel(str(CACHE_DIR))
+        self.data_dir_label.setObjectName("settingsHint")
+        self.data_dir_label.setWordWrap(True)
+        self.data_dir_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.data_dir_label)
+        open_data_btn = QPushButton("打开数据目录")
+        open_data_btn.setObjectName("alchemySelectFileBtn")
+        open_data_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_data_btn.setToolTip(
+            "打开本地数据目录（配方、采集 JSON、登录会话等）"
+        )
+        open_data_btn.clicked.connect(self._open_data_dir)
+        layout.addWidget(open_data_btn)
+        layout.addSpacing(6)
         actions = QHBoxLayout()
         actions.setSpacing(8)
         clear_cache_btn = QPushButton("清除缓存")
@@ -318,6 +506,7 @@ class SettingsDialog(QDialog):
         actions.addWidget(clear_all_btn, 1)
         layout.addLayout(actions)
         hint = QLabel(
+            "数据目录含配方、采集 JSON、采集预设等。"
             "清除缓存：价格缓存、头像与采集临时数据。"
             "清除所有数据：登录态、Steam 库存会话、配方等（保留本页设置项）。"
         )
@@ -387,6 +576,20 @@ class SettingsDialog(QDialog):
     def _refresh_usage(self) -> None:
         info = storage_usage()
         self.usage_label.setText(f"当前已用：{info.get('label') or '—'}")
+
+    def _open_data_dir(self) -> None:
+        path = CACHE_DIR
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "打开数据目录", f"无法创建目录：{exc}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            QMessageBox.warning(
+                self,
+                "打开数据目录",
+                f"无法打开资源管理器。\n路径：{path}",
+            )
 
     def _clear_cache(self) -> None:
         result = clear_cache()

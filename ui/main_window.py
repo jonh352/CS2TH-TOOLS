@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -27,9 +26,11 @@ from config import (
     BRAND_IMAGE,
     CLOSE_BEHAVIOR_MINIMIZE,
 )
+from core.app_protocol import FOCUS_COMMAND, recipe_reference_from_command
 from core.auth_client import AuthClient, AuthSession, has_tradeup_access
 from core.close_behavior_prefs import load_close_behavior
 from ui.login_dialog import LoginDialog
+from ui.dialogs.account_dialog import AccountDialog
 from ui.dialogs.information_dialogs import SettingsDialog
 from ui.theme import apply_theme
 from ui.widgets.toast import ToastWidget
@@ -39,6 +40,7 @@ from ui.workers.auth import LogoutWorker, SessionValidationWorker
 PAGE_DEFINITIONS = (
     ("inventory", "Steam 库存"),
     ("alchemy", "炼金计算"),
+    ("collection_presets", "采集预设"),
     ("recipes", "配方管理"),
     ("simulation", "炼金模拟"),
     ("special", "特殊磨损"),
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
         self._auth_validation_worker: SessionValidationWorker | None = None
         self._logout_worker: LogoutWorker | None = None
         self._access_allowed = False
+        self._pending_recipe_reference = ""
         self._auth_recheck_timer = QTimer(self)
         self._auth_recheck_timer.setSingleShot(True)
         self._auth_recheck_timer.timeout.connect(self._start_auth_validation)
@@ -181,7 +184,7 @@ class MainWindow(QMainWindow):
 
         self.account_button = QPushButton("登录")
         self.account_button.setObjectName("accountButton")
-        self.account_button.setMaximumWidth(180)
+        self.account_button.setMaximumWidth(160)
         self.account_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.account_button.clicked.connect(self._account_clicked)
         layout.addWidget(self.account_button)
@@ -207,6 +210,14 @@ class MainWindow(QMainWindow):
             from ui.pages.alchemy import AlchemyPage
 
             return AlchemyPage(self.stack)
+        if key == "collection_presets":
+            from ui.pages.collection_presets import CollectionPresetPage
+
+            page = CollectionPresetPage(self.stack)
+            page.import_to_collection_requested.connect(
+                self._on_collection_preset_import
+            )
+            return page
         if key == "simulation":
             from ui.pages.alchemy_simulation import AlchemySimulationPage
 
@@ -342,6 +353,50 @@ class MainWindow(QMainWindow):
         self.toast.show_toast("配方材料已导入采集页", style="success")
         self._activate("platforms")
 
+    def handle_external_command(self, command: str) -> None:
+        """Restore the window and handle a command forwarded by another launch."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if command == FOCUS_COMMAND:
+            return
+        try:
+            reference = recipe_reference_from_command(command)
+        except ValueError as exc:
+            self.toast.show_toast(str(exc), style="warning")
+            return
+        self._pending_recipe_reference = reference
+        self._apply_pending_recipe_import()
+
+    def _apply_pending_recipe_import(self) -> None:
+        reference = self._pending_recipe_reference
+        if not reference:
+            return
+        if not self._access_allowed:
+            self.toast.show_toast("正在验证账号权限，稍后将自动导入配方", style="info")
+            return
+        self._pending_recipe_reference = ""
+        self._activate("platforms")
+        collection = self._ensure_page("platforms")
+        if hasattr(collection, "load_recipe_reference"):
+            collection.load_recipe_reference(reference)
+
+    def _on_collection_preset_import(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        items = payload.get("items")
+        title = str(payload.get("title") or "").strip()
+        collection = self._ensure_page("platforms")
+        error = collection.show_collection_preset_materials(items, title=title)
+        if error:
+            self.toast.show_toast(str(error), style="warning")
+            return
+        self.toast.show_toast("采集预设已导入采集页", style="success")
+        self._activate("platforms")
+
     def _on_inventory_import_to_alchemy(
         self, items: object, mode: object = None
     ) -> None:
@@ -458,17 +513,11 @@ class MainWindow(QMainWindow):
 
     def _sync_account_button(self) -> None:
         if self.auth_session:
+            username = str(self.auth_session.account.username or "").strip() or "已登录"
+            self.account_button.setText(username)
             lines = self._account_entitlement_lines()
-            suffix = (
-                f" · {lines[0].split(' 到期 ', 1)[0]}"
-                if len(lines) == 1
-                else f" · {len(lines)}项权益"
-                if lines
-                else " · 普通用户"
-            )
-            self.account_button.setText(self.auth_session.account.username + suffix)
             detail = "\n".join(lines) if lines else "当前没有有效会员权益"
-            self.account_button.setToolTip(f"{detail}\n\n点击可退出登录")
+            self.account_button.setToolTip(f"{detail}\n\n点击查看账号 / 退出登录")
         else:
             self.account_button.setText("登录 CS2TH")
             self.account_button.setToolTip("使用 cs2th.cn 账号登录")
@@ -526,7 +575,9 @@ class MainWindow(QMainWindow):
             for button in self.nav_buttons.values():
                 button.setEnabled(True)
             self._schedule_auth_recheck(session)
-            if not self._active_page_key:
+            if self._pending_recipe_reference:
+                self._apply_pending_recipe_import()
+            elif not self._active_page_key:
                 self._activate("alchemy")
             return
         self._auth_recheck_timer.stop()
@@ -577,21 +628,18 @@ class MainWindow(QMainWindow):
 
     def _account_clicked(self) -> None:
         if self.auth_session is not None:
-            lines = self._account_entitlement_lines()
-            detail = "\n".join(lines) if lines else "当前没有有效会员权益"
-            answer = QMessageBox.question(
-                self,
-                "账号权益 / 退出登录",
-                f"{detail}\n\n确定退出当前 CS2TH 账号吗？",
+            dialog = AccountDialog(
+                username=str(self.auth_session.account.username or ""),
+                entitlement_lines=self._account_entitlement_lines(),
+                parent=self,
             )
-            if answer == QMessageBox.StandardButton.Yes:
-                session = self.auth_session
-                self.auth_client.clear_local_session()
-                self._apply_access_session(None)
-                self._logout_worker = LogoutWorker(
-                    self.auth_client, session, self
-                )
-                self._logout_worker.start()
+            if dialog.exec() != AccountDialog.DialogCode.Accepted:
+                return
+            session = self.auth_session
+            self.auth_client.clear_local_session()
+            self._apply_access_session(None)
+            self._logout_worker = LogoutWorker(self.auth_client, session, self)
+            self._logout_worker.start()
             return
         dialog = LoginDialog(self.auth_client, self)
         dialog.logged_in.connect(self._logged_in)

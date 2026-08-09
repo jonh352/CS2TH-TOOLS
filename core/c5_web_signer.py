@@ -159,9 +159,23 @@ class C5WebSigner:
             raise RuntimeError("C5GAME 本地签名浏览器启动失败")
         port = port_file.read_text(encoding="utf-8").splitlines()[0]
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.connect_over_cdp(
-            f"http://127.0.0.1:{port}"
-        )
+        last_connect_error: Exception | None = None
+        for attempt in range(1, 6):
+            try:
+                self._browser = self._playwright.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{port}"
+                )
+                last_connect_error = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_connect_error = exc
+                if self._process.poll() is not None:
+                    break
+                time.sleep(0.2 * attempt)
+        if self._browser is None:
+            raise RuntimeError(
+                f"C5GAME 本地签名浏览器连接失败：{last_connect_error or 'unknown'}"
+            )
         context = self._browser.contexts[0]
         self._page = context.pages[0] if context.pages else context.new_page()
         local_port = self._server.server_address[1]

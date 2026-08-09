@@ -12,6 +12,16 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+$versionSource = Get-Content .\core\version.py -Raw
+$versionMatch = [regex]::Match(
+  $versionSource,
+  '__version__\s*=\s*["''](?<version>[^"'']+)["'']'
+)
+if (-not $versionMatch.Success) {
+  throw "Unable to read __version__ from core\version.py"
+}
+$appVersion = $versionMatch.Groups["version"].Value
+
 if (-not (Test-Path .\.venv\Scripts\python.exe)) {
   python -m venv .venv
 }
@@ -74,12 +84,12 @@ if (-not $iscc) {
   Write-Host ""
   Write-Host "Inno Setup 6 not found. Install from https://jrsoftware.org/isinfo.php"
   Write-Host "Then re-run: powershell -ExecutionPolicy Bypass -File .\build_setup.ps1"
-  Write-Host "Or compile manually: ISCC.exe installer.iss"
+  Write-Host "Or compile manually: ISCC.exe /DMyAppVersion=$appVersion installer.iss"
   exit 0
 }
 
 Write-Host "==> Compiling Setup with Inno: $iscc"
-& $iscc .\installer.iss
+& $iscc "/DMyAppVersion=$appVersion" .\installer.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
 $setup = Get-ChildItem (Join-Path $dist "CS2TH-Tools_Setup_*.exe") | Sort-Object LastWriteTime -Descending | Select-Object -First 1

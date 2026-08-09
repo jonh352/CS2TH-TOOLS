@@ -145,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\build_setup.ps1
 产出：
 
 ```text
-dist\CS2TH-Tools_Setup_v0.3.3.exe
+dist\CS2TH-Tools_Setup_v<版本号>.exe
 ```
 
 流程：精简 onedir → Inno LZMA2 压缩。对 Playwright 的 `node.exe`、枪图等「未预压缩」文件压缩率更好。

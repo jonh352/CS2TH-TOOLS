@@ -7,9 +7,15 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from config import APP_ICON, APP_NAME, APP_VERSION, ensure_runtime_dirs
+from core.app_protocol import (
+    FOCUS_COMMAND,
+    SingleInstanceServer,
+    protocol_command_from_argv,
+    send_to_running_instance,
+)
 from ui.main_window import MainWindow
 
 
@@ -40,7 +46,23 @@ def main() -> int:
     app.setStyle("Fusion")
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
+    protocol_command = protocol_command_from_argv(sys.argv)
+    forwarded_command = protocol_command or FOCUS_COMMAND
+    if send_to_running_instance(forwarded_command):
+        return 0
+    if protocol_command:
+        QMessageBox.information(
+            None,
+            "请先打开汰换小助手",
+            "未检测到正在运行的汰换小助手。\n\n请先打开小助手，再回到 CS2TH 点击“导入配方到小助手”。",
+        )
+        return 0
+    instance_server = SingleInstanceServer(app)
+    if not instance_server.listen():
+        QMessageBox.warning(None, APP_NAME, "小助手启动失败：无法建立单实例通信。")
+        return 1
     window = MainWindow()
+    instance_server.command_received.connect(window.handle_external_command)
     window.show()
     return app.exec()
 

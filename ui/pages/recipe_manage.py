@@ -731,7 +731,7 @@ class _SavedRecipeRow(QWidget):
         self._title_edit: QLineEdit | None = None
         title_text = _display_row_title(payload)
         self._title_label = _RecipeTitleLabel(title_text)
-        self._title_label.setObjectName("alchemyStep2NormLabel")
+        self._title_label.setObjectName("recipeSavedTitle")
         self._title_label.setWordWrap(True)
         self._title_label.setMinimumWidth(0)
         self._title_label.setSizePolicy(
@@ -1465,7 +1465,7 @@ class RecipeManagePage(QWidget):
             row_layout.setContentsMargins(14, 10, 14, 10)
             text_layout = QVBoxLayout()
             name_label = QLabel(path.stem)
-            name_label.setObjectName("sectionTitle")
+            name_label.setObjectName("recipeSavedTitle")
             total = sum(float(row.get("price") or 0) for row in rows)
             try:
                 saved_at = datetime.fromtimestamp(path.stat().st_mtime).strftime(

@@ -11,8 +11,10 @@ import os
 import sys
 from pathlib import Path
 
+from core.version import __version__
+
 APP_NAME = "CS2TH 汰换小助手"
-APP_VERSION = "0.3.3"
+APP_VERSION = __version__
 # HTTP/1.1 headers are encoded as Latin-1 by requests/urllib3. Keep the
 # transport identifier ASCII-only even though the visible application name is Chinese.
 APP_HTTP_USER_AGENT = f"CS2TH-Tradeup-Assistant/{APP_VERSION}"
@@ -42,6 +44,7 @@ INVENTORY_DIR = CACHE_DIR / "inventory"
 BROWSER_DIR = CACHE_DIR / "browser"
 ALCHEMY_CACHE_DIR = CACHE_DIR / "alchemy"
 RECIPES_DIR = CACHE_DIR / "recipes"
+COLLECTION_PRESETS_DIR = CACHE_DIR / "collection_presets"
 COLLECTED_JSON_DIR = CACHE_DIR / "collected_json"
 STEAM_SESSION_DIR = BROWSER_DIR / "steam"
 STEAM_AVATAR_CACHE_DIR = BROWSER_DIR / "steam_avatars"

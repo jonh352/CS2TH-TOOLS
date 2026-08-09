@@ -3,7 +3,9 @@
 ; 需安装 Inno Setup 6：https://jrsoftware.org/isinfo.php
 
 #define MyAppName "CS2TH汰换小助手"
-#define MyAppVersion "0.3.3"
+#ifndef MyAppVersion
+  #error MyAppVersion must be supplied by build_setup.ps1
+#endif
 #define MyAppPublisher "CS2TH"
 #define MyAppExeName "CS2TH-Tools.exe"
 #define MyAppId "{{A7C2E91B-4D5F-4A8E-9B1C-2E3F4A5B6C7D}"
@@ -42,6 +44,12 @@ Source: "dist\CS2TH-Tools\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKA; Subkey: "Software\Classes\cs2th-tools"; ValueType: string; ValueData: "URL:CS2TH Tools Protocol"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\cs2th-tools"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\cs2th-tools\DefaultIcon"; ValueType: string; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKA; Subkey: "Software\Classes\cs2th-tools\shell\open\command"; ValueType: string; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

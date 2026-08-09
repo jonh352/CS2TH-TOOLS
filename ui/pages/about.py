@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFrame,
@@ -16,7 +18,13 @@ from PySide6.QtWidgets import (
 
 from config import APP_NAME, APP_VERSION, CONTENT_PAGE_LAYOUT_MARGINS
 from ui.components import PageHeader
-from ui.dialogs.information_dialogs import ABOUT_FLOW_STEPS, show_information_dialog
+from ui.dialogs.information_dialogs import (
+    ABOUT_FLOW_STEPS,
+    ABOUT_FLOW_TIPS,
+    show_information_dialog,
+)
+
+_STEP_MARKERS = "①②③④⑤⑥⑦⑧⑨⑩"
 
 
 class AboutPage(QWidget):
@@ -40,7 +48,6 @@ class AboutPage(QWidget):
         inner.setObjectName("aboutScrollInner")
         scroll.setWidget(inner)
         inner_layout = QVBoxLayout(inner)
-        # 贴顶排布，避免卡片漂在大片留白中间
         inner_layout.setContentsMargins(0, 4, 0, 12)
         inner_layout.setSpacing(0)
         inner_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -53,48 +60,45 @@ class AboutPage(QWidget):
             QSizePolicy.Policy.Maximum,
         )
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(24, 20, 24, 18)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(22, 18, 22, 16)
+        card_layout.setSpacing(14)
 
         intro = QLabel(
-            f"<b>{APP_NAME}</b>，面向 CS2 汰换的本地桌面助手："
-            "库存整理、配方计算、磨损模拟与材料采集。"
+            f"<b>{escape(APP_NAME)}</b> 是面向 CS2 汰换的本地桌面助手。"
+            "可整理 Steam 库存、算配方、模拟产物磨损，"
+            "并从 BUFF / 悠悠有品 / C5GAME / ECO 按磨损区间采集可买材料。"
+            "使用功能页前请先登录 CS2TH 账号并具备相应权限。"
         )
         intro.setObjectName("aboutBody")
         intro.setWordWrap(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
         card_layout.addWidget(intro)
 
-        flow_title = QLabel("操作流程")
+        flow_title = QLabel("操作说明（按页面）")
         flow_title.setObjectName("aboutFlowTitle")
         card_layout.addWidget(flow_title)
 
         steps_wrap = QVBoxLayout()
         steps_wrap.setContentsMargins(0, 0, 0, 0)
-        steps_wrap.setSpacing(8)
+        steps_wrap.setSpacing(10)
         for index, step in enumerate(ABOUT_FLOW_STEPS, start=1):
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(10)
-            marker = QLabel("①②③④⑤⑥⑦⑧⑨⑩"[index - 1])
-            marker.setObjectName("aboutStepMarker")
-            marker.setFixedWidth(22)
-            text = QLabel(step)
-            text.setObjectName("aboutStepText")
-            text.setWordWrap(True)
-            row.addWidget(marker, 0, Qt.AlignmentFlag.AlignTop)
-            row.addWidget(text, 1)
-            steps_wrap.addLayout(row)
+            steps_wrap.addWidget(self._build_step_block(index, step))
         card_layout.addLayout(steps_wrap)
 
-        note = QLabel(
-            "计算结果、价格与行情仅供参考，请在实际交易或合成前自行核对。"
-            "<br/><b>CS2TH.CN</b> 拥有最终解释权。"
-        )
-        note.setObjectName("aboutBody")
-        note.setWordWrap(True)
-        note.setTextFormat(Qt.TextFormat.RichText)
-        card_layout.addWidget(note)
+        tips_title = QLabel("使用提醒")
+        tips_title.setObjectName("aboutFlowTitle")
+        card_layout.addWidget(tips_title)
+
+        tips_wrap = QVBoxLayout()
+        tips_wrap.setContentsMargins(2, 0, 0, 0)
+        tips_wrap.setSpacing(6)
+        for tip in ABOUT_FLOW_TIPS:
+            tip_label = QLabel(f"· {escape(tip)}")
+            tip_label.setObjectName("aboutTipItem")
+            tip_label.setWordWrap(True)
+            tip_label.setTextFormat(Qt.TextFormat.RichText)
+            tips_wrap.addWidget(tip_label)
+        card_layout.addLayout(tips_wrap)
 
         legal_row = QHBoxLayout()
         legal_row.setContentsMargins(0, 2, 0, 0)
@@ -123,6 +127,55 @@ class AboutPage(QWidget):
         version.setObjectName("aboutFootNote")
         card_layout.addWidget(version)
 
-        # 与内容区同宽，贴标题下方
         inner_layout.addWidget(card)
         inner_layout.addStretch(1)
+
+    def _build_step_block(self, index: int, step: dict) -> QFrame:
+        block = QFrame()
+        block.setObjectName("aboutStepBlock")
+        block.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        marker = QLabel(
+            _STEP_MARKERS[index - 1] if index <= len(_STEP_MARKERS) else f"{index}."
+        )
+        marker.setObjectName("aboutStepMarker")
+        marker.setFixedWidth(22)
+        title = QLabel(str(step.get("title") or ""))
+        title.setObjectName("aboutStepTitle")
+        title.setWordWrap(True)
+        head.addWidget(marker, 0, Qt.AlignmentFlag.AlignTop)
+        head.addWidget(title, 1)
+        layout.addLayout(head)
+
+        summary = str(step.get("summary") or "").strip()
+        if summary:
+            summary_label = QLabel(summary)
+            summary_label.setObjectName("aboutStepSummary")
+            summary_label.setWordWrap(True)
+            layout.addWidget(summary_label)
+
+        groups = step.get("groups") or ()
+        for group_title, items in groups:
+            group_wrap = QVBoxLayout()
+            group_wrap.setContentsMargins(30, 0, 0, 0)
+            group_wrap.setSpacing(4)
+            heading = str(group_title or "").strip()
+            if heading:
+                group_label = QLabel(heading)
+                group_label.setObjectName("aboutGroupTitle")
+                group_wrap.addWidget(group_label)
+            for item in items:
+                bullet = QLabel(f"· {escape(str(item))}")
+                bullet.setObjectName("aboutBullet")
+                bullet.setWordWrap(True)
+                bullet.setTextFormat(Qt.TextFormat.RichText)
+                group_wrap.addWidget(bullet)
+            layout.addLayout(group_wrap)
+
+        return block

@@ -116,7 +116,7 @@ QMainWindow, QWidget#appRoot {{
   background: {bg};
 }}
 QWidget#contentArea, QWidget#alchemyPage, QWidget#alchemySimulationPage,
-QWidget#recipeManagePage {{
+QWidget#recipeManagePage, QWidget#collectionPresetPage {{
   background: {bg};
 }}
 QLabel {{
@@ -245,6 +245,51 @@ QPushButton#loginSubmitButton {{
 QPushButton#loginSubmitButton:hover {{
   background: {cyan_hover};
   border-color: {cyan_hover};
+}}
+QLabel#accountDialogUsername {{
+  color: {text};
+  font-size: 22px;
+  font-weight: 800;
+  padding: 2px 0 4px 0;
+}}
+QFrame#accountDialogEntitlementBox {{
+  background: {input};
+  border: 1px solid {border};
+  border-radius: 12px;
+}}
+QLabel#accountDialogEntitlementRow {{
+  color: {text};
+  font-size: 13px;
+  font-weight: 600;
+}}
+QLabel#accountDialogEntitlementEmpty {{
+  color: {muted};
+  font-size: 13px;
+}}
+QPushButton#accountDialogLogoutButton {{
+  min-height: 38px;
+  color: {primary_text};
+  background: {rose};
+  border: 1px solid {rose};
+  border-radius: 10px;
+  font-weight: 750;
+}}
+QPushButton#accountDialogLogoutButton:hover {{
+  background: #ff7a90;
+  border-color: #ff7a90;
+}}
+QPushButton#accountDialogStayButton {{
+  min-height: 36px;
+  color: {muted};
+  background: transparent;
+  border: 1px solid {border};
+  border-radius: 10px;
+  font-weight: 650;
+}}
+QPushButton#accountDialogStayButton:hover {{
+  color: {text};
+  border-color: {border_strong};
+  background: {card_hover};
 }}
 QLabel#loginFooter, QLabel#loginLink {{
   color: {muted};
@@ -379,6 +424,11 @@ QFrame#aboutCard {{
   border: 1px solid {border};
   border-radius: 14px;
 }}
+QFrame#aboutStepBlock {{
+  background: {surface_alt};
+  border: 1px solid {border};
+  border-radius: 12px;
+}}
 QLabel#aboutBody {{
   color: {muted};
   font-size: 14px;
@@ -387,13 +437,34 @@ QLabel#aboutFlowTitle {{
   color: {text};
   font-size: 15px;
   font-weight: 700;
-  margin-top: 2px;
+  margin-top: 4px;
   margin-bottom: 2px;
 }}
 QLabel#aboutStepMarker {{
   color: {cyan};
+  font-size: 16px;
+  font-weight: 750;
+}}
+QLabel#aboutStepTitle {{
+  color: {text};
   font-size: 15px;
+  font-weight: 750;
+}}
+QLabel#aboutStepSummary {{
+  color: {muted};
+  font-size: 13px;
+  padding-left: 30px;
+}}
+QLabel#aboutGroupTitle {{
+  color: {cyan};
+  font-size: 13px;
   font-weight: 700;
+  margin-top: 4px;
+}}
+QLabel#aboutBullet,
+QLabel#aboutTipItem {{
+  color: {text};
+  font-size: 13px;
 }}
 QLabel#aboutStepText {{
   color: {text};
@@ -548,15 +619,27 @@ QPushButton#marketOpenButton:hover {{
 }}
 QPushButton#marketCollectButton {{
   min-height: 32px;
-  color: {cyan};
-  background: {cyan_dim};
+  color: {primary_text};
+  background: {cyan};
   border: 1px solid {cyan};
   border-radius: 7px;
   font-weight: 750;
 }}
 QPushButton#marketCollectButton:hover {{
   color: {primary_text};
+  background: {cyan_hover};
+  border-color: {cyan_hover};
+}}
+QPushButton#marketCollectButton:pressed {{
+  color: {primary_text};
   background: {cyan};
+  border-color: {cyan_hover};
+  padding-top: 1px;
+}}
+QPushButton#marketCollectButton:disabled {{
+  color: {dim};
+  background: {card};
+  border-color: {border};
 }}
 QPushButton#dangerOutlineButton {{
   min-height: 34px;
@@ -565,6 +648,63 @@ QPushButton#dangerOutlineButton {{
   border: 1px solid {rose};
   border-radius: 8px;
   font-weight: 700;
+}}
+QFrame#platformMaterialsPanel {{
+  background: {surface};
+  border: 1px solid {border};
+  border-radius: 14px;
+}}
+QFrame#platformMaterialsEmpty {{
+  background: {surface_alt};
+  border: 1px dashed {border_strong};
+  border-radius: 12px;
+}}
+QLabel#platformMaterialsEmptyTitle {{
+  color: {text};
+  font-size: 16px;
+  font-weight: 750;
+}}
+QLabel#platformMaterialsEmptyHint {{
+  color: {muted};
+  font-size: 13px;
+}}
+QPushButton#primaryButton[emphasized="true"],
+QPushButton#recipeLoadButton[emphasized="true"],
+QPushButton#collectionImportButton[emphasized="true"],
+QPushButton#marketCollectButton[emphasized="true"] {{
+  border-color: {cyan_hover};
+  background: {cyan};
+  color: {primary_text};
+}}
+QPushButton#recipeLoadButton,
+QPushButton#collectionImportButton {{
+  min-height: 36px;
+  padding: 0 16px;
+  color: {primary_text};
+  background: {cyan};
+  border: 1px solid {cyan};
+  border-radius: 10px;
+  font-weight: 750;
+}}
+QPushButton#recipeLoadButton:hover,
+QPushButton#collectionImportButton:hover {{
+  color: {primary_text};
+  background: {cyan_hover};
+  border-color: {cyan_hover};
+  padding: 0 16px 0 18px;
+}}
+QPushButton#recipeLoadButton:pressed,
+QPushButton#collectionImportButton:pressed {{
+  color: {primary_text};
+  background: {cyan};
+  border-color: {cyan_hover};
+  padding: 1px 15px 0 17px;
+}}
+QPushButton#recipeLoadButton:disabled,
+QPushButton#collectionImportButton:disabled {{
+  color: {dim};
+  background: {card};
+  border-color: {border};
 }}
 QFrame#recipeBridgeSummary, QFrame#recipeBridgeMaterial {{
   background: {card};
@@ -931,6 +1071,38 @@ QHeaderView::section {{
   border-bottom: 1px solid {border};
   font-weight: 700;
 }}
+QFrame#collectionPresetSidebar {{
+  background: {surface};
+  border: 1px solid {border};
+  border-radius: 12px;
+}}
+QListWidget#collectionPresetList {{
+  background: transparent;
+  border: 0;
+  font-size: 14px;
+}}
+QListWidget#collectionPresetList::item {{
+  min-height: 34px;
+  padding: 8px 10px;
+  margin: 2px 0;
+  border-radius: 8px;
+}}
+QListWidget#collectionPresetList::item:hover {{
+  background: {card_hover};
+}}
+QListWidget#collectionPresetList::item:selected {{
+  color: {cyan};
+  background: {cyan_dim};
+}}
+QFrame#collectionPresetItemCard {{
+  background: {card};
+  border: 1px solid {border};
+  border-radius: 12px;
+}}
+QLabel#collectionPresetItemTitle {{
+  font-size: 15px;
+  font-weight: 700;
+}}
 QListWidget#recipeFolderList {{
   background: transparent;
   font-size: 15px;
@@ -1023,6 +1195,11 @@ QLabel#alchemySimulationResultProb {{
 QFrame#alchemySimulationResultsDivider {{
   background: {border_strong};
   border: 0;
+}}
+QLabel#recipeSavedTitle {{
+  color: {cyan};
+  font-size: 15px;
+  font-weight: 750;
 }}
 QWidget#recipeManageToolbar {{
   background: {surface_alt};

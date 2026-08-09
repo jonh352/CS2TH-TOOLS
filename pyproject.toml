@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs2th-tools"
-version = "0.3.3"
+dynamic = ["version"]
 description = "CS2TH desktop tools for float lookup, marketplace links and Steam inventory."
 requires-python = ">=3.10"
 dependencies = [
@@ -16,6 +16,16 @@ dependencies = [
   "qrcode>=7.4,<9",
   "Pillow>=10,<13",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "core.version.__version__"}
+
+[tool.setuptools]
+py-modules = ["config", "main"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "ui*"]
+namespaces = false
 
 [tool.ruff]
 line-length = 100

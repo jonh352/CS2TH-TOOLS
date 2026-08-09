@@ -65,6 +65,7 @@ from core.special_wear_names import get_skin_full_names_without_appearance
 from ui.components import panel
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from ui.widgets.eliding_label import ElidingLabel
+from ui.feedback import ask_confirmation, show_alert
 from ui.widgets.toast import show_toast
 from ui.widgets.wear_interval_bar import WearIntervalBar, WearRangeSelector
 from ui.workers.recipe_bridge import RecipeAlternativesThread, RecipeLoadThread
@@ -188,7 +189,7 @@ class PlatformPage(QWidget):
         self.mode_stack.addWidget(self._build_special_materials_page())
         root.addWidget(self.mode_stack)
         root.addStretch(1)
-        self._set_mode(0)
+        self._set_mode(1)  # 默认进入「配方链接」
         self._refresh_login_states()
 
     def _build_login_panel(self) -> QFrame:
@@ -310,8 +311,8 @@ class PlatformPage(QWidget):
         self.silent_collection.setToolTip(
             "勾选：不自动打开商品页；C5 用最小化系统窗口拉取挂单（采完即关），"
             "失败或风控则本轮停止 C5、不重试；"
-            "ECO 遇访问限制时：有明确验证信号才弹窗，否则静默重试最多 3 轮，"
-            "仍失败则本轮暂停该平台，其他平台采完后可询问是否重试。"
+            "ECO 遇访问限制时：有明确验证信号才打开可见窗口（滑块或重新登录），"
+            "否则静默重试最多 3 轮，仍失败则本轮暂停该平台。"
             "不勾选：可额外打开材料商品页"
         )
         self.silent_collection.toggled.connect(self._save_collection_settings)
@@ -334,7 +335,8 @@ class PlatformPage(QWidget):
         )
         self.collection_toggle_button.clicked.connect(self._toggle_collection)
         self.collection_import_button = QPushButton("导入计算")
-        self.collection_import_button.setObjectName("primaryButton")
+        self.collection_import_button.setObjectName("collectionImportButton")
+        self.collection_import_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.collection_import_button.hide()
         self.collection_import_button.clicked.connect(
             self._import_collected_items_to_alchemy
@@ -420,7 +422,8 @@ class PlatformPage(QWidget):
             "粘贴配方链接，例如 https://cs2th.cn/recipe/…?market=spot"
         )
         self.recipe_load_button = QPushButton("读取配方")
-        self.recipe_load_button.setObjectName("primaryButton")
+        self.recipe_load_button.setObjectName("recipeLoadButton")
+        self.recipe_load_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.recipe_load_button.clicked.connect(self._load_recipe)
         self.saved_recipe_button = QPushButton("从配方管理导入")
         self.saved_recipe_button.clicked.connect(self._choose_saved_recipe)
@@ -431,7 +434,8 @@ class PlatformPage(QWidget):
         row.addWidget(self.recipe_load_button)
         input_layout.addLayout(row)
         self.recipe_status = QLabel(
-            "将读取 CS2TH 配方材料、备用材料、数量、价格和磨损区间。"
+            "粘贴 CS2TH 配方链接并读取，或从配方管理 / 采集预设导入材料。"
+            "读取后可调整磨损区间，再勾选候选源开始采集。"
         )
         self.recipe_status.setObjectName("muted")
         self.recipe_status.setWordWrap(True)
@@ -447,7 +451,7 @@ class PlatformPage(QWidget):
         summary_layout = QHBoxLayout(self.recipe_summary)
         summary_layout.setContentsMargins(16, 12, 16, 12)
         self.recipe_summary_title = QLabel()
-        self.recipe_summary_title.setObjectName("sectionTitle")
+        self.recipe_summary_title.setObjectName("recipeSavedTitle")
         self.recipe_summary_meta = QLabel()
         self.recipe_summary_meta.setObjectName("muted")
         self.open_recipe_button = QPushButton("查看原配方")
@@ -459,6 +463,8 @@ class PlatformPage(QWidget):
         self.recipe_summary.hide()
         layout.addWidget(self.recipe_summary)
 
+        materials_frame, materials_outer = panel(page)
+        materials_frame.setObjectName("platformMaterialsPanel")
         materials_heading = QHBoxLayout()
         material_title = QLabel("配方材料")
         material_title.setObjectName("sectionTitle")
@@ -467,11 +473,106 @@ class PlatformPage(QWidget):
         materials_heading.addWidget(material_title)
         materials_heading.addStretch(1)
         materials_heading.addWidget(self.material_count)
-        layout.addLayout(materials_heading)
-        self.materials_layout = QVBoxLayout()
+        materials_outer.addLayout(materials_heading)
+
+        self.materials_empty = self._build_recipe_materials_empty(page)
+        materials_outer.addWidget(self.materials_empty)
+
+        self.materials_list_host = QWidget()
+        self.materials_layout = QVBoxLayout(self.materials_list_host)
+        self.materials_layout.setContentsMargins(0, 0, 0, 0)
         self.materials_layout.setSpacing(10)
-        layout.addLayout(self.materials_layout)
+        self.materials_list_host.hide()
+        materials_outer.addWidget(self.materials_list_host)
+        layout.addWidget(materials_frame, 1)
         return page
+
+    def _build_recipe_materials_empty(self, parent: QWidget) -> QFrame:
+        """Guided empty state before a recipe / preset is loaded."""
+        frame = QFrame(parent)
+        frame.setObjectName("platformMaterialsEmpty")
+        frame.setMinimumHeight(200)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(28, 28, 28, 28)
+        lay.setSpacing(12)
+        lay.addStretch(1)
+
+        title = QLabel("还没有可采集的材料")
+        title.setObjectName("platformMaterialsEmptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        hint = QLabel(
+            "先导入配方或采集预设，再勾选上方候选源并开始采集。\n"
+            "支持三种方式："
+        )
+        hint.setObjectName("platformMaterialsEmptyHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addStretch(1)
+
+        focus_url = QPushButton("① 粘贴链接后读取")
+        focus_url.setObjectName("alchemySelectFileBtn")
+        focus_url.setCursor(Qt.CursorShape.PointingHandCursor)
+        focus_url.setToolTip("聚焦配方链接输入框，粘贴后点「读取配方」")
+        focus_url.clicked.connect(self._focus_recipe_url_for_load)
+
+        from_manage = QPushButton("② 从配方管理导入")
+        from_manage.setObjectName("primaryButton")
+        from_manage.setCursor(Qt.CursorShape.PointingHandCursor)
+        from_manage.clicked.connect(self._choose_saved_recipe)
+
+        from_preset = QPushButton("③ 从采集预设导入")
+        from_preset.setObjectName("alchemySelectFileBtn")
+        from_preset.setCursor(Qt.CursorShape.PointingHandCursor)
+        from_preset.setToolTip("前往「采集预设」选择方案并导入采集")
+        from_preset.clicked.connect(self._open_collection_presets_page)
+
+        actions.addWidget(focus_url)
+        actions.addWidget(from_manage)
+        actions.addWidget(from_preset)
+        actions.addStretch(1)
+        lay.addLayout(actions)
+
+        tip = QLabel("导入后可在下方调整每种材料的采集磨损区间")
+        tip.setObjectName("platformMaterialsEmptyHint")
+        tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        lay.addStretch(1)
+        return frame
+
+    def _sync_recipe_materials_empty_state(self) -> None:
+        has_materials = bool(self._recipe_material_states)
+        if hasattr(self, "materials_empty"):
+            self.materials_empty.setVisible(not has_materials)
+        if hasattr(self, "materials_list_host"):
+            self.materials_list_host.setVisible(has_materials)
+        if not has_materials and hasattr(self, "material_count"):
+            self.material_count.setText("尚未读取")
+
+    def _set_recipe_load_emphasized(self, on: bool) -> None:
+        self.recipe_load_button.setProperty("emphasized", bool(on))
+        self.recipe_load_button.style().unpolish(self.recipe_load_button)
+        self.recipe_load_button.style().polish(self.recipe_load_button)
+
+    def _focus_recipe_url_for_load(self) -> None:
+        self.recipe_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.recipe_edit.selectAll()
+        self._set_recipe_load_emphasized(True)
+        show_toast(self, "请粘贴配方链接，然后点「读取配方」", style="info")
+
+    def _open_collection_presets_page(self) -> None:
+        window = self.window()
+        activate = getattr(window, "_activate", None)
+        if callable(activate):
+            activate("collection_presets")
+            return
+        show_toast(self, "无法打开采集预设页", style="warning")
 
     def _build_special_materials_page(self) -> QWidget:
         page = QWidget()
@@ -939,10 +1040,13 @@ class PlatformPage(QWidget):
             return
         reference = self.recipe_edit.text().strip()
         if not reference:
+            self._set_recipe_load_emphasized(True)
+            self.recipe_edit.setFocus(Qt.FocusReason.OtherFocusReason)
             show_toast(self, "请先粘贴 CS2TH 配方链接", style="warning")
             return
         session = AuthClient().load_local_session()
         token = session.access_token if session is not None else ""
+        self._set_recipe_load_emphasized(False)
         self.recipe_load_button.setEnabled(False)
         self.recipe_load_button.setText("读取中…")
         self.recipe_status.setText(
@@ -959,6 +1063,12 @@ class PlatformPage(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._recipe_thread = thread
         thread.start()
+
+    def load_recipe_reference(self, reference: str) -> None:
+        """Open recipe collection mode and load a CS2TH recipe link."""
+        self._set_mode(1)
+        self.recipe_edit.setText(str(reference or "").strip())
+        self._load_recipe()
 
     def _on_include_alternatives_toggled(self, *_args) -> None:
         self._save_collection_settings()
@@ -1023,10 +1133,12 @@ class PlatformPage(QWidget):
     def _recipe_loaded(self, payload: object, error: str) -> None:
         self.recipe_load_button.setEnabled(True)
         self.recipe_load_button.setText("读取配方")
+        self._set_recipe_load_emphasized(False)
         self._recipe_thread = None
         if error or not isinstance(payload, dict):
             self.recipe_status.setText(error or "配方读取失败")
             show_toast(self, error or "配方读取失败", style="warning")
+            self._sync_recipe_materials_empty_state()
             return
         self._last_recipe_payload = dict(payload)
         materials = [item for item in payload.get("inputs", []) if isinstance(item, dict)]
@@ -1105,6 +1217,7 @@ class PlatformPage(QWidget):
                 self._material_card(index, material, is_alternative=is_alt)
             )
         self._rebuild_recipe_collection_links()
+        self._sync_recipe_materials_empty_state()
 
     def _open_current_recipe(self) -> None:
         url = getattr(self, "_current_recipe_url", "")
@@ -1139,6 +1252,18 @@ class PlatformPage(QWidget):
                 marker = float(material.get("wear_value") or 0)
             except (TypeError, ValueError):
                 marker = None
+
+        # Collection presets already store the exact purchase band — do not
+        # shrink/expand via neighboring MID buckets around the midpoint.
+        if material.get("exact_collection_range") and (
+            recipe_min is not None and recipe_max is not None
+        ):
+            low = max(total_min, min(total_max, float(recipe_min)))
+            high = max(total_min, min(total_max, float(recipe_max)))
+            if high < low:
+                low, high = high, low
+            return low, high, wear_label, low, high, marker
+
         if recipe_min is not None and recipe_max is not None:
             mid = (recipe_min + recipe_max) / 2.0
             if marker is None:
@@ -1217,9 +1342,13 @@ class PlatformPage(QWidget):
         wear.setObjectName("recipeBridgeWear")
         unit_price = float(material.get("unit_price_cny") or 0)
         price_bits = [str(material.get("wear") or "").strip()]
+        range_prefix = (
+            "预设" if material.get("exact_collection_range") else "配方"
+        )
         if recipe_wear_label:
-            price_bits.append(f"配方 {recipe_wear_label}")
-        if recipe_marker is not None:
+            price_bits.append(f"{range_prefix} {recipe_wear_label}")
+        # Preset bands have no single "target float"; skip the midpoint label.
+        if recipe_marker is not None and not material.get("exact_collection_range"):
             price_bits.append(f"对应 {recipe_marker:g}")
         if unit_price > 0:
             price_bits.append(f"单价 ¥{unit_price:.2f}")
@@ -1240,11 +1369,15 @@ class PlatformPage(QWidget):
             selected_min=selected_min,
             selected_max=selected_max,
         )
-        selector.set_recipe_annotation(
-            recipe_min=recipe_min,
-            recipe_max=recipe_max,
-            marker=recipe_marker,
-        )
+        if material.get("exact_collection_range"):
+            # Preset band is already the selected handles; skip "配方" overlay.
+            selector.set_recipe_annotation()
+        else:
+            selector.set_recipe_annotation(
+                recipe_min=recipe_min,
+                recipe_max=recipe_max,
+                marker=recipe_marker,
+            )
         layout.addWidget(selector)
 
         state = {
@@ -1466,6 +1599,10 @@ class PlatformPage(QWidget):
         )
         worker.progress.connect(self.special_collection_status.setText)
         worker.progress.connect(self._set_collection_status_text)
+        worker.user_alert.connect(
+            self._show_collection_user_alert,
+            Qt.ConnectionType.BlockingQueuedConnection,
+        )
         worker.completed.connect(self._special_collection_completed)
         worker.finished.connect(worker.deleteLater)
         self._special_worker = worker
@@ -1733,6 +1870,68 @@ class PlatformPage(QWidget):
         self.open_recipe_button.hide()
         return None
 
+    def show_collection_preset_materials(
+        self,
+        items: object,
+        *,
+        title: str = "",
+    ) -> str | None:
+        """Load a user collection preset into recipe-collection mode."""
+        if not isinstance(items, list):
+            return "采集预设无效"
+        inputs: list[dict] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                min_wear = float(raw.get("min_wear"))
+                max_wear = float(raw.get("max_wear"))
+            except (TypeError, ValueError):
+                continue
+            if min_wear > max_wear:
+                min_wear, max_wear = max_wear, min_wear
+            inputs.append(
+                {
+                    "name": name,
+                    "count": 1,
+                    "min_wear": min_wear,
+                    "max_wear": max_wear,
+                    # Keep the preset band as-is (no neighboring-bucket expand).
+                    "exact_collection_range": True,
+                }
+            )
+        if not inputs:
+            return "采集预设中没有可采集材料"
+        display_title = str(title or "").strip() or "采集预设"
+        payload = {
+            "inputs": inputs,
+            "collection_name": display_title,
+            "input_rarity": "",
+            "input_cost": 0,
+            "roi": 0,
+            "_market": "spot",
+            "_recipe_id": "",
+        }
+        self.recipe_edit.clear()
+        self._current_recipe_url = ""
+        self._set_mode(1)
+        self._last_recipe_payload = payload
+        self.recipe_status.setText(
+            "已导入采集预设。可拖动调整每种材料的磨损区间；"
+            "勾选候选源后点「开始采集」。"
+        )
+        self.recipe_summary_title.setText(display_title)
+        self.recipe_summary_meta.setText(
+            f"来自采集预设 · {len(inputs)} 种材料 · 可调整磨损后采集"
+        )
+        self.recipe_summary.show()
+        self.open_recipe_button.hide()
+        self._render_loaded_recipe_materials(payload)
+        return None
+
     def _special_material_card(self, index: int, material: dict) -> QFrame:
         card = QFrame()
         card.setObjectName("recipeBridgeMaterial")
@@ -1806,16 +2005,40 @@ class PlatformPage(QWidget):
             return None
         return self.name_edit.text().strip(), url
 
+    def _show_collection_user_alert(self, title: str, message: str) -> None:
+        """Blocking alert for collection workers (e.g. ECO slider / re-login)."""
+        show_alert(self, str(title or ""), str(message or ""))
+
+    def _collection_finished_idle(self) -> bool:
+        """True when a prior run finished and the start button would begin a new one."""
+        if self._collection_running:
+            return False
+        state = str(self.collection_status.property("collectionState") or "")
+        return state == "complete" or bool(self._collected_items)
+
+    def _confirm_restart_collection(self) -> bool:
+        count = len(self._collected_items)
+        detail = (
+            f"当前已有采集结果（{count} 条）。\n重新采集会覆盖本次结果，确定继续吗？"
+            if count
+            else "当前采集已结束。\n确定要重新开始采集吗？"
+        )
+        return ask_confirmation(self, "重新开始采集", detail)
+
     def _toggle_collection(self) -> None:
         if self.mode_stack.currentIndex() == 2:
             if self._special_worker is not None and self._special_worker.isRunning():
                 self._stop_special_collection()
             else:
+                if self._collection_finished_idle() and not self._confirm_restart_collection():
+                    return
                 self._start_special_collection()
             return
         if self._collection_running:
             self._stop_collection()
         else:
+            if self._collection_finished_idle() and not self._confirm_restart_collection():
+                return
             self._start_collection()
 
     def _selected_collection_platforms(self) -> list[str]:
@@ -1969,6 +2192,10 @@ class PlatformPage(QWidget):
                 parent=self,
             )
             worker.progress.connect(self._set_collection_status_text)
+            worker.user_alert.connect(
+                self._show_collection_user_alert,
+                Qt.ConnectionType.BlockingQueuedConnection,
+            )
             worker.completed.connect(self._material_collection_scraped)
             worker.finished.connect(worker.deleteLater)
             self._material_worker = worker
