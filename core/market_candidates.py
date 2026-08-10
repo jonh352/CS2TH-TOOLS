@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import threading
@@ -163,6 +164,102 @@ _COLLECTION_PRICE_CAP_MULTIPLIER = 2.0
 _COLLECTION_ECO_PRICE_CAP_MULTIPLIER = 2.5
 # Per platform · per material · per wear window (e.g. 略磨 / 久经).
 _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW = 300
+# BUFF 429: retries after the first rate-limit response.
+_BUFF_RATE_LIMIT_RETRIES = 1
+# Used only when the 429 response has no Retry-After header.
+_BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS = (30.0,)
+_BUFF_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS = 300.0
+
+
+def _parse_retry_after_seconds(response: Any) -> float | None:
+    """Parse ``Retry-After`` as delay-seconds or HTTP-date; ``None`` if absent/invalid."""
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After")
+    if raw is None:
+        raw = headers.get("retry-after")
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(int(text)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+        if when.tzinfo is None:
+            from datetime import timezone
+
+            when = when.replace(tzinfo=timezone.utc)
+        delay = (when - datetime.now(when.tzinfo)).total_seconds()
+        return max(0.0, float(delay))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _buff_rate_limit_wait_seconds(response: Any, *, attempt: int) -> float:
+    """Prefer Retry-After; otherwise stepped default backoff (no empty wait)."""
+    retry_after = _parse_retry_after_seconds(response)
+    if retry_after is not None:
+        return min(float(retry_after), _BUFF_RATE_LIMIT_RETRY_AFTER_CAP_SECONDS)
+    backoffs = _BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS
+    index = min(max(int(attempt), 1), len(backoffs)) - 1
+    return float(backoffs[index])
+
+
+def _buff_session(cookie: str) -> requests.Session:
+    """One Session per material fetch: reuse TCP + fixed Cookie/base headers."""
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": _UA,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": "https://buff.163.com/market/csgo",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+    )
+    if cookie:
+        session.headers["Cookie"] = cookie
+    return session
+
+
+def _buff_get_sell_order(
+    session: requests.Session,
+    *,
+    params: dict[str, Any],
+    cancel_check: CancelCheck = None,
+    progress: Callable[[str], None] | None = None,
+) -> requests.Response:
+    """GET sell_order with one 429 Retry-After / default-backoff retry."""
+    _ = progress
+    attempt = 0
+    while True:
+        raise_if_cancelled(cancel_check)
+        response = session.get(_BUFF_API, params=params, timeout=18)
+        raise_if_cancelled(cancel_check)
+        if response.status_code != 429:
+            return response
+        attempt += 1
+        if attempt > _BUFF_RATE_LIMIT_RETRIES:
+            raise RuntimeError("BUFF 返回访问频率过高，已立即停止本平台采集")
+        wait_s = _buff_rate_limit_wait_seconds(response, attempt=attempt)
+        if wait_s > 0:
+            interruptible_wait(wait_s, cancel_check)
+
+
+def collection_jitter_wait_seconds(request_interval: float) -> float:
+    """Random wait in ``[3s, max(3s, interval)]`` for material and page gaps."""
+    wait_low = 3.0
+    wait_high = max(wait_low, float(request_interval or wait_low))
+    if wait_high > wait_low:
+        return float(random.uniform(wait_low, wait_high))
+    return wait_low
+
+
+# Backward-compatible alias.
+c5_collection_wait_seconds = collection_jitter_wait_seconds
 
 
 def _collection_window_row_limit_reached(kept: int) -> bool:
@@ -1722,15 +1819,7 @@ def fetch_buff_candidates(
     if not wear_windows:
         return []
     cookie = _buff_cookie()
-    headers = {
-        "User-Agent": _UA,
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://buff.163.com/market/csgo",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    if cookie:
-        headers["Cookie"] = cookie
+    session = _buff_session(cookie)
     out: list[dict[str, Any]] = []
     seen_listing_ids: set[str] = set()
     request_no = 0
@@ -1758,7 +1847,10 @@ def fetch_buff_candidates(
             if _collection_window_row_limit_reached(window_kept[0]):
                 break
             if request_no:
-                interruptible_wait(max(1.0, request_interval), cancel_check)
+                interruptible_wait(
+                    collection_jitter_wait_seconds(request_interval),
+                    cancel_check,
+                )
             request_no += 1
             if progress:
                 progress(
@@ -1766,8 +1858,8 @@ def fetch_buff_candidates(
                     f"{display_name} · 磨损 {window_low:g}–{window_high:g} · "
                     f"第 {page} 页"
                 )
-            response = requests.get(
-                _BUFF_API,
+            response = _buff_get_sell_order(
+                session,
                 params={
                     "game": "csgo",
                     "goods_id": goods_id,
@@ -1777,12 +1869,9 @@ def fetch_buff_candidates(
                     "min_paintwear": min_paintwear,
                     "max_paintwear": max_paintwear,
                 },
-                headers=headers,
-                timeout=18,
+                cancel_check=cancel_check,
+                progress=progress,
             )
-            raise_if_cancelled(cancel_check)
-            if response.status_code == 429:
-                raise RuntimeError("BUFF 返回访问频率过高，已立即停止本平台采集")
             response.raise_for_status()
             payload = response.json()
             if payload.get("code") != "OK":
@@ -1845,25 +1934,28 @@ def fetch_buff_candidates(
             if total_page > 0 and page >= total_page:
                 break
 
-    for window_low, window_high in wear_windows:
-        raise_if_cancelled(cancel_check)
-        window_kept = [0]
-        ids = _merge_platform_ids(
-            template.buff,
-            window_low,
-            window_high,
-            extra_ids,
-        )
-        for goods_id in ids:
-            if _collection_window_row_limit_reached(window_kept[0]):
-                break
-            collect_window(
-                goods_id,
+    try:
+        for window_low, window_high in wear_windows:
+            raise_if_cancelled(cancel_check)
+            window_kept = [0]
+            ids = _merge_platform_ids(
+                template.buff,
                 window_low,
                 window_high,
-                window_kept=window_kept,
+                extra_ids,
             )
-    return out
+            for goods_id in ids:
+                if _collection_window_row_limit_reached(window_kept[0]):
+                    break
+                collect_window(
+                    goods_id,
+                    window_low,
+                    window_high,
+                    window_kept=window_kept,
+                )
+        return out
+    finally:
+        session.close()
 
 
 def fetch_youpin_candidates(
@@ -1919,7 +2011,10 @@ def fetch_youpin_candidates(
             if _collection_window_row_limit_reached(window_kept[0]):
                 break
             if request_no:
-                interruptible_wait(max(1.0, request_interval), cancel_check)
+                interruptible_wait(
+                    collection_jitter_wait_seconds(request_interval),
+                    cancel_check,
+                )
             request_no += 1
             if progress:
                 progress(
@@ -2009,12 +2104,8 @@ def fetch_youpin_candidates(
     for window_index, (window_low, window_high) in enumerate(wear_windows):
         raise_if_cancelled(cancel_check)
         if window_index > 0:
-            if progress:
-                progress(
-                    f"悠悠有品 · {display_name} · 换磨损区间前等待 "
-                    f"{max(1.0, request_interval):g} 秒"
-                )
-            interruptible_wait(max(1.0, request_interval), cancel_check)
+            wait_s = collection_jitter_wait_seconds(request_interval)
+            interruptible_wait(wait_s, cancel_check)
         window_kept = [0]
         ids = _merge_platform_ids(
             template.yyyp,
@@ -2679,7 +2770,7 @@ def _fetch_c5_via_browser(
     cancel_check: CancelCheck = None,
     max_unit_price: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect via minimized system Chrome/Edge sniffing the sell-list XHR.
+    """Collect via system Chrome/Edge; sniff sell-list XHR, then reuse headers.
 
     Risk / verify / hard failures pause C5 for this run immediately — no retry.
     """
@@ -2702,7 +2793,10 @@ def _fetch_c5_via_browser(
                 if _collection_window_row_limit_reached(len(out)):
                     break
                 if request_no:
-                    interruptible_wait(max(1.0, request_interval), cancel_check)
+                    interruptible_wait(
+                        collection_jitter_wait_seconds(request_interval),
+                        cancel_check,
+                    )
                 request_no += 1
                 payload = collector.fetch_list_payload(
                     item_id=int(item_id),
@@ -3208,7 +3302,7 @@ def _resolve_eco_access_gate(
 ) -> None:
     """Clear ECO access limits without unnecessary popups.
 
-    - Clear slider signal → open headed window, wait for user, auto-close.
+    - Clear slider / login challenge → open headed window, wait for user.
     - Otherwise → silent wait/retry up to 3 rounds; still blocked → pause platform.
     """
     interval = max(3.0, float(request_interval or 3.0))
@@ -3232,7 +3326,10 @@ def _resolve_eco_access_gate(
 
     if needs_slider:
         if progress:
-            progress("ECOSteam · 检测到滑块验证，验证窗口已开到任务栏…")
+            progress(
+                "ECOSteam · 检测到访问校验，已打开窗口"
+                "（可能是滑块，也可能需要重新登录）…"
+            )
         from core.market_access_session import close_access_sessions, get_access_session
 
         session = get_access_session("eco")
@@ -3246,22 +3343,22 @@ def _resolve_eco_access_gate(
         except CollectionCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning("ECOSteam 滑块验证失败：%s", exc)
+            logger.warning("ECOSteam 访问校验失败：%s", exc)
             raise EcoPlatformPausedError(
-                f"ECOSteam 滑块验证未完成，本轮已暂停该平台采集：{exc}"
+                f"ECOSteam 访问校验未完成，本轮已暂停该平台采集：{exc}"
             ) from exc
         finally:
             close_access_sessions("eco")
         if outcome == "cleared" or _eco_access_gate_probe_ok():
             if progress:
-                progress("ECOSteam · 滑块验证通过，继续采集…")
+                progress("ECOSteam · 访问校验已通过，继续采集…")
             return
         logger.info(
-            "ECOSteam 滑块窗口未通过（outcome=%s），本轮暂停平台",
+            "ECOSteam 验证窗口未通过（outcome=%s），本轮暂停平台",
             outcome,
         )
         raise EcoPlatformPausedError(
-            "ECOSteam 滑块验证未通过，本轮已暂停该平台采集"
+            "ECOSteam 访问校验未通过（请完成滑块或重新登录），本轮已暂停该平台采集"
         )
 
     if _silent_wait_rounds("接口访问受限（无需滑块）"):
@@ -3370,7 +3467,10 @@ def fetch_eco_candidates(
                     ):
                         break
                     if request_no:
-                        interruptible_wait(max(1.0, request_interval), cancel_check)
+                        interruptible_wait(
+                            collection_jitter_wait_seconds(request_interval),
+                            cancel_check,
+                        )
                     request_no += 1
                     if progress:
                         progress(

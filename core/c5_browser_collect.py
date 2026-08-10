@@ -1,10 +1,15 @@
-"""C5 exact-wear collection via a minimized system Chrome/Edge window.
+"""C5 exact-wear collection via a hidden system Chrome/Edge window.
 
 Uses a real (non-headless) Chromium + CDP to load sell pages and sniff
-``/search/v2/sell/{id}/list``. Window starts minimized to the taskbar.
+``/search/v2/sell/{id}/list``. The native window stays hidden during collection
+and is restored only when C5 requires user verification.
+After the first successful sniff, later materials reuse captured request
+headers for page 1 (and later pages) via HTTP, falling back to navigation only
+when those headers stop working.
 All Playwright Sync API calls run on a dedicated worker thread so they never
 collide with an asyncio loop on the collection thread.
-Session is reused for one C5 wave, then closed immediately.
+Session is reused for one C5 wave. A verification window is left open for the
+user; ordinary collection windows are closed immediately with the wave.
 """
 
 from __future__ import annotations
@@ -60,6 +65,18 @@ def _pick_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _hidden_browser_startupinfo() -> subprocess.STARTUPINFO | None:
+    """Ask Windows to keep Chromium's first native window hidden at creation."""
+    import os
+
+    if os.name != "nt":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
+    return startupinfo
+
+
 def _wait_for_cdp(
     port: int,
     proc: subprocess.Popen,
@@ -75,6 +92,7 @@ def _wait_for_cdp(
     last_error = ""
     while time.monotonic() < deadline:
         raise_if_cancelled(cancel_check)
+        _hide_browser_windows(proc)
         if proc.poll() is not None:
             raise C5PlatformPausedError(
                 "C5GAME 采集浏览器已退出，无法建立通道"
@@ -145,8 +163,8 @@ def _descendant_pids(root_pid: int) -> set[int]:
     return pids
 
 
-def _minimize_browser_windows(proc: subprocess.Popen | None) -> None:
-    """Minimize top-level windows for ``proc`` (and child PIDs) without activating."""
+def _hide_browser_windows(proc: subprocess.Popen | None) -> None:
+    """Hide top-level windows for ``proc`` (and child PIDs) from the taskbar."""
     import ctypes
     import os
 
@@ -154,7 +172,7 @@ def _minimize_browser_windows(proc: subprocess.Popen | None) -> None:
         return
     target_pids = _descendant_pids(int(proc.pid))
     user32 = ctypes.windll.user32
-    sw_showminnoactive = 7
+    sw_hide = 0
     callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
     @callback_type
@@ -162,7 +180,7 @@ def _minimize_browser_windows(proc: subprocess.Popen | None) -> None:
         process_id = ctypes.c_ulong()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
         if process_id.value in target_pids and user32.IsWindowVisible(hwnd):
-            user32.ShowWindow(hwnd, sw_showminnoactive)
+            user32.ShowWindow(hwnd, sw_hide)
         return True
 
     try:
@@ -171,38 +189,36 @@ def _minimize_browser_windows(proc: subprocess.Popen | None) -> None:
         pass
 
 
-def _minimize_via_cdp(page: Any) -> None:
-    """Force the attached Chromium window to minimized via CDP (survives navigation)."""
-    if page is None:
+def _show_browser_windows(proc: subprocess.Popen | None) -> None:
+    """Restore and foreground C5's native window for user verification."""
+    import ctypes
+    import os
+
+    if os.name != "nt" or proc is None or proc.poll() is not None:
         return
-    try:
-        session = page.context.new_cdp_session(page)
-    except Exception:
-        return
-    try:
-        target = session.send("Browser.getWindowForTarget")
-        window_id = target.get("windowId") if isinstance(target, dict) else None
-        if window_id is None:
-            return
-        session.send(
-            "Browser.setWindowBounds",
-            {
-                "windowId": window_id,
-                "bounds": {"windowState": "minimized"},
-            },
+    target_pids = _descendant_pids(int(proc.pid))
+    user32 = ctypes.windll.user32
+    sw_restore = 9
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    @callback_type
+    def callback(hwnd, _lparam):
+        process_id = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        is_main_window = (
+            process_id.value in target_pids
+            and user32.GetWindow(hwnd, 4) == 0  # GW_OWNER
+            and user32.GetWindowTextLengthW(hwnd) > 0
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("C5 CDP minimize failed: %s", exc)
-    finally:
-        try:
-            session.detach()
-        except Exception:
-            pass
+        if is_main_window:
+            user32.ShowWindow(hwnd, sw_restore)
+            user32.SetForegroundWindow(hwnd)
+        return True
 
-
-def _keep_window_minimized(proc: subprocess.Popen | None, page: Any = None) -> None:
-    _minimize_via_cdp(page)
-    _minimize_browser_windows(proc)
+    try:
+        user32.EnumWindows(callback, 0)
+    except Exception:
+        pass
 
 
 def _cookies_from_header(cookie: str) -> list[dict[str, Any]]:
@@ -288,7 +304,7 @@ def _looks_like_risk(text: str) -> bool:
 
 
 class C5BrowserCollector:
-    """One minimized system-browser CDP session reused across C5 materials.
+    """One hidden system-browser CDP session reused across C5 materials.
 
     Playwright Sync API is confined to an internal worker thread.
     """
@@ -301,6 +317,7 @@ class C5BrowserCollector:
         self._page: Any = None
         self._headers: dict[str, str] | None = None
         self._opened = False
+        self._verification_visible = False
         self._cmd_q: queue.Queue = queue.Queue()
         self._worker = threading.Thread(
             target=self._worker_loop,
@@ -440,7 +457,7 @@ class C5BrowserCollector:
         _clear_stale_profile_singletons(profile)
         port = _pick_free_port()
         try:
-            # Real window (not headless) to reduce「虚拟设备」risk; keep minimized.
+            # Keep a real headed browser to avoid changing C5's browser fingerprint.
             self._proc = subprocess.Popen(
                 [
                     str(exe),
@@ -456,7 +473,9 @@ class C5BrowserCollector:
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                startupinfo=_hidden_browser_startupinfo(),
             )
+            _hide_browser_windows(self._proc)
             _wait_for_cdp(port, self._proc, cancel_check=cancel_check)
 
             from playwright.sync_api import sync_playwright
@@ -465,6 +484,7 @@ class C5BrowserCollector:
             last_connect_error: Exception | None = None
             for attempt in range(1, 6):
                 raise_if_cancelled(cancel_check)
+                _hide_browser_windows(self._proc)
                 try:
                     self._browser = self._playwright.chromium.connect_over_cdp(
                         f"http://127.0.0.1:{port}"
@@ -501,7 +521,7 @@ class C5BrowserCollector:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("C5 采集首页打开失败：%s", exc)
-            _keep_window_minimized(self._proc, self._page)
+            _hide_browser_windows(self._proc)
 
             cookie_header, _token = load_c5_auth_for_browser()
             harvested: list[dict[str, Any]] = []
@@ -525,6 +545,17 @@ class C5BrowserCollector:
                 raise C5PlatformPausedError(
                     "C5GAME 无可用登录 Cookie，请先完成「登录 / 打开」"
                 )
+            # Prefer previously sniffed client headers so later materials can
+            # skip sell-page navigation when the list API still accepts them.
+            if not self._headers:
+                try:
+                    from core.market_candidates import _c5_client_headers
+
+                    saved = _c5_client_headers()
+                    if saved:
+                        self._headers = dict(saved)
+                except Exception:
+                    pass
             self._opened = True
             if progress:
                 progress("C5GAME · 采集通道已就绪")
@@ -554,6 +585,18 @@ class C5BrowserCollector:
         self._browser = None
         self._playwright = None
         self._proc = None
+        preserve_verification_window = self._verification_visible
+        self._verification_visible = False
+        if preserve_verification_window:
+            # Leave the real browser open so the user can finish C5's challenge.
+            # Stopping Playwright only detaches automation; it does not make this
+            # user-facing verification window headless or replace it with HTTP.
+            try:
+                if playwright is not None:
+                    playwright.stop()
+            except Exception:
+                pass
+            return
         for closer in (
             lambda: page.close() if page is not None else None,
             lambda: browser.close() if browser is not None else None,
@@ -587,6 +630,11 @@ class C5BrowserCollector:
     ) -> dict[str, Any]:
         from core.market_candidates import C5AccessGateError
 
+        def raise_for_verification(message: str) -> None:
+            self._verification_visible = True
+            _show_browser_windows(self._proc)
+            raise C5AccessGateError(message, needs_verify=True)
+
         raise_if_cancelled(cancel_check)
         self._ensure_open_impl(progress=progress, cancel_check=cancel_check)
         assert self._page is not None and self._context is not None
@@ -606,9 +654,15 @@ class C5BrowserCollector:
             f"?minWear={float(min_wear):.8f}&maxWear={float(max_wear):.8f}"
         )
 
-        if self._headers and page_no > 1:
-            if progress:
-                progress(f"C5GAME · {label} · 第 {page_no} 页")
+        def fetch_with_headers(*, announce: bool) -> dict[str, Any] | None:
+            """Try list API with sniffed headers. None = soft fail → re-sniff."""
+            if not self._headers:
+                return None
+            if announce and progress:
+                if page_no > 1:
+                    progress(f"C5GAME · {label} · 第 {page_no} 页")
+                else:
+                    progress(f"C5GAME · {label} · 拉取挂单…")
             try:
                 response = self._context.request.get(
                     list_url,
@@ -618,29 +672,47 @@ class C5BrowserCollector:
             except CollectionCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(f"C5GAME 挂单接口请求失败：{exc}") from exc
+                logger.info("C5 list via headers failed: %s", exc)
+                return None
             raise_if_cancelled(cancel_check)
             if response.status == 429:
                 raise C5AccessGateError(
                     "C5GAME 返回访问频率过高",
                     needs_verify=False,
                 )
+            if int(response.status or 0) != 200:
+                logger.info(
+                    "C5 list via headers status=%s; will re-sniff",
+                    response.status,
+                )
+                return None
             try:
                 payload = response.json()
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError("C5GAME 挂单接口返回异常") from exc
+            except Exception:
+                return None
             if not isinstance(payload, dict):
-                raise RuntimeError("C5GAME 挂单接口返回异常")
+                return None
             risk = _risk_text(payload)
             if _looks_like_risk(risk):
-                raise C5AccessGateError(
-                    f"C5GAME 需要安全验证：{risk.strip() or '风控'}",
-                    needs_verify=True,
+                raise_for_verification(
+                    f"C5GAME 需要安全验证：{risk.strip() or '风控'}"
                 )
             return payload
 
+        # Same session: reuse sniffed headers for later materials' page 1 as well.
+        reused = fetch_with_headers(announce=True)
+        if reused is not None:
+            return reused
+        if self._headers:
+            logger.info(
+                "C5 list headers unusable for itemId=%s page=%s; re-sniff sell page",
+                item_id,
+                page_no,
+            )
+            self._headers = None
+
         if progress:
-            progress(f"C5GAME · {label} · 正在拉取挂单…")
+            progress(f"C5GAME · {label} · 拉取挂单…")
         latest: dict[str, Any] | None = None
         captured_headers: dict[str, str] = {}
 
@@ -685,7 +757,7 @@ class C5BrowserCollector:
                 return
             latest = data
 
-        # Always drive the visible tab to the sell page (not about:blank).
+        # Navigate once to sniff list XHR headers when reuse is unavailable.
         page = self._page
         try:
             pages = [p for p in list(self._context.pages) if p is not None]
@@ -703,35 +775,29 @@ class C5BrowserCollector:
         page.on("request", on_request)
         page.on("response", on_response)
         try:
-            # Navigation often restores the window; pin it back to the taskbar.
-            _keep_window_minimized(self._proc, page)
+            # Navigation can recreate/show the native window, so hide it again.
+            _hide_browser_windows(self._proc)
             page.goto(sell_page, wait_until="domcontentloaded", timeout=60_000)
-            _keep_window_minimized(self._proc, page)
+            _hide_browser_windows(self._proc)
             href = str(page.url or "")
             if "console-ban" in href.lower():
-                raise C5AccessGateError(
-                    "C5GAME 触发访问拦截，需要安全验证",
-                    needs_verify=True,
-                )
+                raise_for_verification("C5GAME 触发访问拦截，需要安全验证")
             deadline = time.monotonic() + max(15.0, float(timeout_s))
-            next_minimize = time.monotonic()
+            next_hide = time.monotonic()
             while time.monotonic() < deadline:
                 raise_if_cancelled(cancel_check)
                 if latest is not None:
                     break
                 href = str(page.url or "")
                 if "console-ban" in href.lower():
-                    raise C5AccessGateError(
-                        "C5GAME 触发访问拦截，需要安全验证",
-                        needs_verify=True,
-                    )
-                if time.monotonic() >= next_minimize:
-                    _keep_window_minimized(self._proc, page)
-                    next_minimize = time.monotonic() + 1.5
+                    raise_for_verification("C5GAME 触发访问拦截，需要安全验证")
+                if time.monotonic() >= next_hide:
+                    _hide_browser_windows(self._proc)
+                    next_hide = time.monotonic() + 1.5
                 page.wait_for_timeout(400)
             else:
                 raise RuntimeError("等待 C5GAME 挂单接口超时")
-            _keep_window_minimized(self._proc, page)
+            _hide_browser_windows(self._proc)
         finally:
             try:
                 page.remove_listener("request", on_request)
@@ -750,23 +816,19 @@ class C5BrowserCollector:
                 pass
         risk = _risk_text(latest)
         if _looks_like_risk(risk):
-            raise C5AccessGateError(
-                f"C5GAME 需要安全验证：{risk.strip() or '风控'}",
-                needs_verify=True,
+            raise_for_verification(
+                f"C5GAME 需要安全验证：{risk.strip() or '风控'}"
             )
-        if self._headers and page_no == 1:
-            try:
-                response = self._context.request.get(
-                    list_url,
-                    headers=dict(self._headers),
-                    timeout=30_000,
+        # After sniff, prefer the exact page_no via HTTP (page>1 must not return
+        # the first-page XHR body from navigation).
+        if self._headers:
+            refreshed = fetch_with_headers(announce=False)
+            if refreshed is not None:
+                return refreshed
+            if page_no > 1:
+                raise RuntimeError(
+                    f"C5GAME 嗅探后仍无法拉取第 {page_no} 页挂单"
                 )
-                if response.status == 200:
-                    payload = response.json()
-                    if isinstance(payload, dict):
-                        return payload
-            except Exception:
-                pass
         return latest
 
 

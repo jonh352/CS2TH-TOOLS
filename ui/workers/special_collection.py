@@ -13,6 +13,7 @@ from ui.workers.material_collection import collect_candidates_parallel
 
 class SpecialCollectionWorker(QThread):
     progress = Signal(str)
+    progress_units = Signal(int, int)
     completed = Signal(object, object, str)
 
     def __init__(
@@ -51,6 +52,7 @@ class SpecialCollectionWorker(QThread):
             provider_intervals=self.provider_intervals,
             progress=self.progress.emit,
             cancel_check=self._is_stop_requested,
+            unit_progress=self.progress_units.emit,
         )
 
         if self._is_stop_requested():

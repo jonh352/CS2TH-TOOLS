@@ -75,6 +75,57 @@ class CollectionCancellationTests(unittest.TestCase):
         self.assertEqual(rows[0]["listing_id"], "kept-1")
         self.assertIn("已停止", message)
 
+    def test_material_worker_emits_progress_units(self) -> None:
+        worker = MaterialCollectionWorker(
+            materials=[
+                {"name": "skin-a", "min_wear": 0.1, "max_wear": 0.2},
+                {"name": "skin-b", "min_wear": 0.1, "max_wear": 0.2},
+            ],
+            providers=["buff"],
+            provider_intervals={"buff": 5},
+        )
+        units: list[tuple[int, int]] = []
+        from PySide6.QtCore import Qt as QtCoreQt
+
+        worker.progress_units.connect(
+            lambda done, total: units.append((done, total)),
+            QtCoreQt.ConnectionType.DirectConnection,
+        )
+
+        def fake_fetch(_provider: str, **_kwargs):
+            return [
+                {
+                    "platform": "buff",
+                    "listing_id": "x",
+                    "goods_id": "x",
+                    "goods_name": "skin-a",
+                    "float_value": 0.15,
+                    "price": 1.0,
+                }
+            ]
+
+        with (
+            patch(
+                "ui.workers.material_collection.get_name_map",
+                return_value={"skin-a": object(), "skin-b": object()},
+            ),
+            patch(
+                "ui.workers.material_collection.normalize_name",
+                side_effect=lambda name: name,
+            ),
+            patch(
+                "ui.workers.material_collection.fetch_exact_wear_candidates",
+                side_effect=fake_fetch,
+            ),
+            patch("ui.workers.material_collection.close_access_sessions"),
+            patch("ui.workers.material_collection.interruptible_wait"),
+        ):
+            worker.run()
+
+        self.assertEqual(units[0], (0, 2))
+        self.assertEqual(units[-1], (2, 2))
+        self.assertIn((1, 2), units)
+
     def test_material_worker_collects_in_buff_yyyp_then_c5_eco_waves(self) -> None:
         worker = MaterialCollectionWorker(
             materials=[{"name": "skin", "min_wear": 0.1, "max_wear": 0.2}],

@@ -1302,9 +1302,29 @@ QProgressBar#alchemyCalcProgressBar::chunk {{
   );
   border-radius: 3px;
 }}
+QProgressBar#collectionProgressBar {{
+  min-height: 14px;
+  max-height: 14px;
+  color: transparent;
+  background: {input};
+  border: 1px solid {border};
+  border-radius: 7px;
+}}
+QProgressBar#collectionProgressBar::chunk {{
+  background: qlineargradient(
+    x1:0, y1:0, x2:1, y2:0,
+    stop:0 {blue}, stop:1 {cyan}
+  );
+  border-radius: 6px;
+}}
 QLabel#alchemyCalcProgressLabel {{
   color: {cyan};
   font-weight: 800;
+}}
+QLabel#collectionProgressLabel {{
+  color: {cyan};
+  font-weight: 800;
+  font-size: 13px;
 }}
 QLabel#alchemyCalcProgressDetailLabel {{
   color: {muted};

@@ -5,20 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 import time
 
-from PySide6.QtCore import QTimer, QUrl, QStringListModel, Qt, Signal
+from PySide6.QtCore import QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QCompleter,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -53,6 +52,7 @@ from core.platform_login_state import (
 )
 from core.recipe_bridge import material_wear_range, saved_recipe_to_bridge_payload
 from core.saved_recipes import list_saved_recipes
+from ui.dialogs.pick_saved_recipe_dialog import pick_saved_recipe
 from core.json_store import read_json_dict, write_json
 from core.market_candidates import (
     APP_LOGIN_PROVIDERS,
@@ -61,7 +61,6 @@ from core.market_candidates import (
     clear_c5_session_auth,
     provider_display_name,
 )
-from core.special_wear_names import get_skin_full_names_without_appearance
 from ui.components import panel
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from ui.widgets.eliding_label import ElidingLabel
@@ -78,6 +77,10 @@ from ui.workers.material_collection import (
     dedupe_candidates_keep_cheapest,
 )
 from ui.workers.special_collection import SpecialCollectionWorker
+
+# Material-collection mode stack (单件饰品已移除).
+_MODE_RECIPE = 0
+_MODE_CUSTOM = 1
 
 
 def _clear_layout(layout: QVBoxLayout) -> None:
@@ -138,6 +141,13 @@ class PlatformPage(QWidget):
         self._collection_platform = ""
         self._collection_running = False
         self._collection_stopping = False
+        # Which mode owns the in-flight run / last completed results (shared chrome).
+        self._collection_owner_mode: int | None = None
+        self._results_owner_mode: int | None = None
+        self._results_status_text = ""
+        self._owner_live_status = ""
+        self._owner_live_state = "running"
+        self._owner_progress_visible = False
         self._recipe_material_states: list[dict] = []
         self._collection_timer = QTimer(self)
         self._collection_timer.setSingleShot(True)
@@ -155,6 +165,8 @@ class PlatformPage(QWidget):
         self._pending_retry_provider: str = ""
         self._collection_scrape_pending = False
         self._collection_started_at: float | None = None
+        self._collection_link_total = 0
+        self._collection_link_done = 0
         self._special_payload: dict = {}
         self._special_slot_count = 10
         saved_settings = load_app_settings()
@@ -184,12 +196,11 @@ class PlatformPage(QWidget):
         root.addWidget(self._build_login_panel())
 
         self.mode_stack = QStackedWidget()
-        self.mode_stack.addWidget(self._build_skin_page())
         self.mode_stack.addWidget(self._build_recipe_page())
         self.mode_stack.addWidget(self._build_special_materials_page())
         root.addWidget(self.mode_stack)
         root.addStretch(1)
-        self._set_mode(1)  # 默认进入「配方链接」
+        self._set_mode(_MODE_RECIPE)  # 默认进入「配方采集」
         self._refresh_login_states()
 
     def _build_login_panel(self) -> QFrame:
@@ -205,7 +216,7 @@ class PlatformPage(QWidget):
         group = QButtonGroup(self)
         group.setExclusive(True)
         self.mode_buttons = []
-        for index, text in enumerate(("单件饰品", "配方链接", "特殊磨损材料")):
+        for index, text in enumerate(("配方采集", "自定义采集")):
             button = QPushButton(text)
             button.setObjectName("platformModeButton")
             button.setCheckable(True)
@@ -270,8 +281,13 @@ class PlatformPage(QWidget):
             interval.setFixedWidth(76)
             if market.key == "c5":
                 interval.setToolTip(
-                    "同一平台：翻页间隔，以及换下一种材料前的额外等待；"
-                    "默认 5 秒（最短 5 秒）"
+                    "翻页与换材料：均在 3 秒～本设置之间随机等待"
+                    "（本设置最短 5 秒）"
+                )
+            elif market.key in {"eco", "buff", "yyyp"}:
+                interval.setToolTip(
+                    "翻页与换材料：均在 3 秒～本设置之间随机等待"
+                    "（本设置最短 3 秒）"
                 )
             else:
                 interval.setToolTip(
@@ -311,8 +327,9 @@ class PlatformPage(QWidget):
         self.silent_collection.setToolTip(
             "勾选：不自动打开商品页；C5 用最小化系统窗口拉取挂单（采完即关），"
             "失败或风控则本轮停止 C5、不重试；"
-            "ECO 遇访问限制时：有明确验证信号才弹窗，否则静默重试最多 3 轮，"
-            "仍失败则本轮暂停该平台，其他平台采完后可询问是否重试。"
+            "ECO 遇访问限制时：有明确验证信号才打开窗口"
+            "（可能是滑块，也可能要重新登录），"
+            "否则静默重试最多 3 轮，仍失败则本轮暂停该平台。"
             "不勾选：可额外打开材料商品页"
         )
         self.silent_collection.toggled.connect(self._save_collection_settings)
@@ -329,6 +346,7 @@ class PlatformPage(QWidget):
         self.collection_toggle_button = QPushButton("开始采集")
         self.collection_toggle_button.setObjectName("marketCollectButton")
         self.collection_toggle_button.setFixedWidth(104)
+        self.collection_toggle_button.setEnabled(False)
         self.collection_toggle_button.setToolTip(
             "BUFF / 悠悠 / C5 / ECO：抓取精确磨损挂单；"
             "Steam 打开材料链接。采集中可再次点击停止"
@@ -353,58 +371,40 @@ class PlatformPage(QWidget):
         collection_controls.addWidget(self.collection_import_button, 0)
         collection_controls.addWidget(self.collection_toggle_button, 0)
         collection_controls.setStretch(2, 1)
+
+        self.collection_progress_widget = QWidget()
+        self.collection_progress_widget.hide()
+        progress_row = QHBoxLayout(self.collection_progress_widget)
+        progress_row.setContentsMargins(0, 6, 0, 0)
+        progress_row.setSpacing(12)
+        self.collection_progress_bar = QProgressBar()
+        self.collection_progress_bar.setObjectName("collectionProgressBar")
+        self.collection_progress_bar.setRange(0, 100)
+        self.collection_progress_bar.setValue(0)
+        self.collection_progress_bar.setTextVisible(False)
+        progress_row.addWidget(self.collection_progress_bar, 1)
+        self.collection_progress_label = QLabel("0%")
+        self.collection_progress_label.setObjectName("collectionProgressLabel")
+        self.collection_progress_label.setFixedWidth(48)
+        self.collection_progress_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        progress_row.addWidget(self.collection_progress_label, 0)
+
+        # Controls + progress move together across recipe / skin / special hosts.
+        self.collection_action_block = QWidget()
+        action_block_layout = QVBoxLayout(self.collection_action_block)
+        action_block_layout.setContentsMargins(0, 0, 0, 0)
+        action_block_layout.setSpacing(0)
+        action_block_layout.addWidget(self.collection_controls_widget)
+        action_block_layout.addWidget(self.collection_progress_widget)
+
         self._login_collection_host = QVBoxLayout()
         self._login_collection_host.setContentsMargins(0, 0, 0, 0)
-        self._login_collection_host.addWidget(self.collection_controls_widget)
+        self._login_collection_host.setSpacing(0)
+        self._login_collection_host.addWidget(self.collection_action_block)
         layout.addLayout(self._login_collection_host)
         return frame
-
-    def _build_skin_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
-        search_frame, search = panel(page)
-        row = QHBoxLayout()
-        label = QLabel("饰品名称")
-        label.setObjectName("platformFieldLabel")
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("输入并选择饰品名称")
-        self.name_edit.setClearButtonEnabled(True)
-        row.addWidget(label)
-        row.addWidget(self.name_edit, 1)
-        search.addLayout(row)
-        range_row = QHBoxLayout()
-        range_title = QLabel("采集磨损")
-        range_title.setObjectName("platformFieldLabel")
-        self.single_range_label = QLabel("选择饰品后可拖动左右手柄")
-        self.single_range_label.setObjectName("recipeBridgeWear")
-        range_row.addWidget(range_title)
-        range_row.addWidget(self.single_range_label)
-        range_row.addStretch(1)
-        search.addLayout(range_row)
-        self.single_range_selector = WearRangeSelector()
-        self.single_range_selector.setEnabled(False)
-        self.single_range_selector.rangeChanged.connect(
-            self._on_single_range_changed
-        )
-        search.addWidget(self.single_range_selector)
-        self.hint = QLabel("未选择饰品时，按钮打开平台市场首页。")
-        self.hint.setObjectName("muted")
-        search.addWidget(self.hint)
-        layout.addWidget(search_frame)
-        self._skin_collection_host = QVBoxLayout()
-        self._skin_collection_host.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self._skin_collection_host)
-
-        names = get_skin_full_names_without_appearance()
-        completer = QCompleter(QStringListModel(names, self), self)
-        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-        self.name_edit.setCompleter(completer)
-        self.name_edit.textChanged.connect(self._on_single_skin_changed)
-        return page
 
     def _build_recipe_page(self) -> QWidget:
         page = QWidget()
@@ -434,7 +434,7 @@ class PlatformPage(QWidget):
         row.addWidget(self.recipe_load_button)
         input_layout.addLayout(row)
         self.recipe_status = QLabel(
-            "粘贴 CS2TH 配方链接并读取，或从配方管理 / 采集预设导入材料。"
+            "粘贴 CS2TH 配方链接并读取，或从配方管理导入材料。"
             "读取后可调整磨损区间，再勾选候选源开始采集。"
         )
         self.recipe_status.setObjectName("muted")
@@ -503,8 +503,8 @@ class PlatformPage(QWidget):
         lay.addWidget(title)
 
         hint = QLabel(
-            "先导入配方或采集预设，再勾选上方候选源并开始采集。\n"
-            "支持三种方式："
+            "先导入配方，再勾选上方候选源并开始采集。\n"
+            "支持两种方式："
         )
         hint.setObjectName("platformMaterialsEmptyHint")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -526,15 +526,8 @@ class PlatformPage(QWidget):
         from_manage.setCursor(Qt.CursorShape.PointingHandCursor)
         from_manage.clicked.connect(self._choose_saved_recipe)
 
-        from_preset = QPushButton("③ 从采集预设导入")
-        from_preset.setObjectName("alchemySelectFileBtn")
-        from_preset.setCursor(Qt.CursorShape.PointingHandCursor)
-        from_preset.setToolTip("前往「采集预设」选择方案并导入采集")
-        from_preset.clicked.connect(self._open_collection_presets_page)
-
         actions.addWidget(focus_url)
         actions.addWidget(from_manage)
-        actions.addWidget(from_preset)
         actions.addStretch(1)
         lay.addLayout(actions)
 
@@ -554,6 +547,10 @@ class PlatformPage(QWidget):
             self.materials_list_host.setVisible(has_materials)
         if not has_materials and hasattr(self, "material_count"):
             self.material_count.setText("尚未读取")
+        if hasattr(self, "collection_toggle_button") and hasattr(
+            self, "mode_stack"
+        ):
+            self._sync_collection_chrome_for_mode(self.mode_stack.currentIndex())
 
     def _set_recipe_load_emphasized(self, on: bool) -> None:
         self.recipe_load_button.setProperty("emphasized", bool(on))
@@ -566,29 +563,22 @@ class PlatformPage(QWidget):
         self._set_recipe_load_emphasized(True)
         show_toast(self, "请粘贴配方链接，然后点「读取配方」", style="info")
 
-    def _open_collection_presets_page(self) -> None:
-        window = self.window()
-        activate = getattr(window, "_activate", None)
-        if callable(activate):
-            activate("collection_presets")
-            return
-        show_toast(self, "无法打开采集预设页", style="warning")
-
     def _build_special_materials_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
-        summary, summary_layout = panel(page)
-        self.special_source_title = QLabel("请先在“特殊磨损”中查询材料")
+
+        # Compact header — only visible after materials are imported.
+        self.special_summary_frame, summary_layout = panel(page)
+        self.special_source_title = QLabel("自定义采集")
         self.special_source_title.setObjectName("sectionTitle")
-        self.special_source_meta = QLabel(
-            "查询完成后点击“前往材料采集”，材料和可采购区间会自动显示在这里。"
-        )
+        self.special_source_meta = QLabel("")
         self.special_source_meta.setObjectName("muted")
         self.special_source_meta.setWordWrap(True)
         summary_top = QHBoxLayout()
         summary_text = QVBoxLayout()
+        summary_text.setSpacing(4)
         summary_text.addWidget(self.special_source_title)
         summary_text.addWidget(self.special_source_meta)
         self.special_solve_button = QPushButton("抓取并智能配方")
@@ -599,19 +589,40 @@ class PlatformPage(QWidget):
         summary_top.addLayout(summary_text, 1)
         summary_top.addWidget(self.special_solve_button, 0, Qt.AlignmentFlag.AlignTop)
         summary_layout.addLayout(summary_top)
-        self.special_collection_status = QLabel(
-            "勾选已登录且支持精确磨损的候选源后开始；默认间隔 3 秒（C5 最短 5 秒）。"
-        )
+        self.special_collection_status = QLabel("")
         self.special_collection_status.setObjectName("muted")
         self.special_collection_status.setWordWrap(True)
         summary_layout.addWidget(self.special_collection_status)
-        layout.addWidget(summary)
+        self.special_summary_frame.hide()
+        layout.addWidget(self.special_summary_frame)
+
         self._special_collection_host = QVBoxLayout()
         self._special_collection_host.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._special_collection_host)
-        self.special_materials_layout = QVBoxLayout()
+
+        materials_frame, materials_outer = panel(page)
+        materials_frame.setObjectName("platformMaterialsPanel")
+        materials_heading = QHBoxLayout()
+        material_title = QLabel("采集材料")
+        material_title.setObjectName("sectionTitle")
+        self.custom_material_count = QLabel("尚未导入")
+        self.custom_material_count.setObjectName("muted")
+        materials_heading.addWidget(material_title)
+        materials_heading.addStretch(1)
+        materials_heading.addWidget(self.custom_material_count)
+        materials_outer.addLayout(materials_heading)
+
+        self.custom_materials_empty = self._build_custom_materials_empty(page)
+        materials_outer.addWidget(self.custom_materials_empty, 1)
+
+        self.special_materials_host = QWidget()
+        self.special_materials_layout = QVBoxLayout(self.special_materials_host)
+        self.special_materials_layout.setContentsMargins(0, 0, 0, 0)
         self.special_materials_layout.setSpacing(10)
-        layout.addLayout(self.special_materials_layout)
+        self.special_materials_host.hide()
+        materials_outer.addWidget(self.special_materials_host, 1)
+        layout.addWidget(materials_frame, 1)
+
         self.special_results_title = QLabel("智能配单结果")
         self.special_results_title.setObjectName("sectionTitle")
         self.special_results_title.hide()
@@ -621,21 +632,81 @@ class PlatformPage(QWidget):
         layout.addLayout(self.special_results_layout)
         return page
 
+    def _build_custom_materials_empty(self, parent: QWidget) -> QFrame:
+        """Centered empty state with two entry actions for 自定义采集."""
+        frame = QFrame(parent)
+        frame.setObjectName("platformMaterialsEmpty")
+        frame.setMinimumHeight(220)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(32, 36, 32, 36)
+        lay.setSpacing(14)
+        lay.addStretch(1)
+
+        title = QLabel("还没有可采集的材料")
+        title.setObjectName("platformMaterialsEmptyTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        hint = QLabel("从下面任一入口带入材料，再勾选候选源开始采集")
+        hint.setObjectName("platformMaterialsEmptyHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(12)
+        actions.addStretch(1)
+        self.custom_goto_special_button = QPushButton("去特殊磨损找配方")
+        self.custom_goto_special_button.setObjectName("alchemySelectFileBtn")
+        self.custom_goto_special_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_goto_special_button.setMinimumWidth(168)
+        self.custom_goto_special_button.setToolTip(
+            "前往「特殊磨损」查询可用底物后再回来采集"
+        )
+        self.custom_goto_special_button.clicked.connect(self._open_special_wear_page)
+        self.custom_goto_preset_button = QPushButton("从采集预设导入")
+        self.custom_goto_preset_button.setObjectName("primaryButton")
+        self.custom_goto_preset_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_goto_preset_button.setMinimumWidth(148)
+        self.custom_goto_preset_button.setToolTip("打开「采集预设」选择方案并导入到本页")
+        self.custom_goto_preset_button.clicked.connect(self._open_collection_presets_page)
+        actions.addWidget(self.custom_goto_special_button)
+        actions.addWidget(self.custom_goto_preset_button)
+        actions.addStretch(1)
+        lay.addLayout(actions)
+
+        tip = QLabel("特殊磨损可智能配单；采集预设按你保存的磨损区间抓取挂单")
+        tip.setObjectName("platformMaterialsEmptyHint")
+        tip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        lay.addStretch(1)
+        return frame
+
+    def _sync_custom_materials_empty_state(self) -> None:
+        materials = [
+            item
+            for item in self._special_payload.get("materials", [])
+            if isinstance(item, dict)
+        ]
+        has_materials = bool(materials)
+        if hasattr(self, "custom_materials_empty"):
+            self.custom_materials_empty.setVisible(not has_materials)
+        if hasattr(self, "special_materials_host"):
+            self.special_materials_host.setVisible(has_materials)
+        if hasattr(self, "special_summary_frame"):
+            self.special_summary_frame.setVisible(has_materials)
+        if hasattr(self, "custom_material_count"):
+            self.custom_material_count.setText(
+                f"{len(materials)} 种材料" if has_materials else "尚未导入"
+            )
+        if hasattr(self, "special_solve_button") and not has_materials:
+            self.special_solve_button.hide()
+
     def _set_mode(self, index: int) -> None:
         self.mode_stack.setCurrentIndex(index)
         self._place_collection_controls(index)
-        special_running = bool(
-            self._special_worker is not None and self._special_worker.isRunning()
-        )
-        if not self._collection_running and not special_running:
-            has_special_materials = any(
-                isinstance(item, dict)
-                for item in self._special_payload.get("materials", [])
-            )
-            self.collection_toggle_button.setEnabled(
-                index != 2 or has_special_materials
-            )
-            self.collection_toggle_button.setText("开始采集")
+        self._sync_collection_chrome_for_mode(index)
         for button_index, button in enumerate(self.mode_buttons):
             button.setChecked(button_index == index)
             button.setProperty("active", button_index == index)
@@ -643,21 +714,123 @@ class PlatformPage(QWidget):
             button.style().polish(button)
 
     def _place_collection_controls(self, index: int) -> None:
+        block = self.collection_action_block
         for host in (
             self._login_collection_host,
-            self._skin_collection_host,
             self._recipe_collection_host,
             self._special_collection_host,
         ):
-            host.removeWidget(self.collection_controls_widget)
-        if index == 0:
-            target = self._skin_collection_host
-        elif index == 1:
-            target = self._recipe_collection_host
-        else:
+            host.removeWidget(block)
+        if index == _MODE_CUSTOM:
             target = self._special_collection_host
-        target.addWidget(self.collection_controls_widget)
+        else:
+            target = self._recipe_collection_host
+        target.addWidget(block)
+        block.show()
         self.collection_controls_widget.show()
+
+    def _open_special_wear_page(self) -> None:
+        window = self.window()
+        activate = getattr(window, "_activate", None)
+        if callable(activate):
+            activate("special")
+            return
+        show_toast(self, "无法打开特殊磨损页", style="warning")
+
+    def _open_collection_presets_page(self) -> None:
+        window = self.window()
+        activate = getattr(window, "_activate", None)
+        if callable(activate):
+            activate("collection_presets")
+            return
+        show_toast(self, "无法打开采集预设页", style="warning")
+
+    def _collection_busy(self) -> bool:
+        return bool(
+            self._collection_running
+            or (
+                self._special_worker is not None and self._special_worker.isRunning()
+            )
+        )
+
+    def _viewing_collection_owner(self) -> bool:
+        owner = self._collection_owner_mode
+        return owner is not None and self.mode_stack.currentIndex() == owner
+
+    def _idle_status_for_mode(self, index: int) -> str:
+        if index == _MODE_CUSTOM:
+            return "勾选已登录的候选源后开始；完成后可导入计算或保存为 JSON"
+        return "勾选候选源后点开始采集：完成后可导入计算或保存为 JSON"
+
+    def _sync_collection_chrome_for_mode(self, index: int) -> None:
+        """Keep progress / complete chrome on the mode that owns the run."""
+        busy = self._collection_busy()
+        owner = self._collection_owner_mode
+        if busy and owner is not None and index == owner:
+            self.collection_toggle_button.setEnabled(True)
+            if self._collection_stopping or self._special_stopping:
+                self.collection_toggle_button.setText("正在停止…")
+            else:
+                self.collection_toggle_button.setText("停止采集")
+            if self._owner_live_status:
+                self._apply_collection_status_text(
+                    self._owner_live_status,
+                    state=self._owner_live_state,
+                )
+            if self._owner_progress_visible:
+                self.collection_progress_widget.show()
+            else:
+                self.collection_progress_widget.hide()
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+            return
+
+        if busy and owner is not None and index != owner:
+            self.collection_progress_widget.hide()
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+            other = "自定义采集" if owner == _MODE_CUSTOM else "配方采集"
+            self._apply_collection_status_text(
+                f"{other}正在采集中，切回该模式可查看进度；请先停止后再在本页开始",
+                state="running",
+            )
+            self.collection_toggle_button.setEnabled(False)
+            self.collection_toggle_button.setText("开始采集")
+            return
+
+        # Idle: only show complete actions on the mode that produced results.
+        self.collection_progress_widget.hide()
+        has_results = bool(self._collected_items) and self._results_owner_mode == index
+        if has_results:
+            self.collection_import_button.show()
+            self.collection_save_json_button.show()
+            status = str(self._results_status_text or "").strip() or (
+                f"采集完成 · {format_collection_platform_counts(self._collected_items)}"
+            )
+            self._apply_collection_status_text(status, state="complete")
+        else:
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+            self._apply_collection_status_text(
+                self._idle_status_for_mode(index),
+                state="running",
+            )
+            # Clear complete styling when showing idle copy.
+            self._set_collection_status_state("")
+
+        if index == _MODE_CUSTOM:
+            has_materials = any(
+                isinstance(item, dict)
+                for item in self._special_payload.get("materials", [])
+            )
+        else:
+            has_materials = bool(self._recipe_material_states)
+        self.collection_toggle_button.setEnabled(has_materials)
+        self.collection_toggle_button.setText("开始采集")
+
+    def _custom_has_special_target(self) -> bool:
+        """True when custom mode came from 特殊磨损 (can run smart solve)."""
+        return bool(str(self._special_payload.get("target_paint_index") or "").strip())
 
     def _uncheck_candidate_source(self, provider: str) -> None:
         """Clear「候选源」for one platform and persist the preference."""
@@ -893,9 +1066,6 @@ class PlatformPage(QWidget):
         if key in APP_LOGIN_PROVIDERS:
             self._start_marketplace_login(key)
             return
-        if self.mode_stack.currentIndex() == 0:
-            self.open_marketplace(key)
-            return
         market = next(item for item in MARKETPLACES if item.key == key)
         QDesktopServices.openUrl(QUrl(market.home_url))
 
@@ -973,68 +1143,6 @@ class PlatformPage(QWidget):
                 style="warning",
             )
 
-    def _template(self):
-        return get_name_map().get(normalize_name(self.name_edit.text()))
-
-    def _sync_hint(self) -> None:
-        if not self.name_edit.text().strip():
-            self.hint.setText("未选择饰品时，按钮打开平台市场首页。")
-        elif self._template() is None:
-            self.hint.setText("请从候选列表中选择完整饰品名称。")
-        else:
-            low, high = self.single_range_selector.selected_range()
-            self.hint.setText(
-                f"已生成当前饰品 {low:g}–{high:g} 区间的平台直达链接。"
-            )
-
-    def _on_single_skin_changed(self) -> None:
-        if not self._collection_running:
-            self._collected_items = []
-            self.collection_import_button.hide()
-            self.collection_save_json_button.hide()
-            self._set_collection_status_text(
-                "选择饰品和磨损区间后开始；完成后可导入计算或保存为 JSON"
-            )
-        template = self._template()
-        if template is None:
-            self.single_range_selector.setEnabled(False)
-            self.single_range_selector.set_wear_bounds(0.0, 1.0)
-            self.single_range_label.setText("选择饰品后可拖动左右手柄")
-        else:
-            self.single_range_selector.setEnabled(True)
-            self.single_range_selector.set_wear_bounds(
-                float(template.min_float),
-                float(template.max_float),
-            )
-            low, high = self.single_range_selector.selected_range()
-            self.single_range_label.setText(f"{low:g} ～ {high:g}")
-        self._sync_hint()
-
-    def _on_single_range_changed(self, low: float, high: float) -> None:
-        self.single_range_label.setText(f"{low:g} ～ {high:g}")
-        self._sync_hint()
-
-    def _single_wear_and_range(self) -> tuple[str, float, float]:
-        low, high = self.single_range_selector.selected_range()
-        appearance = SkinInstance.get_appearance((low + high) / 2) or ""
-        return appearance, low, high
-
-    def open_marketplace(self, key: str) -> None:
-        template = self._template()
-        if template is None:
-            marketplace = next(m for m in MARKETPLACES if m.key == key)
-            url = marketplace.home_url
-        else:
-            appearance, low, high = self._single_wear_and_range()
-            url = links_for_template(
-                template,
-                appearance,
-                min_wear=low,
-                max_wear=high,
-            ).get(key, "")
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
-
     def _load_recipe(self) -> None:
         if self._recipe_thread is not None and self._recipe_thread.isRunning():
             return
@@ -1066,7 +1174,7 @@ class PlatformPage(QWidget):
 
     def load_recipe_reference(self, reference: str) -> None:
         """Open recipe collection mode and load a CS2TH recipe link."""
-        self._set_mode(1)
+        self._set_mode(_MODE_RECIPE)
         self.recipe_edit.setText(str(reference or "").strip())
         self._load_recipe()
 
@@ -1500,15 +1608,15 @@ class PlatformPage(QWidget):
         target = str(payload.get("target_name") or "特殊磨损目标")
         target_low = float(payload.get("target_min_wear") or 0)
         target_high = float(payload.get("target_max_wear") or 0)
-        self.special_source_title.setText(f"{target} · 特殊磨损材料")
+        self.special_source_title.setText(f"{target} · 自定义采集")
         self.special_source_meta.setText(
-            f"目标产物区间 {target_low:.18f} ～ {target_high:.18f}；"
+            f"来自特殊磨损 · 目标产物区间 {target_low:.18f} ～ {target_high:.18f}；"
             f"共找到 {len(materials)} 种可用材料。采购区间用于抓取候选，"
             f"程序会按{self._special_slot_count}件真实磨损平均值重新验算。"
         )
         self.special_collection_status.setText(
             "可选精确候选源：BUFF、悠悠、C5、ECO；Steam 原生挂单不提供精确磨损；"
-            "智能配单强制至少 3 秒间隔（C5 至少 5 秒）、结果缓存 3 分钟。"
+            "开始采集将抓取挂单并智能配单（间隔至少 3 秒，C5 至少 5 秒）。"
         )
         self._collected_items = []
         self.collection_import_button.hide()
@@ -1530,7 +1638,9 @@ class PlatformPage(QWidget):
             self.special_materials_layout.addWidget(
                 self._special_material_card(index, material)
             )
-        self._set_mode(2)
+        self.special_solve_button.show()
+        self._sync_custom_materials_empty_state()
+        self._set_mode(_MODE_CUSTOM)
 
     def _selected_special_sources(self) -> list[str]:
         return [
@@ -1543,7 +1653,7 @@ class PlatformPage(QWidget):
 
     def _start_special_collection(self) -> None:
         if self._special_worker is not None and self._special_worker.isRunning():
-            show_toast(self, "特殊磨损材料正在采集中", style="info")
+            show_toast(self, "自定义采集正在进行中", style="info")
             return
         providers = self._selected_special_sources()
         if not providers:
@@ -1572,6 +1682,7 @@ class PlatformPage(QWidget):
         self.special_solve_button.setEnabled(False)
         self.special_solve_button.setText("正在抓取…")
         self._special_stopping = False
+        self._begin_collection_owner()
         self.collection_toggle_button.setEnabled(True)
         self.collection_toggle_button.setText("停止采集")
         self.collection_import_button.hide()
@@ -1579,6 +1690,7 @@ class PlatformPage(QWidget):
         self._collected_items = []
         self._collection_started_at = time.monotonic()
         self._set_collection_status_text("正在抓取特殊磨损候选并智能配方…")
+        self._show_collection_progress(done=0, total=max(1, len(materials) * len(providers)))
         self.special_results_title.hide()
         _clear_layout(self.special_results_layout)
         worker = SpecialCollectionWorker(
@@ -1599,6 +1711,7 @@ class PlatformPage(QWidget):
         )
         worker.progress.connect(self.special_collection_status.setText)
         worker.progress.connect(self._set_collection_status_text)
+        worker.progress_units.connect(self._set_collection_progress_units)
         worker.completed.connect(self._special_collection_completed)
         worker.finished.connect(worker.deleteLater)
         self._special_worker = worker
@@ -1619,6 +1732,7 @@ class PlatformPage(QWidget):
         )
         self.collection_toggle_button.setEnabled(True)
         self.collection_toggle_button.setText("开始采集")
+        self._hide_collection_progress()
         candidate_rows = candidates if isinstance(candidates, list) else []
         recipe_rows = recipes if isinstance(recipes, list) else []
         started_at = self._collection_started_at
@@ -1641,14 +1755,15 @@ class PlatformPage(QWidget):
         self._collected_items = [
             dict(item) for item in candidate_rows if isinstance(item, dict)
         ]
-        self._set_collection_status_text(
+        status = (
             f"采集完成 · {format_collection_platform_counts(self._collected_items)}，"
-            f"共计 {elapsed:.1f} 秒",
-            state="complete",
+            f"共计 {elapsed:.1f} 秒"
         )
-        if self._collected_items:
-            self.collection_import_button.show()
-            self.collection_save_json_button.show()
+        self._end_collection_owner(
+            keep_results=bool(self._collected_items),
+            status_text=status,
+        )
+        self._sync_collection_chrome_for_mode(self.mode_stack.currentIndex())
         from collections import Counter
 
         counts = Counter(
@@ -1803,23 +1918,9 @@ class PlatformPage(QWidget):
         if not entries:
             show_toast(self, "配方管理中还没有保存的配方", style="warning")
             return
-        labels: list[str] = []
-        for _path, payload in entries:
-            title = str(payload.get("title") or "未命名配方").strip()
-            saved_at = str(payload.get("saved_at") or "")[:19].replace("T", " ")
-            labels.append(f"{title} · {saved_at}" if saved_at else title)
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "从配方管理导入",
-            "选择配方：",
-            labels,
-            0,
-            False,
-        )
-        if not accepted:
+        payload = pick_saved_recipe(self, entries)
+        if not isinstance(payload, dict):
             return
-        index = labels.index(selected)
-        payload = entries[index][1]
         recipe = payload.get("recipe")
         error = self.show_saved_recipe_materials(
             recipe,
@@ -1848,7 +1949,7 @@ class PlatformPage(QWidget):
             return "配方中没有可采集材料"
         self.recipe_edit.clear()
         self._current_recipe_url = ""
-        self._set_mode(1)
+        self._set_mode(_MODE_RECIPE)
         if self.include_alternatives.isChecked():
             self._last_recipe_payload = payload
             self.recipe_summary_title.setText(display_title)
@@ -1872,10 +1973,10 @@ class PlatformPage(QWidget):
         *,
         title: str = "",
     ) -> str | None:
-        """Load a user collection preset into recipe-collection mode."""
+        """Load a user collection preset into 自定义采集 mode."""
         if not isinstance(items, list):
             return "采集预设无效"
-        inputs: list[dict] = []
+        materials: list[dict] = []
         for raw in items:
             if not isinstance(raw, dict):
                 continue
@@ -1889,43 +1990,58 @@ class PlatformPage(QWidget):
                 continue
             if min_wear > max_wear:
                 min_wear, max_wear = max_wear, min_wear
-            inputs.append(
+            mid = (min_wear + max_wear) / 2.0
+            materials.append(
                 {
                     "name": name,
                     "count": 1,
                     "min_wear": min_wear,
                     "max_wear": max_wear,
-                    # Keep the preset band as-is (no neighboring-bucket expand).
-                    "exact_collection_range": True,
+                    "wear_value": mid,
                 }
             )
-        if not inputs:
+        if not materials:
             return "采集预设中没有可采集材料"
         display_title = str(title or "").strip() or "采集预设"
-        payload = {
-            "inputs": inputs,
-            "collection_name": display_title,
-            "input_rarity": "",
-            "input_cost": 0,
-            "roi": 0,
-            "_market": "spot",
-            "_recipe_id": "",
+        self._special_payload = {
+            "materials": materials,
+            "target_name": display_title,
+            "target_paint_index": "",
+            "target_min_wear": 0.0,
+            "target_max_wear": 0.0,
+            "slot_count": 10,
+            "from_preset": True,
         }
-        self.recipe_edit.clear()
-        self._current_recipe_url = ""
-        self._set_mode(1)
-        self._last_recipe_payload = payload
-        self.recipe_status.setText(
-            "已导入采集预设。可拖动调整每种材料的磨损区间；"
-            "勾选候选源后点「开始采集」。"
+        self._special_slot_count = 10
+        self.special_source_title.setText(f"{display_title} · 自定义采集")
+        self.special_source_meta.setText(
+            f"来自采集预设 · {len(materials)} 种材料；"
+            "磨损区间以预设为准，可在「采集预设」中修改后再导入。"
         )
-        self.recipe_summary_title.setText(display_title)
-        self.recipe_summary_meta.setText(
-            f"来自采集预设 · {len(inputs)} 种材料 · 可调整磨损后采集"
+        self.special_collection_status.setText(
+            "勾选已登录且支持精确磨损的候选源后点「开始采集」；"
+            "默认间隔 3 秒（C5 最短 5 秒）。"
         )
-        self.recipe_summary.show()
-        self.open_recipe_button.hide()
-        self._render_loaded_recipe_materials(payload)
+        self._collected_items = []
+        self.collection_import_button.hide()
+        self.collection_save_json_button.hide()
+        self.collection_toggle_button.setEnabled(True)
+        self.collection_toggle_button.setText("开始采集")
+        self._set_collection_status_text(
+            "勾选已登录的候选源后开始；完成后可导入计算或保存为 JSON"
+        )
+        self.special_solve_button.setEnabled(False)
+        self.special_solve_button.hide()
+        self.special_results_title.hide()
+        _clear_layout(self.special_results_layout)
+        _clear_layout(self.special_materials_layout)
+        self._reset_collection_links()
+        for index, material in enumerate(materials, start=1):
+            self.special_materials_layout.addWidget(
+                self._special_material_card(index, material)
+            )
+        self._sync_custom_materials_empty_state()
+        self._set_mode(_MODE_CUSTOM)
         return None
 
     def _special_material_card(self, index: int, material: dict) -> QFrame:
@@ -1947,11 +2063,12 @@ class PlatformPage(QWidget):
         details = QHBoxLayout()
         range_label = QLabel(f"可采购磨损区间  {wear_label}")
         range_label.setObjectName("recipeBridgeWear")
-        point = QLabel(f"对应磨损 {wear_value:.18f}")
-        point.setObjectName("muted")
         details.addWidget(range_label)
         details.addStretch(1)
-        details.addWidget(point)
+        if not self._special_payload.get("from_preset"):
+            point = QLabel(f"对应磨损 {wear_value:.18f}")
+            point.setObjectName("muted")
+            details.addWidget(point)
         layout.addLayout(details)
 
         template = get_name_map().get(normalize_name(name))
@@ -1984,23 +2101,6 @@ class PlatformPage(QWidget):
     def _reset_collection_links(self) -> None:
         self._collection_links = {market.key: [] for market in MARKETPLACES}
 
-    def _single_skin_collection_link(self, key: str) -> tuple[str, str] | None:
-        template = self._template()
-        if template is None:
-            return None
-        appearance, low, high = self._single_wear_and_range()
-        links = links_for_template(
-            template,
-            appearance,
-            min_wear=low,
-            max_wear=high,
-        )
-        market = next(item for item in MARKETPLACES if item.key == key)
-        url = links.get(key, "")
-        if not url or url == market.home_url:
-            return None
-        return self.name_edit.text().strip(), url
-
     def _collection_finished_idle(self) -> bool:
         """True when a prior run finished and the start button would begin a new one."""
         if self._collection_running:
@@ -2018,13 +2118,28 @@ class PlatformPage(QWidget):
         return ask_confirmation(self, "重新开始采集", detail)
 
     def _toggle_collection(self) -> None:
-        if self.mode_stack.currentIndex() == 2:
-            if self._special_worker is not None and self._special_worker.isRunning():
-                self._stop_special_collection()
+        if self.mode_stack.currentIndex() == _MODE_CUSTOM:
+            if self._custom_has_special_target():
+                if self._special_worker is not None and self._special_worker.isRunning():
+                    self._stop_special_collection()
+                else:
+                    if (
+                        self._collection_finished_idle()
+                        and not self._confirm_restart_collection()
+                    ):
+                        return
+                    self._start_special_collection()
+                return
+            # 自定义采集（采集预设等）：普通精确磨损抓取，不做智能配单
+            if self._collection_running:
+                self._stop_collection()
             else:
-                if self._collection_finished_idle() and not self._confirm_restart_collection():
+                if (
+                    self._collection_finished_idle()
+                    and not self._confirm_restart_collection()
+                ):
                     return
-                self._start_special_collection()
+                self._start_collection()
             return
         if self._collection_running:
             self._stop_collection()
@@ -2043,9 +2158,6 @@ class PlatformPage(QWidget):
         ]
 
     def _collection_items_for_platform(self, key: str) -> list[tuple[str, str]]:
-        if self.mode_stack.currentIndex() == 0:
-            single = self._single_skin_collection_link(key)
-            return [single] if single is not None else []
         seen: set[str] = set()
         items: list[tuple[str, str]] = []
         for name, url in self._collection_links.get(key, []):
@@ -2058,14 +2170,7 @@ class PlatformPage(QWidget):
     def _materials_for_scraping(self) -> list[dict]:
         """Build name + wear-range rows for exact-wear listing fetch."""
         mode = self.mode_stack.currentIndex()
-        if mode == 0:
-            template = self._template()
-            name = self.name_edit.text().strip()
-            if template is None or not name:
-                return []
-            _appearance, low, high = self._single_wear_and_range()
-            return [{"name": name, "min_wear": low, "max_wear": high}]
-        if mode == 1:
+        if mode == _MODE_RECIPE:
             materials: list[dict] = []
             seen: set[tuple[str, float, float]] = set()
             for state in self._recipe_material_states:
@@ -2094,7 +2199,7 @@ class PlatformPage(QWidget):
                     }
                 )
             return materials
-        if mode == 2:
+        if mode == _MODE_CUSTOM:
             return [
                 {
                     "name": str(item.get("name") or "").strip(),
@@ -2150,6 +2255,7 @@ class PlatformPage(QWidget):
 
         self._collection_running = True
         self._collection_stopping = False
+        self._begin_collection_owner()
         self._collection_started_at = time.monotonic()
         self._set_collection_status_state("running")
         self._pending_alchemy_import = []
@@ -2173,6 +2279,10 @@ class PlatformPage(QWidget):
             self.collection_status.setText(
                 f"正在抓取精确磨损挂单 · 候选源 {names}"
             )
+            self._show_collection_progress(
+                done=0,
+                total=max(1, len(materials) * len(exact_platforms)),
+            )
             worker = MaterialCollectionWorker(
                 materials=materials,
                 providers=exact_platforms,
@@ -2184,6 +2294,7 @@ class PlatformPage(QWidget):
                 parent=self,
             )
             worker.progress.connect(self._set_collection_status_text)
+            worker.progress_units.connect(self._set_collection_progress_units)
             worker.completed.connect(self._material_collection_scraped)
             worker.finished.connect(worker.deleteLater)
             self._material_worker = worker
@@ -2197,7 +2308,10 @@ class PlatformPage(QWidget):
         self.collection_status.setText(
             f"准备处理 {len(queue)} 个链接 · 候选源 {names}"
         )
+        self._collection_link_total = len(queue)
+        self._collection_link_done = 0
         if queue:
+            self._show_collection_progress(done=0, total=len(queue))
             self._process_next_collection_link()
         else:
             self._finish_collection()
@@ -2235,6 +2349,7 @@ class PlatformPage(QWidget):
             elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
             self.collection_toggle_button.setEnabled(True)
             self.collection_toggle_button.setText("开始采集")
+            self._hide_collection_progress()
             self._apply_stopped_collection_results(
                 rows,
                 message=str(message or "").strip(),
@@ -2272,7 +2387,7 @@ class PlatformPage(QWidget):
         detail = f"已抓取 {len(rows)} 条挂单"
         if self._last_scrape_message:
             detail += f"；{self._last_scrape_message}"
-        self.collection_status.setText(detail)
+        self._set_collection_status_text(detail)
         if not self._collection_queue and not self._collection_timer.isActive():
             self._finish_collection()
 
@@ -2293,11 +2408,19 @@ class PlatformPage(QWidget):
             silent=silent,
         )
         remaining = len(self._collection_queue)
+        if not self._collection_scrape_pending and self._collection_link_total > 0:
+            self._collection_link_done = (
+                self._collection_link_total - remaining
+            )
+            self._set_collection_progress_units(
+                self._collection_link_done,
+                self._collection_link_total,
+            )
         market = next(item for item in MARKETPLACES if item.key == key)
         scrape_hint = (
             " · 挂单抓取中" if self._collection_scrape_pending else ""
         )
-        self.collection_status.setText(
+        self._set_collection_status_text(
             f"{market.name} · 已处理 {name} · 剩余 {remaining} 个"
             + (" · 静默记录" if silent else " · 已打开商品页")
             + scrape_hint
@@ -2353,6 +2476,7 @@ class PlatformPage(QWidget):
         self._collection_scrape_pending = False
         self.collection_toggle_button.setText("开始采集")
         self._collection_platform = ""
+        self._hide_collection_progress()
         started_at = self._collection_started_at
         self._collection_started_at = None
         self._pending_alchemy_import = []
@@ -2367,16 +2491,17 @@ class PlatformPage(QWidget):
         status = f"采集完成 · {counts_text}{elapsed_text}"
         if scrape_message:
             status += f"；{scrape_message}"
+        self._collected_items = [dict(item) for item in items] if items else []
+        self._end_collection_owner(
+            keep_results=bool(self._collected_items),
+            status_text=status,
+        )
+        self._sync_collection_chrome_for_mode(self.mode_stack.currentIndex())
         if items:
-            self._collected_items = [dict(item) for item in items]
-            self._set_collection_status_text(status, state="complete")
-            self.collection_import_button.show()
-            self.collection_save_json_button.show()
             if scrape_message:
                 # Partial success used to hide per-platform failures (e.g. C5 风控).
                 show_toast(self, scrape_message, style="warning")
             return
-        self._set_collection_status_text(status, state="complete")
         if any(
             key in EXACT_WEAR_PROVIDERS for key in self._selected_collection_platforms()
         ):
@@ -2388,11 +2513,13 @@ class PlatformPage(QWidget):
 
     def mark_collection_imported(self) -> None:
         """Keep the per-platform breakdown visible after alchemy import."""
-        self._set_collection_status_text(
+        status = (
             f"采集完成 · {format_collection_platform_counts(self._collected_items)}"
-            " · 已导入炼金计算",
-            state="complete",
+            " · 已导入炼金计算"
         )
+        self._results_status_text = status
+        if self._results_owner_mode == self.mode_stack.currentIndex():
+            self._set_collection_status_text(status, state="complete")
 
     def _import_collected_items_to_alchemy(self) -> None:
         if not self._collected_items:
@@ -2441,13 +2568,8 @@ class PlatformPage(QWidget):
             detail = detail[len("已停止") :].lstrip("；;")
         if detail:
             status += f"；{detail}"
-        self._set_collection_status_text(status, state="complete")
-        if kept:
-            self.collection_import_button.show()
-            self.collection_save_json_button.show()
-        else:
-            self.collection_import_button.hide()
-            self.collection_save_json_button.hide()
+        self._end_collection_owner(keep_results=bool(kept), status_text=status)
+        self._sync_collection_chrome_for_mode(self.mode_stack.currentIndex())
 
     def _stop_collection(self) -> None:
         self._collection_timer.stop()
@@ -2481,6 +2603,7 @@ class PlatformPage(QWidget):
             self._pending_retry_provider = ""
             self._last_scrape_message = ""
             self.collection_toggle_button.setText("开始采集")
+            self._hide_collection_progress()
             self._apply_stopped_collection_results(kept, elapsed=elapsed)
         self._collection_platform = ""
 
@@ -2499,9 +2622,77 @@ class PlatformPage(QWidget):
         self.collection_status.style().unpolish(self.collection_status)
         self.collection_status.style().polish(self.collection_status)
 
-    def _set_collection_status_text(self, text: str, *, state: str = "running") -> None:
+    def _apply_collection_status_text(self, text: str, *, state: str = "running") -> None:
         self._set_collection_status_state(state)
         self.collection_status.setText(str(text or ""))
+
+    def _set_collection_status_text(self, text: str, *, state: str = "running") -> None:
+        message = str(text or "")
+        if self._collection_busy() and self._collection_owner_mode is not None:
+            self._owner_live_status = message
+            self._owner_live_state = state
+            if not self._viewing_collection_owner():
+                return
+        self._apply_collection_status_text(message, state=state)
+
+    def _set_collection_progress_units(self, done: int, total: int) -> None:
+        total_i = max(0, int(total))
+        done_i = max(0, int(done))
+        if total_i <= 0:
+            pct = 0
+        else:
+            done_i = min(done_i, total_i)
+            pct = int(round(100.0 * done_i / total_i))
+        self.collection_progress_bar.setRange(0, 100)
+        self.collection_progress_bar.setValue(pct)
+        self.collection_progress_label.setText(f"{pct}%")
+        self._owner_progress_visible = True
+        if self._viewing_collection_owner():
+            self.collection_progress_widget.show()
+        else:
+            self.collection_progress_widget.hide()
+
+    def _show_collection_progress(self, *, done: int = 0, total: int = 0) -> None:
+        self._owner_progress_visible = True
+        self._set_collection_progress_units(done, total if total > 0 else 100)
+
+    def _hide_collection_progress(self) -> None:
+        self._owner_progress_visible = False
+        self.collection_progress_widget.hide()
+        self.collection_progress_bar.setValue(0)
+        self.collection_progress_label.setText("0%")
+        self._collection_link_total = 0
+        self._collection_link_done = 0
+
+    def _begin_collection_owner(self) -> None:
+        mode = self.mode_stack.currentIndex()
+        self._collection_owner_mode = mode
+        self._results_owner_mode = None
+        self._results_status_text = ""
+        self._owner_live_status = ""
+        self._owner_live_state = "running"
+        self._owner_progress_visible = False
+
+    def _end_collection_owner(self, *, keep_results: bool, status_text: str = "") -> None:
+        owner = self._collection_owner_mode
+        if owner is None:
+            owner = self.mode_stack.currentIndex()
+        if keep_results:
+            self._results_owner_mode = owner
+            if status_text:
+                self._results_status_text = str(status_text)
+            elif not self._results_status_text and self._collected_items:
+                self._results_status_text = (
+                    f"采集完成 · "
+                    f"{format_collection_platform_counts(self._collected_items)}"
+                )
+        else:
+            self._results_owner_mode = None
+            self._results_status_text = ""
+        self._collection_owner_mode = None
+        self._owner_progress_visible = False
+        self._owner_live_status = ""
+        self._owner_live_state = "running"
 
     def _save_collection_settings(self, *_args) -> None:
         update_app_settings(

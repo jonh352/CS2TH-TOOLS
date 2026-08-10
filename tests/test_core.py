@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import requests
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from core.alchemy_quality import (
     get_name_map,
@@ -172,28 +172,31 @@ class MetadataTests(unittest.TestCase):
             def json(self):
                 return self._payload
 
+        session = MagicMock()
+        session.headers = {}
+        session.get.return_value = FakeResponse(
+            {
+                "code": "OK",
+                "data": {
+                    "items": [
+                        {
+                            "id": "buff-order-1",
+                            "price": "20.5",
+                            "asset_info": {"paintwear": "0.164862"},
+                        },
+                        {
+                            "id": "outside",
+                            "price": "1",
+                            "asset_info": {"paintwear": "0.3"},
+                        },
+                    ]
+                },
+            }
+        )
         with patch(
-            "core.market_candidates.requests.get",
-            return_value=FakeResponse(
-                {
-                    "code": "OK",
-                    "data": {
-                        "items": [
-                            {
-                                "id": "buff-order-1",
-                                "price": "20.5",
-                                "asset_info": {"paintwear": "0.164862"},
-                            },
-                            {
-                                "id": "outside",
-                                "price": "1",
-                                "asset_info": {"paintwear": "0.3"},
-                            },
-                        ]
-                    },
-                }
-            ),
-        ) as buff_get:
+            "core.market_candidates.requests.Session",
+            return_value=session,
+        ):
             buff_rows = fetch_buff_candidates(
                 template=bare,
                 display_name="USP消音版 | 破颚者",
@@ -206,7 +209,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(len(buff_rows), 1)
         self.assertEqual(buff_rows[0]["platform"], "buff")
         self.assertAlmostEqual(buff_rows[0]["float_value"], 0.164862)
-        buff_params = buff_get.call_args.kwargs["params"]
+        buff_params = session.get.call_args.kwargs["params"]
         self.assertEqual(buff_params["min_paintwear"], "0.15")
         self.assertEqual(buff_params["max_paintwear"], "0.179999999")
         self.assertEqual(buff_params["sort_by"], "price.asc")
@@ -216,9 +219,10 @@ class MetadataTests(unittest.TestCase):
                 call.kwargs["params"]["min_paintwear"],
                 call.kwargs["params"]["max_paintwear"],
             )
-            for call in buff_get.call_args_list
+            for call in session.get.call_args_list
         ]
         self.assertEqual(buff_windows, [("0.15", "0.179999999")])
+        session.close.assert_called()
 
         with patch(
             "core.market_candidates.requests.post",
@@ -948,10 +952,13 @@ class MetadataTests(unittest.TestCase):
             ),
         ]
 
+        session = MagicMock()
+        session.headers = {}
+        session.get.side_effect = pages
         with patch(
-            "core.market_candidates.requests.get",
-            side_effect=pages,
-        ) as buff_get:
+            "core.market_candidates.requests.Session",
+            return_value=session,
+        ):
             rows = fetch_buff_candidates(
                 template=bare,
                 display_name="USP消音版 | 破颚者",
@@ -963,7 +970,140 @@ class MetadataTests(unittest.TestCase):
                 max_unit_price=20.0,
             )
         self.assertEqual([row["listing_id"] for row in rows], ["cheap"])
-        self.assertEqual(buff_get.call_count, 2)
+        self.assertEqual(session.get.call_count, 2)
+
+    def test_buff_rate_limit_respects_retry_after(self) -> None:
+        from core.market_candidates import _BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS
+
+        template = get_name_map()["USP消音版 | 破颚者"]
+        bare = SkinTemplate(
+            paint_index=template.paint_index,
+            weapon_name=template.weapon_name,
+            skin_name=template.skin_name,
+            quality=template.quality,
+            stat_trak=template.stat_trak,
+            min_float=template.min_float,
+            max_float=template.max_float,
+        )
+
+        class RateLimitedResponse:
+            status_code = 429
+            headers = {"Retry-After": "12"}
+
+            def raise_for_status(self):
+                raise AssertionError("should not raise_for_status on 429")
+
+            def json(self):
+                raise AssertionError("should not json on 429")
+
+        class OkResponse:
+            status_code = 200
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "code": "OK",
+                    "data": {
+                        "items": [
+                            {
+                                "id": "after-retry",
+                                "price": "18",
+                                "asset_info": {"paintwear": "0.16"},
+                            }
+                        ]
+                    },
+                }
+
+        waits: list[float] = []
+        session = MagicMock()
+        session.headers = {}
+        session.get.side_effect = [RateLimitedResponse(), OkResponse()]
+        with (
+            patch(
+                "core.market_candidates.requests.Session",
+                return_value=session,
+            ),
+            patch(
+                "core.market_candidates.interruptible_wait",
+                side_effect=lambda seconds, _cancel=None: waits.append(float(seconds)),
+            ),
+        ):
+            rows = fetch_buff_candidates(
+                template=bare,
+                display_name="USP消音版 | 破颚者",
+                min_wear=0.15,
+                max_wear=0.18,
+                max_pages=1,
+                request_interval=1,
+                extra_ids=[956527],
+            )
+        self.assertEqual([row["listing_id"] for row in rows], ["after-retry"])
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(waits, [12.0])
+        self.assertNotEqual(waits[0], _BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS[0])
+
+    def test_buff_rate_limit_uses_default_backoff_without_retry_after(self) -> None:
+        from core.market_candidates import (
+            _BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS,
+            _BUFF_RATE_LIMIT_RETRIES,
+        )
+
+        template = get_name_map()["USP消音版 | 破颚者"]
+        bare = SkinTemplate(
+            paint_index=template.paint_index,
+            weapon_name=template.weapon_name,
+            skin_name=template.skin_name,
+            quality=template.quality,
+            stat_trak=template.stat_trak,
+            min_float=template.min_float,
+            max_float=template.max_float,
+        )
+
+        class RateLimitedResponse:
+            status_code = 429
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        waits: list[float] = []
+        session = MagicMock()
+        session.headers = {}
+        session.get.side_effect = [
+            RateLimitedResponse() for _ in range(_BUFF_RATE_LIMIT_RETRIES + 1)
+        ]
+        with (
+            patch(
+                "core.market_candidates.requests.Session",
+                return_value=session,
+            ),
+            patch(
+                "core.market_candidates.interruptible_wait",
+                side_effect=lambda seconds, _cancel=None: waits.append(float(seconds)),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "访问频率过高"):
+                fetch_buff_candidates(
+                    template=bare,
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=1,
+                    extra_ids=[956527],
+                )
+        self.assertEqual(
+            waits,
+            list(_BUFF_RATE_LIMIT_DEFAULT_BACKOFF_SECONDS[:_BUFF_RATE_LIMIT_RETRIES]),
+        )
+        self.assertEqual(session.get.call_count, _BUFF_RATE_LIMIT_RETRIES + 1)
+        session.close.assert_called()
 
     def test_youpin_stops_at_wear_window_row_limit(self) -> None:
         from core.market_candidates import _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW

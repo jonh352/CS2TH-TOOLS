@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import nullcontext
-from threading import Event
+from threading import Event, Lock
+from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
 
@@ -16,6 +17,7 @@ from core.market_candidates import (
     C5PlatformPausedError,
     EcoPlatformPausedError,
     c5_signer_collection_scope,
+    collection_jitter_wait_seconds,
     fetch_exact_wear_candidates,
     provider_display_name,
 )
@@ -23,6 +25,8 @@ from core.market_candidates import (
 # Two-stage scheduling: lower peak concurrency vs four-way parallel.
 _COLLECTION_WAVE_BUFF_YYYP = frozenset({"buff", "yyyp"})
 _COLLECTION_WAVE_C5_ECO = frozenset({"c5", "eco"})
+
+UnitProgress = Callable[[int, int], None]
 
 
 def _extra_ids_for_provider(provider: str, material: dict) -> list[int]:
@@ -140,14 +144,35 @@ def collect_candidates_parallel(
     progress,
     cancel_check,
     silent: bool = False,
+    unit_progress: UnitProgress | None = None,
 ) -> tuple[list[dict], list[str], dict[str, list[dict]]]:
     """Collect in waves: BUFF∥悠悠 first, then C5∥ECO (each provider still serial).
 
     Returns ``(candidates, errors, retry_by_provider)``.
     ``retry_by_provider`` stays empty for ``eco`` / ``c5`` (pause stops the platform
     for this run with no post-run retry queue).
+
+    ``unit_progress(done, total)`` reports finished platform×material units
+    (success, failure, or skipped after platform pause all count).
     """
     name_map = get_name_map()
+    ordered_providers = list(dict.fromkeys(providers))
+    material_count = len(materials)
+    total_units = max(0, material_count * len(ordered_providers))
+    progress_lock = Lock()
+    units_done = 0
+
+    def report_units(n: int = 1) -> None:
+        nonlocal units_done
+        if unit_progress is None or n <= 0 or total_units <= 0:
+            return
+        with progress_lock:
+            units_done = min(total_units, units_done + int(n))
+            current = units_done
+        unit_progress(current, total_units)
+
+    if unit_progress is not None and total_units > 0:
+        unit_progress(0, total_units)
 
     def collect_provider(
         provider: str,
@@ -166,25 +191,25 @@ def collect_candidates_parallel(
             if provider == "c5"
             else nullcontext()
         )
-        platform_paused = False
+        completed_in_provider = 0
         try:
             with signer_scope:
                 for index, material in enumerate(materials):
                     if cancel_check():
                         break
-                    if provider in {"eco", "c5"} and platform_paused:
-                        continue
                     if index > 0:
-                        if progress:
-                            progress(
-                                f"{provider_display_name(provider)} · "
-                                f"换材料前等待 {request_interval:g} 秒"
-                            )
-                        interruptible_wait(request_interval, cancel_check)
+                        wait_s = (
+                            collection_jitter_wait_seconds(request_interval)
+                            if provider in {"c5", "eco", "buff", "yyyp"}
+                            else float(request_interval)
+                        )
+                        interruptible_wait(wait_s, cancel_check)
                     name = str(material.get("name") or "").strip()
                     template = name_map.get(normalize_name(name))
                     if template is None:
                         provider_errors.append(f"{provider}：无法匹配材料 {name}")
+                        report_units(1)
+                        completed_in_provider += 1
                         continue
                     try:
                         provider_rows.extend(
@@ -203,26 +228,38 @@ def collect_candidates_parallel(
                                 unit_price_cny=material.get("unit_price_cny"),
                             )
                         )
+                        report_units(1)
+                        completed_in_provider += 1
                     except CollectionCancelled:
                         raise
                     except (EcoPlatformPausedError, C5PlatformPausedError) as exc:
                         provider_errors.append(f"{provider}·{name}：{exc}")
-                        if provider in {"eco", "c5"}:
-                            platform_paused = True
-                            # Stop remaining materials; do not queue post-run retry.
-                            if progress:
-                                progress(
-                                    f"{provider_display_name(provider)} · "
-                                    "本轮已停止该平台采集"
-                                )
-                        continue
+                        report_units(1)
+                        completed_in_provider += 1
+                        remaining = material_count - index - 1
+                        if remaining > 0:
+                            report_units(remaining)
+                            completed_in_provider += remaining
+                        if provider in {"eco", "c5"} and progress:
+                            progress(
+                                f"{provider_display_name(provider)} · "
+                                "本轮已停止该平台采集"
+                            )
+                        break
                     except Exception as exc:  # noqa: BLE001 - keep other materials going
                         provider_errors.append(f"{provider}·{name}：{exc}")
-            progress(f"{provider} 已收集 {len(provider_rows)} 条候选挂单")
+                        report_units(1)
+                        completed_in_provider += 1
+            if progress:
+                progress(f"{provider} 已收集 {len(provider_rows)} 条候选挂单")
         except CollectionCancelled:
             pass
         except Exception as exc:  # noqa: BLE001 - report per-provider failure
             provider_errors.append(f"{provider}：{exc}")
+            remaining = material_count - completed_in_provider
+            if remaining > 0:
+                report_units(remaining)
+                completed_in_provider += remaining
         finally:
             # Browser sessions are thread-affine; close them in the same
             # provider thread in which they may have been created.
@@ -257,11 +294,13 @@ def collect_candidates_parallel(
                     provider = futures[future]
                     if future.cancelled():
                         wave_results[provider] = ([], [], [])
+                        report_units(material_count)
                         continue
                     try:
                         wave_results[provider] = future.result()
                     except Exception as exc:  # defensive boundary
                         wave_results[provider] = ([], [f"{provider}：{exc}"], [])
+                        report_units(material_count)
                 if cancel_check():
                     for future in pending:
                         future.cancel()
@@ -269,7 +308,6 @@ def collect_candidates_parallel(
             executor.shutdown(wait=True, cancel_futures=True)
         return wave_results
 
-    ordered_providers = list(dict.fromkeys(providers))
     results: dict[str, tuple[list[dict], list[str], list[dict]]] = {}
     waves = _provider_collection_waves(ordered_providers)
     for wave_index, wave in enumerate(waves):
@@ -299,6 +337,7 @@ def collect_candidates_parallel(
 
 class MaterialCollectionWorker(QThread):
     progress = Signal(str)
+    progress_units = Signal(int, int)
     completed = Signal(object, str, object)
 
     def __init__(
@@ -332,6 +371,7 @@ class MaterialCollectionWorker(QThread):
             progress=self.progress.emit,
             cancel_check=self._is_stop_requested,
             silent=self.silent,
+            unit_progress=self.progress_units.emit,
         )
 
         message = "；".join(errors)

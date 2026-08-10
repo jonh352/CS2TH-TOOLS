@@ -220,6 +220,7 @@ class CollectionPresetPage(QWidget):
         self.import_btn = QPushButton("导入采集")
         self.import_btn.setObjectName("primaryButton")
         self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_btn.setToolTip("导入到材料采集页的「自定义采集」")
         self.import_btn.clicked.connect(self._import_to_collection)
         self.edit_btn = QPushButton("修改方案")
         self.edit_btn.setObjectName("marketOpenButton")
