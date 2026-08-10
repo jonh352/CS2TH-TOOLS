@@ -1,8 +1,11 @@
-"""Shared, comfortably sized single-line text input dialog."""
+"""Shared, comfortably sized single-line text input dialog (themed modal shell)."""
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QDialog, QInputDialog, QLineEdit, QWidget
+from PySide6.QtWidgets import QWidget
+
+from ui.dialogs.alert_dialog import TextPromptDialog, prompt_text
+from ui.modal_shell import MODAL_WIDTH_LG
 
 
 def create_wide_text_input_dialog(
@@ -11,23 +14,15 @@ def create_wide_text_input_dialog(
     title: str,
     label: str,
     value: str = "",
-) -> QInputDialog:
+) -> TextPromptDialog:
     """Create the standard text prompt used for links and saved file names."""
-    dialog = QInputDialog(parent)
-    dialog.setInputMode(QInputDialog.InputMode.TextInput)
-    dialog.setWindowTitle(title)
-    dialog.setLabelText(label)
-    dialog.setTextEchoMode(QLineEdit.EchoMode.Normal)
-    dialog.setTextValue(value)
-    dialog.setOkButtonText("确定")
-    dialog.setCancelButtonText("取消")
-    dialog.setMinimumSize(520, 180)
-    dialog.resize(560, 190)
-    line_edit = dialog.findChild(QLineEdit)
-    if line_edit is not None:
-        line_edit.setMinimumWidth(460)
-        line_edit.selectAll()
-    return dialog
+    return TextPromptDialog(
+        title,
+        label,
+        parent,
+        default=value,
+        box_width=MODAL_WIDTH_LG,
+    )
 
 
 def get_wide_text_input(
@@ -37,11 +32,10 @@ def get_wide_text_input(
     label: str,
     value: str = "",
 ) -> tuple[str, bool]:
-    dialog = create_wide_text_input_dialog(
+    return prompt_text(
         parent,
-        title=title,
-        label=label,
-        value=value,
+        title,
+        label,
+        default=value,
+        box_width=MODAL_WIDTH_LG,
     )
-    accepted = dialog.exec() == QDialog.DialogCode.Accepted
-    return dialog.textValue(), accepted

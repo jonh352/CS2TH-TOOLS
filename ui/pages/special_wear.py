@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import META_DIR
+from config import CONTENT_PAGE_LAYOUT_MARGINS, META_DIR
 from core.alchemy_quality import get_name_map, get_pid_map, normalize_name
 from core.alchemy_calc import get_k_from_quality
 from core.data_utils import SkinTemplate
@@ -59,7 +59,7 @@ class SpecialWearPage(QWidget):
         super().__init__(parent)
         self._material_payload: dict = {}
         root = QVBoxLayout(self)
-        root.setContentsMargins(26, 24, 26, 24)
+        root.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
         root.setSpacing(18)
         root.addWidget(
             PageHeader(

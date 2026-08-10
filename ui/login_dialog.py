@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -17,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.auth_client import AuthClient, AuthSession
+from ui.components import AuthBrandHeader
 from ui.dialogs.information_dialogs import show_information_dialog
 from ui.workers.auth import LoginWorker
 
@@ -34,7 +34,7 @@ class LoginDialog(QDialog):
         self.setObjectName("loginDialog")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedWidth(424)
+        self.setFixedWidth(400)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -42,42 +42,30 @@ class LoginDialog(QDialog):
         card = QFrame()
         card.setObjectName("loginCard")
         shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(38)
-        shadow.setOffset(0, 14)
-        shadow.setColor(QColor(0, 0, 0, 150))
+        shadow.setBlurRadius(34)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(0, 0, 0, 135))
         card.setGraphicsEffect(shadow)
         root.addWidget(card)
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(18, 16, 18, 18)
-        layout.setSpacing(7)
+        layout.setContentsMargins(22, 14, 22, 18)
+        layout.setSpacing(9)
 
-        heading = QHBoxLayout()
-        title = QLabel("登录 CS2TH")
-        title.setObjectName("loginTitle")
-        close_button = QPushButton("×")
-        close_button.setObjectName("loginCloseButton")
-        close_button.setFixedSize(28, 28)
-        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_button.clicked.connect(self.reject)
-        heading.addWidget(title)
-        heading.addStretch(1)
-        heading.addWidget(close_button)
-        layout.addLayout(heading)
+        layout.addWidget(AuthBrandHeader(on_close=self.reject, logo_size=40))
+        layout.addSpacing(6)
 
-        hint = QLabel('使用与 <b>cs2th.cn</b> 相同的账号')
-        hint.setObjectName("loginHint")
-        layout.addWidget(hint)
-        layout.addSpacing(4)
+        heading = QLabel("用户登录")
+        heading.setObjectName("loginFormHeading")
+        layout.addWidget(heading)
+        layout.addSpacing(2)
 
-        layout.addWidget(self._field_label("用户名"))
         self.username = QLineEdit()
         self.username.setObjectName("loginField")
         self.username.setPlaceholderText("用户名")
         self.username.setClearButtonEnabled(True)
         layout.addWidget(self.username)
 
-        layout.addWidget(self._field_label("密码"))
         self.password = QLineEdit()
         self.password.setObjectName("loginField")
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -108,6 +96,7 @@ class LoginDialog(QDialog):
         )
         consent.setObjectName("loginFooter")
         consent.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        consent.setWordWrap(True)
         consent.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         consent.setOpenExternalLinks(False)
         consent.linkActivated.connect(self._open_legal)
@@ -124,12 +113,6 @@ class LoginDialog(QDialog):
         self.username.returnPressed.connect(self.password.setFocus)
         self.password.returnPressed.connect(self._login)
         self.username.setFocus()
-
-    @staticmethod
-    def _field_label(text: str) -> QLabel:
-        label = QLabel(text)
-        label.setObjectName("loginFieldLabel")
-        return label
 
     def showEvent(self, event) -> None:
         parent = self.parentWidget()

@@ -29,9 +29,10 @@ from config import (
 from core.app_protocol import FOCUS_COMMAND, recipe_reference_from_command
 from core.auth_client import AuthClient, AuthSession, has_tradeup_access
 from core.close_behavior_prefs import load_close_behavior
-from ui.login_dialog import LoginDialog
+from ui.access_lock import apply_page_interaction_lock
 from ui.dialogs.account_dialog import AccountDialog
 from ui.dialogs.information_dialogs import SettingsDialog
+from ui.login_dialog import LoginDialog
 from ui.theme import apply_theme
 from ui.widgets.toast import ToastWidget
 from ui.workers.auth import LogoutWorker, SessionValidationWorker
@@ -98,10 +99,27 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
         root.addWidget(self._build_topbar())
 
+        self._access_banner = QFrame()
+        self._access_banner.setObjectName("accessLockBanner")
+        self._access_banner.hide()
+        banner_row = QHBoxLayout(self._access_banner)
+        banner_row.setContentsMargins(16, 8, 16, 8)
+        banner_row.setSpacing(12)
+        self._access_banner_label = QLabel()
+        self._access_banner_label.setObjectName("accessLockBannerLabel")
+        self._access_banner_label.setWordWrap(True)
+        banner_row.addWidget(self._access_banner_label, 1)
+        self._access_banner_action = QPushButton("去登录")
+        self._access_banner_action.setObjectName("accessLockBannerBtn")
+        self._access_banner_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._access_banner_action.clicked.connect(self._account_clicked)
+        banner_row.addWidget(self._access_banner_action, 0)
+        root.addWidget(self._access_banner)
+
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
         self._active_page_key = ""
-        self._startup_placeholder = QLabel("正在加载炼金计算…")
+        self._startup_placeholder = QLabel("正在加载…")
         self._startup_placeholder.setObjectName("muted")
         self._startup_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stack.addWidget(self._startup_placeholder)
@@ -110,14 +128,18 @@ class MainWindow(QMainWindow):
         self.toast = ToastWidget(root_widget, top_inset_px=70)
         self.toast.hide()
 
-        # Let the branded shell paint once before constructing the first large
-        # feature page. Remaining pages stay lazy for the entire session.
-        self._show_access_gate(
-            "正在验证汰换小助手使用权限…"
-            if self.auth_session is not None
-            else "请先登录 CS2TH 账号后使用汰换小助手"
+        # Browse-first: pages stay navigable; features stay locked until access is granted.
+        self._set_access_ui(
+            allowed=False,
+            message=(
+                "正在验证汰换小助手使用权限…"
+                if self.auth_session is not None
+                else "登录并具备汰换会员权益后可使用功能。"
+            ),
+            show_login=self.auth_session is None,
         )
         QTimer.singleShot(0, self._start_auth_validation)
+        QTimer.singleShot(0, lambda: self._activate("alchemy"))
         self._sync_account_button()
 
     def _build_topbar(self) -> QFrame:
@@ -271,6 +293,9 @@ class MainWindow(QMainWindow):
         raise KeyError(key)
 
     def _on_special_wear_materials_requested(self, payload: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         page = self._ensure_page("platforms")
         if hasattr(page, "show_special_wear_materials"):
             page.show_special_wear_materials(payload)
@@ -287,17 +312,13 @@ class MainWindow(QMainWindow):
             page.setProperty("cs2thPaletteTheme", self.theme_name)
             self.pages[key] = page
             self.stack.addWidget(page)
+            if key != "about":
+                apply_page_interaction_lock(page, not self._access_allowed)
             return page
         finally:
             QApplication.restoreOverrideCursor()
 
     def _activate(self, key: str) -> None:
-        if key != "about" and not self._access_allowed:
-            self.toast.show_toast(
-                "请先登录，并确认账号具有汰换会员/大会员权益或处于汰换公测期",
-                style="warning",
-            )
-            return
         previous_key = self._active_page_key
         previous = self.pages.get(self._active_page_key)
         if (
@@ -318,6 +339,8 @@ class MainWindow(QMainWindow):
         self._active_page_key = key
         if key == "recipes" and hasattr(page, "refresh_from_disk"):
             page.refresh_from_disk()
+        if key != "about":
+            apply_page_interaction_lock(page, not self._access_allowed)
 
         for button_key in {previous_key, key}:
             button = self.nav_buttons.get(button_key)
@@ -327,7 +350,19 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
 
+    def _warn_feature_locked(self) -> None:
+        if self._access_allowed:
+            return
+        if self.auth_session is None:
+            message = "请先登录 CS2TH 账号后再使用功能"
+        else:
+            message = "当前账号无汰换会员权益，暂不可使用功能"
+        self.toast.show_toast(message, style="warning")
+
     def _on_recipe_import_to_simulation(self, recipe: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(recipe, dict):
             return
         simulation = self._ensure_page("simulation")
@@ -339,6 +374,9 @@ class MainWindow(QMainWindow):
         self._activate("simulation")
 
     def _on_recipe_import_to_collection(self, recipe: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(recipe, dict):
             return
         title = str(recipe.get("title") or "").strip()
@@ -376,7 +414,7 @@ class MainWindow(QMainWindow):
         if not reference:
             return
         if not self._access_allowed:
-            self.toast.show_toast("正在验证账号权限，稍后将自动导入配方", style="info")
+            self._warn_feature_locked()
             return
         self._pending_recipe_reference = ""
         self._activate("platforms")
@@ -385,6 +423,9 @@ class MainWindow(QMainWindow):
             collection.load_recipe_reference(reference)
 
     def _on_collection_preset_import(self, payload: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(payload, dict):
             return
         items = payload.get("items")
@@ -400,6 +441,9 @@ class MainWindow(QMainWindow):
     def _on_inventory_import_to_alchemy(
         self, items: object, mode: object = None
     ) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(items, list) or not items:
             return
         alchemy = self._ensure_page("alchemy")
@@ -416,6 +460,9 @@ class MainWindow(QMainWindow):
     def _on_collection_import_to_alchemy(
         self, items: object, mode: object = None
     ) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(items, list) or not items:
             return
         alchemy = self._ensure_page("alchemy")
@@ -434,6 +481,9 @@ class MainWindow(QMainWindow):
             platforms.mark_collection_imported()
 
     def _on_saved_json_import_to_alchemy(self, items: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(items, list) or not items:
             return
         alchemy = self._ensure_page("alchemy")
@@ -457,6 +507,9 @@ class MainWindow(QMainWindow):
         return rarity or "common"
 
     def _on_inventory_import_to_simulation(self, items: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
         if not isinstance(items, list) or not items:
             return
         simulation = self._ensure_page("simulation")
@@ -539,20 +592,27 @@ class MainWindow(QMainWindow):
             for key, until in active
         ]
 
-    def _show_access_gate(self, message: str) -> None:
-        if self._startup_placeholder is None:
-            self._startup_placeholder = QLabel()
-            self._startup_placeholder.setObjectName("muted")
-            self._startup_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.stack.addWidget(self._startup_placeholder)
-        self._startup_placeholder.setText(message)
-        self.stack.setCurrentWidget(self._startup_placeholder)
-        self._active_page_key = ""
-        for key, button in self.nav_buttons.items():
-            button.setEnabled(key == "about")
-            button.setProperty("active", False)
-            button.style().unpolish(button)
-            button.style().polish(button)
+    def _set_access_ui(
+        self,
+        *,
+        allowed: bool,
+        message: str,
+        show_login: bool,
+    ) -> None:
+        self._access_allowed = allowed
+        for button in self.nav_buttons.values():
+            button.setEnabled(True)
+        for key, page in self.pages.items():
+            if key == "about":
+                continue
+            apply_page_interaction_lock(page, not allowed)
+        if allowed:
+            self._access_banner.hide()
+            return
+        self._access_banner_label.setText(message)
+        self._access_banner_action.setText("去登录" if show_login else "查看账号")
+        self._access_banner_action.show()
+        self._access_banner.show()
 
     def _schedule_auth_recheck(self, session: AuthSession) -> None:
         delay_seconds = 300.0
@@ -570,10 +630,8 @@ class MainWindow(QMainWindow):
         self.auth_session = session
         self._sync_account_button()
         allowed = bool(has_tradeup_access(session) and not error)
-        self._access_allowed = allowed
         if allowed and session is not None:
-            for button in self.nav_buttons.values():
-                button.setEnabled(True)
+            self._set_access_ui(allowed=True, message="", show_login=False)
             self._schedule_auth_recheck(session)
             if self._pending_recipe_reference:
                 self._apply_pending_recipe_import()
@@ -584,12 +642,28 @@ class MainWindow(QMainWindow):
         if session is not None:
             self._auth_recheck_timer.start(30_000 if error else 300_000)
         if error:
-            message = f"暂时无法验证使用权限：{error}"
+            message = (
+                f"暂时无法验证使用权限：{error}。功能暂不可用。"
+            )
+            show_login = session is None
         elif session is None:
-            message = "请先登录 CS2TH 账号后使用汰换小助手"
+            message = (
+                "登录并具备汰换会员权益后可使用所有功能。"
+            )
+            show_login = True
         else:
-            message = "汰换公测已关闭；当前账号需要汰换会员或大会员权益"
-        self._show_access_gate(message)
+            message = (
+                "汰换公测已关闭；当前账号需要汰换会员或大会员权益。"
+                "可浏览页面，暂不可使用功能。"
+            )
+            show_login = False
+        self._set_access_ui(
+            allowed=False,
+            message=message,
+            show_login=show_login,
+        )
+        if not self._active_page_key:
+            self._activate("alchemy")
 
     def _start_auth_validation(self) -> None:
         if self.auth_session is None or not self.auth_client.enabled:

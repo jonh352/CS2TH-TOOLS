@@ -9,10 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
-    QFrame,
-    QHBoxLayout,
     QLabel,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +18,12 @@ from core.saved_recipes import list_saved_recipes, load_recipe_folders
 from ui.dialog_topmost_support import (
     apply_frameless_modal_geometry,
     install_dialog_topmost_follow_parent,
+)
+from ui.modal_shell import (
+    MODAL_WIDTH_MD,
+    add_modal_footer_buttons,
+    build_frameless_modal_content,
+    wire_overlay_dismiss,
 )
 from ui.pages.recipe_manage import _display_row_title, _format_saved_at_local
 
@@ -84,43 +87,17 @@ class PickSavedRecipeDialog(QDialog):
         self._groups = _group_nonempty_folders(raw)
         self._chosen_payload: dict[str, Any] | None = None
 
-        overlay = QWidget(self)
-        overlay.setObjectName("alertOverlay")
-        overlay.setAttribute(Qt.WA_StyledBackground)
-
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        overlay, box, layout, close_btn = build_frameless_modal_content(
+            self,
+            "从配方管理导入",
+            "先选择文件夹，再选择其中的配方。",
+            box_width=MODAL_WIDTH_MD,
+            message_object_name="alertDialogMessage",
+        )
         main_layout.addWidget(overlay)
-
-        overlay_layout = QVBoxLayout(overlay)
-        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        box = QFrame()
-        box.setObjectName("loginBox")
-        box.setFixedWidth(460)
-
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(16)
-
-        header = QHBoxLayout()
-        title_label = QLabel("从配方管理导入")
-        title_label.setObjectName("loginTitle")
-        header.addWidget(title_label)
-        header.addStretch()
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("loginCloseBtn")
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setAutoDefault(False)
-        close_btn.setDefault(False)
         close_btn.clicked.connect(self.reject)
-        header.addWidget(close_btn)
-        layout.addLayout(header)
-
-        hint = QLabel("先选择文件夹，再选择其中的配方。")
-        hint.setObjectName("muted")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
 
         folder_label = QLabel("文件夹")
         folder_label.setObjectName("loginFormLabel")
@@ -139,33 +116,14 @@ class PickSavedRecipeDialog(QDialog):
         self._recipe_combo.setObjectName("loginInput")
         layout.addWidget(self._recipe_combo)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
-        btn_row.addStretch(1)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("confirmDialogCancelBtn")
-        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        cancel_btn.setAutoDefault(False)
-        cancel_btn.setDefault(False)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        self._ok_btn = QPushButton("导入")
-        self._ok_btn.setObjectName("confirmDialogOkBtn")
-        self._ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._ok_btn.setDefault(True)
-        self._ok_btn.clicked.connect(self._accept_selection)
-        btn_row.addWidget(self._ok_btn)
-        layout.addLayout(btn_row)
+        _cancel, self._ok_btn = add_modal_footer_buttons(
+            layout,
+            ok_text="导入",
+            on_cancel=self.reject,
+            on_ok=self._accept_selection,
+        )
 
-        overlay_layout.addWidget(box)
-
-        def on_overlay_click(event) -> None:
-            if event.button() == Qt.MouseButton.LeftButton:
-                w = overlay.childAt(event.pos().x(), event.pos().y())
-                if w is None or (w != box and not box.isAncestorOf(w)):
-                    self.reject()
-
-        overlay.mousePressEvent = on_overlay_click
+        wire_overlay_dismiss(overlay, box, self, accept=False)
         install_dialog_topmost_follow_parent(self)
 
         if self._groups:

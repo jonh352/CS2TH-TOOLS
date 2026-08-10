@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -27,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import ASSETS_DIR, AUTH_API_BASE_URL, MATERIAL_COLLECTION_HISTORY_FILE
+from config import CONTENT_PAGE_LAYOUT_MARGINS, ASSETS_DIR, AUTH_API_BASE_URL, MATERIAL_COLLECTION_HISTORY_FILE
 from core.alchemy_quality import (
     get_name_map,
     get_pid_map,
@@ -188,7 +187,7 @@ class PlatformPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         container = QWidget()
         root = QVBoxLayout(container)
-        root.setContentsMargins(26, 12, 26, 24)
+        root.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
         root.setSpacing(16)
         scroll.setWidget(container)
         outer.addWidget(scroll)
@@ -948,13 +947,12 @@ class PlatformPage(QWidget):
             return False
         name = provider_display_name(provider)
         if confirm:
-            answer = QMessageBox.question(
+            if not ask_confirmation(
                 self,
                 f"清除 {name} 登录信息",
                 f"将删除本 APP 保存的 {name} 登录凭证和独立浏览器登录目录。\n"
                 "不会退出您日常使用的 Edge / Chrome 主浏览器账号。是否继续？",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+            ):
                 return False
         result = clear_provider_auth(provider)
         if not result.get("ok"):
@@ -980,14 +978,13 @@ class PlatformPage(QWidget):
         return True
 
     def _clear_all_marketplace_logins(self) -> None:
-        answer = QMessageBox.question(
+        if not ask_confirmation(
             self,
             "清除全部平台登录信息",
             "将清除 BUFF、悠悠有品、C5GAME、ECOSteam 的 APP 登录凭证"
             "与独立浏览器登录目录。\n"
             "Steam 账号请在“Steam 库存”页面管理。是否继续？",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        ):
             return
         for provider in sorted(APP_LOGIN_PROVIDERS):
             clear_provider_auth(provider)

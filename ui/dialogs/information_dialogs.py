@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QTextBrowser,
@@ -36,6 +35,7 @@ from core.playwright_channel_prefs import (
     save_preferred_playwright_channel,
 )
 from core.storage_util import clear_all_data, clear_cache, storage_usage
+from ui.feedback import ask_confirmation, show_alert
 
 
 def _document(title: str, body: str) -> str:
@@ -582,10 +582,10 @@ class SettingsDialog(QDialog):
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, "打开数据目录", f"无法创建目录：{exc}")
+            show_alert(self, "打开数据目录", f"无法创建目录：{exc}")
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
-            QMessageBox.warning(
+            show_alert(
                 self,
                 "打开数据目录",
                 f"无法打开资源管理器。\n路径：{path}",
@@ -594,24 +594,23 @@ class SettingsDialog(QDialog):
     def _clear_cache(self) -> None:
         result = clear_cache()
         self._refresh_usage()
-        QMessageBox.information(
+        show_alert(
             self,
             "清除缓存",
             f"已清除缓存。当前已用：{result.get('label') or '—'}",
         )
 
     def _clear_all(self) -> None:
-        answer = QMessageBox.question(
+        if not ask_confirmation(
             self,
             "清除所有数据",
             "将删除本地登录态、Steam 库存会话与配方等数据，且不可恢复。\n"
             "本页设置项会保留。确定继续吗？",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        ):
             return
         result = clear_all_data(keep_settings=True)
         self._refresh_usage()
-        QMessageBox.information(
+        show_alert(
             self,
             "清除所有数据",
             f"已清除本地数据。当前已用：{result.get('label') or '—'}\n"

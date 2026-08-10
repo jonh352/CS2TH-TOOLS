@@ -8,12 +8,13 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from ui.components import AuthBrandHeader
 
 
 class AccountDialog(QDialog):
@@ -34,7 +35,7 @@ class AccountDialog(QDialog):
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedWidth(400)
+        self.setFixedWidth(380)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -42,28 +43,22 @@ class AccountDialog(QDialog):
         card = QFrame()
         card.setObjectName("loginCard")
         shadow = QGraphicsDropShadowEffect(card)
-        shadow.setBlurRadius(38)
-        shadow.setOffset(0, 14)
-        shadow.setColor(QColor(0, 0, 0, 150))
+        shadow.setBlurRadius(34)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(0, 0, 0, 135))
         card.setGraphicsEffect(shadow)
         root.addWidget(card)
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(22, 14, 22, 16)
+        layout.setSpacing(9)
 
-        heading = QHBoxLayout()
-        title = QLabel("账号")
-        title.setObjectName("loginTitle")
-        close_button = QPushButton("×")
-        close_button.setObjectName("loginCloseButton")
-        close_button.setFixedSize(28, 28)
-        close_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_button.clicked.connect(self.reject)
-        heading.addWidget(title)
-        heading.addStretch(1)
-        heading.addWidget(close_button)
-        layout.addLayout(heading)
+        layout.addWidget(AuthBrandHeader(on_close=self.reject, logo_size=40))
+        layout.addSpacing(4)
+
+        user_heading = QLabel("用户名")
+        user_heading.setObjectName("loginFormHeading")
+        layout.addWidget(user_heading)
 
         name = QLabel(str(username or "").strip() or "未命名用户")
         name.setObjectName("accountDialogUsername")
@@ -77,8 +72,8 @@ class AccountDialog(QDialog):
         entitlements = QFrame()
         entitlements.setObjectName("accountDialogEntitlementBox")
         ent_lay = QVBoxLayout(entitlements)
-        ent_lay.setContentsMargins(12, 10, 12, 10)
-        ent_lay.setSpacing(8)
+        ent_lay.setContentsMargins(10, 8, 10, 8)
+        ent_lay.setSpacing(4)
         lines = [str(line).strip() for line in entitlement_lines if str(line).strip()]
         if lines:
             for line in lines:

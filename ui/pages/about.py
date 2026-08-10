@@ -67,7 +67,7 @@ class AboutPage(QWidget):
             f"<b>{escape(APP_NAME)}</b> 是面向 CS2 汰换的本地桌面助手。"
             "可整理 Steam 库存、算配方、模拟产物磨损，"
             "并从 BUFF / 悠悠有品 / C5GAME / ECO 按磨损区间采集可买材料。"
-            "使用功能页前请先登录 CS2TH 账号并具备相应权限。"
+            "未登录或无会员权限时仍可浏览各页面，登录并具备汰换会员/大会员或公测权限后可使用功能。"
         )
         intro.setObjectName("aboutBody")
         intro.setWordWrap(True)

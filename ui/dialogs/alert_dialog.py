@@ -6,13 +6,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -22,77 +20,22 @@ from ui.dialog_topmost_support import (
     apply_frameless_modal_geometry,
     install_dialog_topmost_follow_parent,
 )
+from ui.modal_shell import (
+    MODAL_WIDTH_LG,
+    MODAL_WIDTH_MD,
+    MODAL_WIDTH_SM,
+    add_modal_footer_buttons,
+    build_frameless_modal_content,
+    wire_overlay_dismiss,
+)
 
 _WEAR_INPUT_NOTICE_TEXT = (
     "我们会将你输入的磨损度转换为游戏中的数据格式，以便更准确地模拟实际效果，转换后的数值会显示在输入框下方。"
 )
 
-
-def _build_frameless_modal_content(
-    dialog: QDialog,
-    title: str,
-    message: str,
-    *,
-    box_width: int = 400,
-    box_object_name: str = "loginBox",
-    message_object_name: str = "loginError",
-) -> tuple[QWidget, QFrame, QVBoxLayout, QPushButton]:
-    """蒙层 + 内容框 + 标题行 + 消息；返回 overlay、box、box 内主布局、关闭按钮（信号由调用方连接）。"""
-    overlay = QWidget(dialog)
-    overlay.setObjectName("alertOverlay")
-    overlay.setAttribute(Qt.WA_StyledBackground)
-
-    overlay_layout = QVBoxLayout(overlay)
-    overlay_layout.setAlignment(Qt.AlignCenter)
-
-    box = QFrame()
-    box.setObjectName(box_object_name)
-    box.setFixedWidth(box_width)
-
-    layout = QVBoxLayout(box)
-    layout.setContentsMargins(32, 32, 32, 32)
-    layout.setSpacing(20)
-
-    header = QHBoxLayout()
-    title_label = QLabel(title)
-    title_label.setObjectName("loginTitle")
-    header.addWidget(title_label)
-    header.addStretch()
-    close_btn = QPushButton("✕")
-    close_btn.setObjectName("loginCloseBtn")
-    close_btn.setCursor(Qt.PointingHandCursor)
-    close_btn.setAutoDefault(False)
-    close_btn.setDefault(False)
-    header.addWidget(close_btn)
-    layout.addLayout(header)
-    layout.addSpacing(4)
-
-    msg_label = QLabel(message)
-    msg_label.setObjectName(message_object_name)
-    msg_label.setWordWrap(True)
-    msg_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-    inner_w = max(1, box_width - layout.contentsMargins().left() - layout.contentsMargins().right())
-    msg_label.setSizePolicy(
-        QSizePolicy.Policy.Expanding,
-        QSizePolicy.Policy.Minimum,
-    )
-    msg_label.setMinimumWidth(inner_w)
-    layout.addWidget(msg_label)
-
-    overlay_layout.addWidget(box)
-    return overlay, box, layout, close_btn
-
-
-def _wire_overlay_dismiss(overlay: QWidget, box: QFrame, dialog: QDialog, *, accept: bool) -> None:
-    """点击蒙层空白处关闭，行为与历史一致（Alert 用 accept，Confirm 用 reject）。"""
-
-    def on_overlay_click(event):
-        if event.button() == Qt.LeftButton:
-            w = overlay.childAt(event.pos().x(), event.pos().y())
-            if w is None or (w != box and not box.isAncestorOf(w)):
-                (dialog.accept if accept else dialog.reject)()
-
-    overlay.mousePressEvent = on_overlay_click
+# 兼容旧内部调用名
+_build_frameless_modal_content = build_frameless_modal_content
+_wire_overlay_dismiss = wire_overlay_dismiss
 
 
 class AlertDialog(QDialog):
@@ -152,23 +95,11 @@ class ConfirmDialog(QDialog):
         main_layout.addWidget(overlay)
         close_btn.clicked.connect(self.reject)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
-        btn_row.addStretch(1)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("confirmDialogCancelBtn")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setAutoDefault(False)
-        cancel_btn.setDefault(False)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        ok_btn = QPushButton("确定")
-        ok_btn.setObjectName("confirmDialogOkBtn")
-        ok_btn.setCursor(Qt.PointingHandCursor)
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
+        add_modal_footer_buttons(
+            layout,
+            on_cancel=self.reject,
+            on_ok=self.accept,
+        )
 
         _wire_overlay_dismiss(overlay, box, self, accept=False)
         install_dialog_topmost_follow_parent(self)
@@ -201,7 +132,7 @@ class ImportSubstrateToAlchemyDialog(QDialog):
             self,
             title,
             message,
-            box_width=480,
+            box_width=MODAL_WIDTH_MD,
             message_object_name="alertDialogMessage",
         )
         main_layout.addWidget(overlay)
@@ -309,6 +240,7 @@ class TextPromptDialog(QDialog):
         parent=None,
         *,
         default: str = "",
+        box_width: int = MODAL_WIDTH_SM,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -316,39 +248,17 @@ class TextPromptDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-        overlay = QWidget(self)
-        overlay.setObjectName("alertOverlay")
-        overlay.setAttribute(Qt.WA_StyledBackground)
-
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        overlay, box, layout, close_btn = build_frameless_modal_content(
+            self,
+            title,
+            "",
+            box_width=box_width,
+            include_message=False,
+        )
         main_layout.addWidget(overlay)
-
-        overlay_layout = QVBoxLayout(overlay)
-        overlay_layout.setAlignment(Qt.AlignCenter)
-
-        box = QFrame()
-        box.setObjectName("loginBox")
-        box.setFixedWidth(400)
-
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(20)
-
-        header = QHBoxLayout()
-        title_label = QLabel(title)
-        title_label.setObjectName("loginTitle")
-        header.addWidget(title_label)
-        header.addStretch()
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("loginCloseBtn")
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.setAutoDefault(False)
-        close_btn.setDefault(False)
         close_btn.clicked.connect(self.reject)
-        header.addWidget(close_btn)
-        layout.addLayout(header)
-        layout.addSpacing(4)
 
         form_label = QLabel(label)
         form_label.setObjectName("loginFormLabel")
@@ -361,39 +271,19 @@ class TextPromptDialog(QDialog):
         self._line_edit.returnPressed.connect(self.accept)
         layout.addWidget(self._line_edit)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
-        btn_row.addStretch(1)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("confirmDialogCancelBtn")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setAutoDefault(False)
-        cancel_btn.setDefault(False)
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        ok_btn = QPushButton("确定")
-        ok_btn.setObjectName("confirmDialogOkBtn")
-        ok_btn.setCursor(Qt.PointingHandCursor)
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-        layout.addLayout(btn_row)
+        add_modal_footer_buttons(
+            layout,
+            on_cancel=self.reject,
+            on_ok=self.accept,
+        )
 
-        overlay_layout.addWidget(box)
-
-        def on_overlay_click(event):
-            if event.button() == Qt.LeftButton:
-                w = overlay.childAt(event.pos().x(), event.pos().y())
-                if w is None or (w != box and not box.isAncestorOf(w)):
-                    self.reject()
-
-        overlay.mousePressEvent = on_overlay_click
+        wire_overlay_dismiss(overlay, box, self, accept=False)
         install_dialog_topmost_follow_parent(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         apply_frameless_modal_geometry(self, self.parentWidget())
-        # 无框弹窗打开时默认焦点常在「确定」上；延后一帧再聚焦输入框，便于直接键入
+
         def _focus_input() -> None:
             self._line_edit.setFocus(Qt.FocusReason.PopupFocusReason)
             self._line_edit.selectAll()
@@ -410,9 +300,12 @@ def prompt_text(
     label: str,
     *,
     default: str = "",
+    box_width: int = MODAL_WIDTH_SM,
 ) -> tuple[str, bool]:
     """显示与主题一致的输入框，返回 (文本, 是否确定)。"""
-    dlg = TextPromptDialog(title, label, parent, default=default)
+    dlg = TextPromptDialog(
+        title, label, parent, default=default, box_width=box_width
+    )
     if dlg.exec() != QDialog.Accepted:
         return "", False
     return dlg.value(), True
@@ -436,7 +329,7 @@ class WearInputNoticeDialog(QDialog):
             self,
             title,
             _WEAR_INPUT_NOTICE_TEXT,
-            box_width=540,
+            box_width=MODAL_WIDTH_LG - 20,
             box_object_name="wearNoticeBox",
             message_object_name="wearNoticeMessage",
         )
@@ -450,12 +343,12 @@ class WearInputNoticeDialog(QDialog):
         layout.addWidget(self._dont_show_cb)
 
         ok_btn = QPushButton("我知道了")
-        ok_btn.setObjectName("alchemySelectFileBtn")
+        ok_btn.setObjectName("loginSubmitBtn")
         ok_btn.setCursor(Qt.PointingHandCursor)
         ok_btn.setAutoDefault(False)
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(self.accept)
-        layout.addWidget(ok_btn)
+        layout.addWidget(ok_btn, 0, Qt.AlignmentFlag.AlignRight)
 
         _wire_overlay_dismiss(overlay, box, self, accept=True)
 

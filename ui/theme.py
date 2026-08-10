@@ -196,7 +196,38 @@ QDialog#loginDialog {{
 QFrame#loginCard {{
   background: {surface};
   border: 1px solid {border};
-  border-radius: 16px;
+  border-radius: 18px;
+}}
+QFrame#authBrandAccent {{
+  background: qlineargradient(
+    x1:0, y1:0, x2:1, y2:0,
+    stop:0 {cyan}, stop:1 {blue}
+  );
+  border: 0;
+  border-radius: 2px;
+}}
+QLabel#authBrandLogo {{
+  background: transparent;
+}}
+QLabel#authBrandName {{
+  color: {text};
+  font-size: 17px;
+  font-weight: 800;
+}}
+QLabel#loginFormHeading {{
+  color: {text};
+  font-size: 15px;
+  font-weight: 750;
+}}
+QLabel#authBrandSub, QLabel#authBrandCaption {{
+  color: {muted};
+  font-size: 12px;
+  font-weight: 650;
+}}
+QLabel#authBrandProduct {{
+  color: {text};
+  font-size: 13px;
+  font-weight: 750;
 }}
 QLabel#loginTitle {{
   color: {text};
@@ -208,54 +239,68 @@ QLabel#loginHint, QLabel#loginFieldLabel {{
   font-size: 12px;
 }}
 QLabel#loginFieldLabel {{
-  margin-top: 3px;
+  margin-top: 0;
 }}
 QLineEdit#loginField {{
-  min-height: 36px;
-  padding: 0 11px;
+  min-height: 40px;
+  padding: 0 13px;
   background: {input};
   border: 1px solid {border};
-  border-radius: 10px;
+  border-radius: 11px;
+  font-size: 13px;
 }}
 QLineEdit#loginField:focus {{
   border-color: {cyan};
+  background: {surface};
 }}
-QPushButton#loginCloseButton {{
+QPushButton#loginCloseButton, QPushButton#loginCloseBtn,
+QPushButton#settingsModalClose {{
+  min-width: 28px;
+  max-width: 28px;
+  min-height: 28px;
   padding: 0;
   color: {muted};
   background: transparent;
   border: 0;
-  font-size: 20px;
+  border-radius: 8px;
+  font-size: 16px;
   font-weight: 400;
 }}
-QPushButton#loginCloseButton:hover {{
+QPushButton#loginCloseButton:hover, QPushButton#loginCloseBtn:hover,
+QPushButton#settingsModalClose:hover {{
   color: {text};
   background: {card_hover};
-  border-radius: 8px;
 }}
 QPushButton#loginSubmitButton {{
-  min-height: 38px;
-  margin-top: 3px;
+  min-height: 40px;
+  margin-top: 4px;
   color: {primary_text};
-  background: {cyan};
+  background: qlineargradient(
+    x1:0, y1:0, x2:1, y2:0,
+    stop:0 {cyan}, stop:1 {blue}
+  );
   border: 1px solid {cyan};
-  border-radius: 10px;
-  font-weight: 750;
+  border-radius: 11px;
+  font-size: 14px;
+  font-weight: 800;
 }}
 QPushButton#loginSubmitButton:hover {{
-  background: {cyan_hover};
+  background: qlineargradient(
+    x1:0, y1:0, x2:1, y2:0,
+    stop:0 {cyan_hover}, stop:1 {blue}
+  );
   border-color: {cyan_hover};
 }}
 QLabel#accountDialogUsername {{
   color: {text};
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 800;
-  padding: 2px 0 4px 0;
+  padding: 0;
 }}
 QFrame#accountDialogEntitlementBox {{
   background: {input};
   border: 1px solid {border};
-  border-radius: 12px;
+  border-radius: 10px;
 }}
 QLabel#accountDialogEntitlementRow {{
   color: {text};
@@ -297,10 +342,11 @@ QLabel#loginFooter, QLabel#loginLink {{
 }}
 QLabel#loginMessage {{
   padding: 7px 9px;
+  margin-bottom: 0;
   color: {lime};
   background: {lime_dim};
   border: 1px solid {border};
-  border-radius: 7px;
+  border-radius: 8px;
 }}
 QLabel#loginMessage[error="true"] {{
   color: {rose};
@@ -336,30 +382,15 @@ QRadioButton#settingsRadio:checked {{
   background: {cyan_dim};
 }}
 
-QWidget#settingsDialogBackdrop {{
-  background: rgba(6, 8, 13, 0.55);
-}}
 QFrame#settingsModalPanel {{
-  background: {card};
-  border: 1px solid {border};
+  background: {surface};
+  border: 1px solid {border_strong};
   border-radius: 16px;
 }}
 QLabel#settingsModalTitle {{
   color: {text};
-  font-size: 22px;
-  font-weight: 750;
-}}
-QPushButton#settingsModalClose {{
-  color: {muted};
-  background: transparent;
-  border: none;
-  border-radius: 8px;
   font-size: 18px;
-  font-weight: 600;
-}}
-QPushButton#settingsModalClose:hover {{
-  color: {text};
-  background: {input};
+  font-weight: 800;
 }}
 QLabel#settingsSectionTitle {{
   color: {muted};
@@ -422,7 +453,7 @@ QLabel#settingsLegalSep {{
 QFrame#aboutCard {{
   background: {card};
   border: 1px solid {border};
-  border-radius: 14px;
+  border-radius: 12px;
 }}
 QFrame#aboutStepBlock {{
   background: {surface_alt};
@@ -498,13 +529,18 @@ QLabel#pageKicker {{
 }}
 QLabel#pageTitle {{
   color: {text};
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 800;
 }}
 QLabel#alchemyPageTitle, QLabel#alchemySimulationPageTitle {{
   color: {text};
   font-size: 22px;
   font-weight: 800;
+}}
+QLabel#sectionTitle {{
+  color: {text};
+  font-size: 15px;
+  font-weight: 750;
 }}
 QLabel#alchemyGroupTitle, QLabel#alchemyProductName,
 QLabel#alchemySimulationResultName, QLabel#marketCardTitle,
@@ -532,9 +568,6 @@ QFrame#alchemySimulationResultsGroup {{
   background: {card};
   border: 1px solid {border};
   border-radius: 12px;
-}}
-QFrame#panel {{
-  border-radius: 14px;
 }}
 QFrame#marketCard:hover, QFrame#metricCard:hover,
 QFrame#alchemySimulationCard:hover, QFrame#alchemySimulationResultCard:hover {{
@@ -652,7 +685,7 @@ QPushButton#dangerOutlineButton {{
 QFrame#platformMaterialsPanel {{
   background: {surface};
   border: 1px solid {border};
-  border-radius: 14px;
+  border-radius: 12px;
 }}
 QFrame#platformMaterialsEmpty {{
   background: {surface_alt};
@@ -856,8 +889,7 @@ QPushButton#alchemyCalcBtn[calcStopping="true"] {{
   border-color: {amber};
 }}
 QPushButton#alchemyClearFileBtn, QPushButton#alchemySimulationClearBtn,
-QPushButton#importToAlchemyReplaceBtn, QPushButton#confirmDialogCancelBtn,
-QPushButton#specialWearComplexityThinkAgainBtn {{
+QPushButton#importToAlchemyReplaceBtn {{
   color: {rose};
   background: {rose_dim};
   border-color: {rose};
@@ -866,6 +898,18 @@ QPushButton#alchemyClearFileBtn:hover, QPushButton#alchemySimulationClearBtn:hov
 QPushButton#importToAlchemyReplaceBtn:hover {{
   color: {text};
   background: {rose};
+}}
+QPushButton#confirmDialogCancelBtn, QPushButton#specialWearComplexityThinkAgainBtn {{
+  color: {muted};
+  background: {input};
+  border-color: {border};
+  font-weight: 650;
+}}
+QPushButton#confirmDialogCancelBtn:hover,
+QPushButton#specialWearComplexityThinkAgainBtn:hover {{
+  color: {text};
+  background: {card_hover};
+  border-color: {border_strong};
 }}
 QPushButton#dangerButton {{
   color: {rose};
@@ -888,15 +932,6 @@ QPushButton#alchemyResetWearBtn, QPushButton#alchemyStep2WearNoticeBtn {{
 QPushButton#alchemyResetWearBtn:hover, QPushButton#alchemyStep2WearNoticeBtn:hover {{
   color: {cyan};
   background: {cyan_dim};
-}}
-QPushButton#loginCloseBtn {{
-  min-width: 30px;
-  max-width: 30px;
-  min-height: 30px;
-  padding: 0;
-  background: transparent;
-  border-color: transparent;
-  font-size: 17px;
 }}
 QPushButton#fetchCustomEntryRemoveBtn, QPushButton#purchaseQrNavBtn,
 QPushButton#purchaseActionIconBtn {{
@@ -1352,18 +1387,42 @@ QFrame#toastWidgetWarning {{
   background: {amber_dim};
   border-color: {amber};
 }}
+QFrame#accessLockBanner {{
+  background: {amber_dim};
+  border: 0;
+  border-bottom: 1px solid {amber};
+}}
+QLabel#accessLockBannerLabel {{
+  color: {text};
+  font-size: 13px;
+  font-weight: 650;
+}}
+QPushButton#accessLockBannerBtn {{
+  min-height: 30px;
+  padding: 0 14px;
+  color: {primary_text};
+  background: {cyan};
+  border: 1px solid {cyan};
+  border-radius: 8px;
+  font-weight: 750;
+}}
+QPushButton#accessLockBannerBtn:hover {{
+  background: {cyan_hover};
+  border-color: {cyan_hover};
+}}
 
 /* ---------- Dialogs and popups ---------- */
 QDialog {{
   background: {bg};
 }}
-QWidget#alertOverlay, QWidget#excludeRecipeOverlay, QWidget#loginOverlay {{
+QWidget#alertOverlay, QWidget#excludeRecipeOverlay, QWidget#loginOverlay,
+QWidget#settingsDialogBackdrop {{
   background: {overlay};
 }}
-QFrame#loginBox {{
+QFrame#loginBox, QFrame#wearNoticeBox {{
   background: {surface};
   border: 1px solid {border_strong};
-  border-radius: 14px;
+  border-radius: 16px;
 }}
 QLabel#loginTitle {{
   color: {text};
@@ -1376,6 +1435,20 @@ QLabel#loginError {{
 QLabel#loginFormLabel {{
   color: {muted};
   font-weight: 650;
+}}
+QLabel#alertDialogMessage, QLabel#wearNoticeMessage {{
+  color: {muted};
+  font-size: 13px;
+}}
+QLineEdit#loginInput {{
+  min-height: 36px;
+  padding: 0 12px;
+  background: {input};
+  border: 1px solid {border};
+  border-radius: 10px;
+}}
+QLineEdit#loginInput:focus {{
+  border-color: {cyan};
 }}
 QMenu {{
   padding: 6px;

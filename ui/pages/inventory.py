@@ -30,7 +30,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QListView,
     QMenu,
-    QMessageBox,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
@@ -59,7 +58,9 @@ from core.inventory_steam_accounts import (
     update_profile_display_name,
 )
 from core.platform_links import MARKETPLACES, links_for_template
+from config import CONTENT_PAGE_LAYOUT_MARGINS
 from ui.components import PageHeader, panel
+from ui.feedback import ask_confirmation
 from ui.weapon_card_image_area import line_and_tint_for_quality_cn
 from ui.widgets.float_line_edit import format_float_shortest
 
@@ -398,7 +399,7 @@ class InventoryPage(QWidget):
         self._render_completion_status = ""
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(26, 24, 26, 24)
+        root.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
         root.setSpacing(16)
         root.addWidget(
             PageHeader(
@@ -675,12 +676,11 @@ class InventoryPage(QWidget):
         if not profile_id:
             return
         name = self.account_combo.currentText()
-        answer = QMessageBox.question(
+        if not ask_confirmation(
             self,
             "移除 Steam 账号",
             f"确定移除“{name}”及其本地登录态和库存缓存吗？",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        ):
             return
         next_profile = delete_steam_profile(profile_id)
         self._reload_accounts(next_profile)
