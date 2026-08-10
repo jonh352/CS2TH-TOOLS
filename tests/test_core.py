@@ -291,6 +291,7 @@ class MetadataTests(unittest.TestCase):
             side_effect=_fake_c5_http_fetch,
         ) as http_fetch, patch(
             "core.market_candidates._fetch_c5_via_browser",
+            side_effect=_fake_c5_http_fetch,
         ) as browser_fetch:
             c5_rows = fetch_c5_candidates(
                 template=bare,
@@ -304,10 +305,10 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(len(c5_rows), 1)
         self.assertEqual(c5_rows[0]["platform"], "c5")
         self.assertAlmostEqual(c5_rows[0]["float_value"], 0.164862)
-        self.assertEqual(http_fetch.call_count, 1)
-        self.assertEqual(browser_fetch.call_count, 0)
+        self.assertEqual(http_fetch.call_count, 0)
+        self.assertEqual(browser_fetch.call_count, 1)
         self.assertEqual(
-            http_fetch.call_args.kwargs.get("ids"),
+            browser_fetch.call_args.kwargs.get("ids"),
             [1098059387020423168],
         )
 
@@ -345,7 +346,7 @@ class MetadataTests(unittest.TestCase):
             )
         self.assertEqual(len(fallback_rows), 1)
         self.assertAlmostEqual(fallback_rows[0]["float_value"], 0.155)
-        self.assertEqual(http_fetch.call_count, 1)
+        self.assertEqual(http_fetch.call_count, 0)
         self.assertEqual(browser_fetch.call_count, 1)
 
         class EcoApiResponse:
@@ -767,52 +768,6 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(browser_calls, [])
         self.assertGreaterEqual(wait_mock.call_count, 2)
         self.assertIn("静默重试", str(raised.exception))
-
-    def test_c5_verify_opens_requested_page_and_notifies_user(self) -> None:
-        from core.market_candidates import _complete_c5_verify_system_browser
-
-        alerts: list[tuple[str, str]] = []
-        with TemporaryDirectory() as directory, patch(
-            "core.market_candidates.CACHE_DIR", Path(directory)
-        ), patch(
-            "core.market_external_browser.launch_system_browser",
-            return_value=object(),
-        ) as launch_mock, patch(
-            "core.market_external_browser.wait_browser_closed",
-            return_value=True,
-        ), patch(
-            "core.market_external_browser.harvest_profile_cookies",
-            return_value=[
-                {
-                    "name": "NC5_accessToken",
-                    "value": "verified-token-value-1234567890",
-                    "domain": ".c5game.com",
-                }
-            ],
-        ), patch(
-            "core.market_external_browser.harvest_c5_netlog_headers",
-            return_value={"x-device-id": "verified-device-id"},
-        ), patch(
-            "core.market_candidates.save_c5_auth",
-        ) as save_auth, patch(
-            "core.market_candidates.save_c5_client_headers",
-        ) as save_headers, patch(
-            "core.market_candidates.time.sleep",
-        ):
-            _complete_c5_verify_system_browser(
-                verify_url="https://www.c5game.com/csgo/123/item/sell",
-                user_alert=lambda title, message: alerts.append((title, message)),
-            )
-
-        self.assertEqual(len(alerts), 1)
-        self.assertIn("安全验证", alerts[0][0])
-        self.assertEqual(
-            launch_mock.call_args.kwargs["url"],
-            "https://www.c5game.com/csgo/123/item/sell",
-        )
-        self.assertIsNotNone(launch_mock.call_args.kwargs["net_log_path"])
-        self.assertEqual(save_auth.call_count, 1)
-        save_headers.assert_called_once_with({"x-device-id": "verified-device-id"})
 
     def test_eco_filters_and_stops_at_price_cap(self) -> None:
         template = get_name_map()["USP消音版 | 破颚者"]
@@ -1528,7 +1483,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(enter_count, 2)
         self.assertEqual(close_count, 2)
 
-    def test_c5_http_risk_opens_verification_and_retries_http(self) -> None:
+    def test_c5_browser_risk_pauses_platform(self) -> None:
         from core.market_candidates import C5AccessGateError, C5PlatformPausedError
         from core import market_candidates as mc
 
@@ -1542,48 +1497,24 @@ class MetadataTests(unittest.TestCase):
             min_float=source.min_float,
             max_float=source.max_float,
         )
-        recovered_row = {
-            "goods_name": "USP消音版 | 破颚者",
-            "float_value": 0.164862,
-            "price": 18.5,
-            "goods_id": "c5:verified:0.164862",
-            "platform": "c5",
-            "listing_id": "verified",
-            "purchase_link": "https://www.c5game.com/",
-        }
-        alerts: list[tuple[str, str]] = []
         with patch(
             "core.market_candidates._c5_auth",
             return_value=("c5token=abc12345token; path=/", "c5-access-token-value"),
         ), patch(
-            "core.market_candidates._fetch_c5_via_search_api",
-            side_effect=[
-                C5AccessGateError("请完成安全验证", needs_verify=True),
-                [recovered_row],
-            ],
-        ) as http_fetch, patch(
-            "core.market_candidates._resolve_c5_access_gate",
-        ) as resolve_gate, patch(
             "core.market_candidates._fetch_c5_via_browser",
-        ) as browser_fetch:
-            rows = fetch_c5_candidates(
-                template=template,
-                display_name="USP消音版 | 破颚者",
-                min_wear=0.15,
-                max_wear=0.18,
-                max_pages=1,
-                request_interval=0,
-                extra_ids=[1098059387020423168],
-                user_alert=lambda title, message: alerts.append((title, message)),
-            )
-        self.assertEqual([row["listing_id"] for row in rows], ["verified"])
-        self.assertEqual(http_fetch.call_count, 2)
-        self.assertEqual(resolve_gate.call_count, 1)
-        self.assertEqual(browser_fetch.call_count, 0)
-        resolve_kwargs = resolve_gate.call_args.kwargs
-        self.assertIn("1098059387020423168", resolve_kwargs["verify_url"])
-        self.assertIsNotNone(resolve_kwargs["user_alert"])
-        self.assertEqual(alerts, [])
+            side_effect=C5PlatformPausedError("C5GAME 采集失败，本轮已停止该平台"),
+        ):
+            with self.assertRaises(C5PlatformPausedError) as raised:
+                fetch_c5_candidates(
+                    template=template,
+                    display_name="USP消音版 | 破颚者",
+                    min_wear=0.15,
+                    max_wear=0.18,
+                    max_pages=1,
+                    request_interval=0,
+                    extra_ids=[1098059387020423168],
+                )
+        self.assertIn("停止", str(raised.exception))
 
         class FakeCollector:
             def ensure_open(self, **_kwargs):
@@ -1607,8 +1538,7 @@ class MetadataTests(unittest.TestCase):
                     max_pages=1,
                     request_interval=0,
                 )
-        # The low-level browser collector only reports the gate; the top-level
-        # HTTP-first router owns the verification popup and retry.
+        # Failures stop immediately — no verify popup / retry.
         self.assertEqual(verify_mock.call_count, 0)
 
     def test_c5_login_validation_uses_platform_response(self) -> None:

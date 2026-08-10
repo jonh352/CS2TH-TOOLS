@@ -140,7 +140,6 @@ def collect_candidates_parallel(
     progress,
     cancel_check,
     silent: bool = False,
-    user_alert=None,
 ) -> tuple[list[dict], list[str], dict[str, list[dict]]]:
     """Collect in waves: BUFF∥悠悠 first, then C5∥ECO (each provider still serial).
 
@@ -202,7 +201,6 @@ def collect_candidates_parallel(
                                 cancel_check=cancel_check,
                                 silent=silent,
                                 unit_price_cny=material.get("unit_price_cny"),
-                                user_alert=user_alert,
                             )
                         )
                     except CollectionCancelled:
@@ -301,7 +299,6 @@ def collect_candidates_parallel(
 
 class MaterialCollectionWorker(QThread):
     progress = Signal(str)
-    user_alert = Signal(str, str)
     completed = Signal(object, str, object)
 
     def __init__(
@@ -335,7 +332,6 @@ class MaterialCollectionWorker(QThread):
             progress=self.progress.emit,
             cancel_check=self._is_stop_requested,
             silent=self.silent,
-            user_alert=lambda title, message: self.user_alert.emit(title, message),
         )
 
         message = "；".join(errors)

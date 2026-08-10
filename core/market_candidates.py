@@ -2759,11 +2759,10 @@ def fetch_c5_candidates(
     extra_ids: list[int] | None = None,
     cancel_check: CancelCheck = None,
     max_unit_price: float | None = None,
-    user_alert: Callable[[str, str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect C5 listings over HTTP, with a real-browser compatibility fallback.
+    """Collect C5 exact-wear listings via minimized system-browser sniffing.
 
-    Human verification opens the real C5 page and retries HTTP after the gate clears.
+    On failure / risk-control, pause C5 for the rest of this run with no retry.
     """
     wear_windows = _split_wear_windows(min_wear, max_wear)
     raise_if_cancelled(cancel_check)
@@ -2794,85 +2793,19 @@ def fetch_c5_candidates(
             continue
         if progress:
             progress(f"C5GAME · 磨损 {window_low:g}–{window_high:g}")
-        fetch_kwargs = {
-            "ids": ids,
-            "display_name": display_name,
-            "min_wear": window_low,
-            "max_wear": window_high,
-            "max_pages": max_pages,
-            "request_interval": request_interval,
-            "progress": progress,
-            "cancel_check": cancel_check,
-            "max_unit_price": price_cap,
-        }
-
-        def _http_fetch() -> list[dict[str, Any]]:
-            current_cookie, current_token = _c5_auth()
-            if not current_cookie and not current_token:
-                raise RuntimeError("C5GAME 登录已失效，请重新登录后再采集")
-            return _fetch_c5_via_search_api(
-                cookie=current_cookie,
-                token=current_token,
-                **fetch_kwargs,
-            )
-
-        def _verify_then_retry(gate_error: BaseException) -> list[dict[str, Any]]:
-            first_id = int(ids[0])
-            verify_url = (
-                f"https://www.c5game.com/csgo/{first_id}/item/sell"
-                f"?minWear={window_low:.8f}&maxWear={window_high:.8f}"
-            )
-            _resolve_c5_access_gate(
-                progress=progress,
-                cancel_check=cancel_check,
-                request_interval=request_interval,
-                gate_error=gate_error,
-                user_alert=user_alert,
-                verify_url=verify_url,
-            )
-            try:
-                return _http_fetch()
-            except CollectionCancelled:
-                raise
-            except Exception as retry_error:  # noqa: BLE001
-                raise C5PlatformPausedError(
-                    "C5GAME 验证后 HTTP 采集仍不可用，本轮已暂停该平台："
-                    f"{retry_error}"
-                ) from retry_error
-
-        try:
-            rows = _http_fetch()
-        except CollectionCancelled:
-            raise
-        except Exception as http_error:  # noqa: BLE001
-            if "登录已失效" in str(http_error):
-                raise
-            if _c5_is_access_gate_error(http_error):
-                rows = _verify_then_retry(http_error)
-            else:
-                if progress:
-                    progress(
-                        "C5GAME · HTTP 采集暂时不可用，正在启用真实浏览器兼容采集…"
-                    )
-                try:
-                    rows = _fetch_c5_via_browser(
-                        cookie=cookie,
-                        token=token,
-                        **fetch_kwargs,
-                    )
-                except CollectionCancelled:
-                    raise
-                except Exception as browser_error:  # noqa: BLE001
-                    if _c5_is_access_gate_error(browser_error):
-                        from core.c5_browser_collect import close_c5_browser_collector
-
-                        close_c5_browser_collector()
-                        rows = _verify_then_retry(browser_error)
-                    else:
-                        raise C5PlatformPausedError(
-                            "C5GAME HTTP 与浏览器兼容采集均失败，本轮已暂停该平台："
-                            f"HTTP={http_error}；浏览器={browser_error}"
-                        ) from browser_error
+        rows = _fetch_c5_via_browser(
+            ids=ids,
+            display_name=display_name,
+            min_wear=window_low,
+            max_wear=window_high,
+            max_pages=max_pages,
+            request_interval=request_interval,
+            cookie=cookie,
+            token=token,
+            progress=progress,
+            cancel_check=cancel_check,
+            max_unit_price=price_cap,
+        )
         window_kept = 0
         for row in rows:
             if not _in_range(float(row.get("float_value") or -1), min_wear, max_wear):
@@ -2925,22 +2858,20 @@ def _c5_error_needs_verify(exc: BaseException | None) -> bool:
 
 
 def _c5_is_access_gate_error(exc: BaseException) -> bool:
-    if isinstance(exc, C5AccessGateError):
+    if isinstance(exc, (C5AccessGateError, C5PlatformPausedError)):
         return True
     text = str(exc)
     return any(
         marker in text
         for marker in (
+            "暂时不可用",
             "风控",
             "频率",
             "429",
             "滑块",
             "安全验证",
-            "安全检查",
-            "虚拟设备",
-            "异常网络",
-            "人机",
-            "captcha",
+            "napi 不可用",
+            "网页接口",
         )
     )
 
@@ -2971,13 +2902,9 @@ def _complete_c5_verify_system_browser(
     *,
     progress: Callable[[str], None] | None = None,
     cancel_check: CancelCheck = None,
-    user_alert: Callable[[str, str], None] | None = None,
-    verify_url: str = "",
 ) -> None:
     """Open a real Chrome/Edge window (not Playwright) for C5 security checks."""
     from core.market_external_browser import (
-        c5_netlog_login_ready,
-        harvest_c5_netlog_headers,
         harvest_profile_cookies,
         launch_system_browser,
         wait_browser_closed,
@@ -2986,20 +2913,6 @@ def _complete_c5_verify_system_browser(
     raise_if_cancelled(cancel_check)
     profile = CACHE_DIR / "market_browser_profiles" / "c5"
     profile.mkdir(parents=True, exist_ok=True)
-    net_log = profile.parent / "c5-verify-netlog.json"
-    try:
-        net_log.unlink(missing_ok=True)
-    except OSError:
-        pass
-    if user_alert:
-        try:
-            user_alert(
-                "C5GAME 需要安全验证",
-                "C5GAME 采集触发了风控，已打开真实浏览器。\n\n"
-                "请在浏览器中完成滑块或安全验证；验证通过后采集会自动继续。",
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("C5 verification user alert failed: %s", exc)
     if progress:
         progress(
             "C5GAME · 检测到安全验证，已打开系统浏览器；"
@@ -3008,19 +2921,14 @@ def _complete_c5_verify_system_browser(
     try:
         proc = launch_system_browser(
             profile_dir=profile,
-            url=str(verify_url or "").strip() or "https://www.c5game.com/",
-            net_log_path=net_log,
+            url="https://www.c5game.com/",
         )
     except Exception as exc:  # noqa: BLE001
-        try:
-            net_log.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise C5PlatformPausedError(f"无法打开 C5 验证窗口：{exc}") from exc
 
     def _auto_close() -> bool:
         raise_if_cancelled(cancel_check)
-        return c5_netlog_login_ready(net_log)
+        return _c5_access_gate_probe_ok()
 
     closed = wait_browser_closed(
         proc,
@@ -3031,10 +2939,6 @@ def _complete_c5_verify_system_browser(
         auto_close_message="已检测到 C5 接口恢复，正在关闭验证窗口…",
     )
     if not closed:
-        try:
-            net_log.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise C5PlatformPausedError("等待 C5 安全验证超时")
     time.sleep(1.0)
     try:
@@ -3044,10 +2948,6 @@ def _complete_c5_verify_system_browser(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("C5 验证后读取 Cookie 失败：%s", exc)
-        try:
-            net_log.unlink(missing_ok=True)
-        except OSError:
-            pass
         return
     cookie = _c5_cookie_header_from_items(cookies)
     token = ""
@@ -3068,15 +2968,6 @@ def _complete_c5_verify_system_browser(
             save_c5_auth(cookie, token)
         except Exception as exc:  # noqa: BLE001
             logger.warning("C5 验证后保存凭证失败：%s", exc)
-    try:
-        client_headers = harvest_c5_netlog_headers(net_log)
-        if client_headers:
-            save_c5_client_headers(client_headers)
-    finally:
-        try:
-            net_log.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _resolve_c5_access_gate(
@@ -3085,8 +2976,6 @@ def _resolve_c5_access_gate(
     cancel_check: CancelCheck = None,
     request_interval: float = 5.0,
     gate_error: BaseException | None = None,
-    user_alert: Callable[[str, str], None] | None = None,
-    verify_url: str = "",
 ) -> None:
     """Clear C5 access limits without unnecessary popups.
 
@@ -3116,8 +3005,6 @@ def _resolve_c5_access_gate(
         _complete_c5_verify_system_browser(
             progress=progress,
             cancel_check=cancel_check,
-            user_alert=user_alert,
-            verify_url=verify_url,
         )
         if _c5_access_gate_probe_ok():
             if progress:
@@ -3318,11 +3205,10 @@ def _resolve_eco_access_gate(
     cancel_check: CancelCheck = None,
     request_interval: float = 3.0,
     gate_error: BaseException | None = None,
-    user_alert: Callable[[str, str], None] | None = None,
 ) -> None:
     """Clear ECO access limits without unnecessary popups.
 
-    - Clear slider / login challenge → open headed window (visible), wait for user.
+    - Clear slider signal → open headed window, wait for user, auto-close.
     - Otherwise → silent wait/retry up to 3 rounds; still blocked → pause platform.
     """
     interval = max(3.0, float(request_interval or 3.0))
@@ -3346,7 +3232,7 @@ def _resolve_eco_access_gate(
 
     if needs_slider:
         if progress:
-            progress("ECOSteam · 检测到访问校验，正在打开 ECO 窗口…")
+            progress("ECOSteam · 检测到滑块验证，验证窗口已开到任务栏…")
         from core.market_access_session import close_access_sessions, get_access_session
 
         session = get_access_session("eco")
@@ -3355,28 +3241,27 @@ def _resolve_eco_access_gate(
                 progress=progress,
                 cancel_check=cancel_check,
                 require_slider=True,
-                user_alert=user_alert,
             )
             outcome = str(raw or "cleared")
         except CollectionCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning("ECOSteam 访问校验失败：%s", exc)
+            logger.warning("ECOSteam 滑块验证失败：%s", exc)
             raise EcoPlatformPausedError(
-                f"ECOSteam 访问校验未完成，本轮已暂停该平台采集：{exc}"
+                f"ECOSteam 滑块验证未完成，本轮已暂停该平台采集：{exc}"
             ) from exc
         finally:
             close_access_sessions("eco")
         if outcome == "cleared" or _eco_access_gate_probe_ok():
             if progress:
-                progress("ECOSteam · 访问校验已通过，继续采集…")
+                progress("ECOSteam · 滑块验证通过，继续采集…")
             return
         logger.info(
-            "ECOSteam 验证窗口未通过（outcome=%s），本轮暂停平台",
+            "ECOSteam 滑块窗口未通过（outcome=%s），本轮暂停平台",
             outcome,
         )
         raise EcoPlatformPausedError(
-            "ECOSteam 访问校验未通过（请完成滑块或重新登录），本轮已暂停该平台采集"
+            "ECOSteam 滑块验证未通过，本轮已暂停该平台采集"
         )
 
     if _silent_wait_rounds("接口访问受限（无需滑块）"):
@@ -3406,7 +3291,6 @@ def fetch_eco_candidates(
     cancel_check: CancelCheck = None,
     silent: bool = False,
     max_unit_price: float | None = None,
-    user_alert: Callable[[str, str], None] | None = None,
 ) -> list[dict[str, Any]]:
     wear_windows = _split_wear_windows(min_wear, max_wear)
     if not wear_windows:
@@ -3567,7 +3451,6 @@ def fetch_eco_candidates(
             cancel_check=cancel_check,
             request_interval=request_interval,
             gate_error=gate_error,
-            user_alert=user_alert,
         )
     except CollectionCancelled:
         raise
@@ -3608,10 +3491,9 @@ def fetch_exact_wear_candidates(
     template = kwargs.get("template")
     extra_ids = _coerce_positive_ids(kwargs.get("extra_ids"))
     kwargs["extra_ids"] = extra_ids
-    # Routing options not shared by every fetcher.
+    # ``silent`` / ``unit_price_cny`` are routing options, not shared by every fetcher.
     silent = bool(kwargs.pop("silent", False))
     unit_price_cny = kwargs.pop("unit_price_cny", None)
-    user_alert = kwargs.pop("user_alert", None)
     if provider in {"buff", "yyyp", "c5"}:
         price_cap = _collection_max_unit_price(unit_price_cny)
     elif provider == "eco":
@@ -3649,13 +3531,9 @@ def fetch_exact_wear_candidates(
     elif provider == "yyyp":
         result = fetch_youpin_candidates(**kwargs)
     elif provider == "c5":
-        result = fetch_c5_candidates(user_alert=user_alert, **kwargs)
+        result = fetch_c5_candidates(**kwargs)
     elif provider == "eco":
-        result = fetch_eco_candidates(
-            silent=silent,
-            user_alert=user_alert,
-            **kwargs,
-        )
+        result = fetch_eco_candidates(silent=silent, **kwargs)
     else:
         raise RuntimeError(f"平台 {provider} 暂不支持精确磨损挂单采集")
     raise_if_cancelled(cancel_check)

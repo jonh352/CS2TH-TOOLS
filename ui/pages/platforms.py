@@ -65,7 +65,7 @@ from core.special_wear_names import get_skin_full_names_without_appearance
 from ui.components import panel
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from ui.widgets.eliding_label import ElidingLabel
-from ui.feedback import ask_confirmation, show_alert
+from ui.feedback import ask_confirmation
 from ui.widgets.toast import show_toast
 from ui.widgets.wear_interval_bar import WearIntervalBar, WearRangeSelector
 from ui.workers.recipe_bridge import RecipeAlternativesThread, RecipeLoadThread
@@ -311,8 +311,8 @@ class PlatformPage(QWidget):
         self.silent_collection.setToolTip(
             "勾选：不自动打开商品页；C5 用最小化系统窗口拉取挂单（采完即关），"
             "失败或风控则本轮停止 C5、不重试；"
-            "ECO 遇访问限制时：有明确验证信号才打开可见窗口（滑块或重新登录），"
-            "否则静默重试最多 3 轮，仍失败则本轮暂停该平台。"
+            "ECO 遇访问限制时：有明确验证信号才弹窗，否则静默重试最多 3 轮，"
+            "仍失败则本轮暂停该平台，其他平台采完后可询问是否重试。"
             "不勾选：可额外打开材料商品页"
         )
         self.silent_collection.toggled.connect(self._save_collection_settings)
@@ -1599,10 +1599,6 @@ class PlatformPage(QWidget):
         )
         worker.progress.connect(self.special_collection_status.setText)
         worker.progress.connect(self._set_collection_status_text)
-        worker.user_alert.connect(
-            self._show_collection_user_alert,
-            Qt.ConnectionType.BlockingQueuedConnection,
-        )
         worker.completed.connect(self._special_collection_completed)
         worker.finished.connect(worker.deleteLater)
         self._special_worker = worker
@@ -2005,10 +2001,6 @@ class PlatformPage(QWidget):
             return None
         return self.name_edit.text().strip(), url
 
-    def _show_collection_user_alert(self, title: str, message: str) -> None:
-        """Blocking alert for collection workers (e.g. ECO slider / re-login)."""
-        show_alert(self, str(title or ""), str(message or ""))
-
     def _collection_finished_idle(self) -> bool:
         """True when a prior run finished and the start button would begin a new one."""
         if self._collection_running:
@@ -2192,10 +2184,6 @@ class PlatformPage(QWidget):
                 parent=self,
             )
             worker.progress.connect(self._set_collection_status_text)
-            worker.user_alert.connect(
-                self._show_collection_user_alert,
-                Qt.ConnectionType.BlockingQueuedConnection,
-            )
             worker.completed.connect(self._material_collection_scraped)
             worker.finished.connect(worker.deleteLater)
             self._material_worker = worker

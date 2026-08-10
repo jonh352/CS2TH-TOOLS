@@ -4,8 +4,8 @@ When HTTP collection is blocked (client-version gate / slider), open the same
 login browser profile in a visible window so the user can finish verification.
 Successful sell-list XHRs from that window are reused for the rest of the run.
 
-ECO challenge windows stay visible: the user may need to finish a slider **or**
-re-login when the APP session is already expired.
+ECO slider windows start minimized to the taskbar; when a real slider is
+detected the window is restored and the assistant prompts the user to complete it.
 """
 
 from __future__ import annotations
@@ -29,15 +29,6 @@ from core.steam.launch import focus_single_page, launch_persistent_chromium_cont
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str], None] | None
-UserAlertCb = Callable[[str, str], None] | None
-
-ECO_ACCESS_GATE_ALERT_TITLE = "ECOSteam 需要处理"
-ECO_ACCESS_GATE_ALERT_MESSAGE = (
-    "ECO 采集遇到访问限制，已打开 ECO 窗口。请根据窗口里的实际情况处理：\n\n"
-    "① 若出现滑块 / 安全验证：请在该窗口完成验证；\n"
-    "② 若显示未登录或登录失效：请在该窗口重新登录 ECO。\n\n"
-    "处理完成后采集会自动继续；也可关闭该窗口以结束本次 ECO 验证。"
-)
 
 
 def _profile_dir(provider: str) -> Path:
@@ -465,47 +456,43 @@ class MarketAccessSession:
         timeout_ms: int = 300_000,
         slider_detect_ms: int = 4_000,
         require_slider: bool = False,
-        user_alert: UserAlertCb = None,
     ) -> str:
-        """Open a headed ECO window for slider verification or re-login.
+        """Open a headed window to handle an ECO slider challenge.
 
         Returns:
-            ``"cleared"`` — gate cleared (slider / re-login / already ok) and cookies saved.
-            ``"no_slider"`` — short probe found neither slider nor clearance
-            (only when ``require_slider`` is false).
+            ``"cleared"`` — slider finished (or gate already clear) / cookies saved.
+            ``"no_slider"`` — no slider appeared (only when ``require_slider`` is false,
+            or the challenge never showed up before timeout).
         """
         raise_if_cancelled(cancel_check)
-        if user_alert:
-            try:
-                user_alert(ECO_ACCESS_GATE_ALERT_TITLE, ECO_ACCESS_GATE_ALERT_MESSAGE)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("ECO access-gate user alert failed: %s", exc)
-        # Suppress generic open text; we drive status below.
+        # Suppress generic "please complete in popup" open text; we drive status below.
         self.open(progress=None)
         assert self._page is not None and self._context is not None
         page = self._page
-        _restore_access_window(page)
+        # Keep the ECO verify browser on the taskbar until a real slider shows up.
+        _minimize_access_window(page)
         if progress:
-            progress(
-                "ECOSteam · 已打开验证窗口：请完成滑块验证，或重新登录 ECO…"
-            )
+            if require_slider:
+                progress(
+                    "ECOSteam · 验证窗口已最小化到任务栏，正在等待滑块出现…"
+                )
+            else:
+                progress("ECOSteam · 正在后台检查是否出现滑块验证…")
         page.goto(
             "https://www.ecosteam.cn/",
             wait_until="domcontentloaded",
             timeout=60_000,
         )
-        _restore_access_window(page)
+        _minimize_access_window(page)
         opened_at = time.monotonic()
-        # Interactive path waits the full timeout so the user can re-login too.
-        if require_slider:
-            deadline = opened_at + max(30.0, timeout_ms / 1000.0)
-        else:
-            deadline = opened_at + max(1.0, slider_detect_ms / 1000.0)
+        # When API already said slider is required, wait longer for it to appear.
+        detect_ms = 60_000 if require_slider else slider_detect_ms
+        detect_until = opened_at + max(1.0, detect_ms / 1000.0)
+        deadline = time.monotonic() + max(30.0, timeout_ms / 1000.0)
         last_progress = 0.0
         last_probe = 0.0
         last_cookie = ""
         saw_slider = False
-        saw_login = False
 
         def _read_cookie() -> str:
             try:
@@ -538,56 +525,24 @@ class MarketAccessSession:
                 html = ""
             return "frequent_slider" in html
 
-        def _on_login_page() -> bool:
-            href = str(page.url or "").lower()
-            if "frequent_slider" in href:
-                return False
-            if any(
-                marker in href
-                for marker in ("/login", "signin", "passport", "oauth", "authorize")
-            ):
-                return True
-            try:
-                html = (page.content() or "").lower()
-            except Exception:
-                return False
-            if "frequent_slider" in html:
-                return False
-            return any(
-                marker in html
-                for marker in (
-                    "请登录",
-                    "立即登录",
-                    "扫码登录",
-                    "账号登录",
-                    "登录/注册",
-                    "登录失效",
-                    "重新登录",
-                )
-            )
-
         def _probe_ok() -> bool:
             from core.market_candidates import _eco_access_gate_probe_ok
 
             return bool(_eco_access_gate_probe_ok())
 
-        while time.monotonic() < deadline:
+        # Phase 1: wait for slider (or early probe clear).
+        while time.monotonic() < detect_until:
             raise_if_cancelled(cancel_check)
             if not self._context.pages:
                 _save_cookie(last_cookie)
-                if _probe_ok() or last_cookie:
-                    return "cleared"
-                return "no_slider"
+                return "cleared" if last_cookie else "no_slider"
 
             cookie = _read_cookie()
             if cookie:
                 last_cookie = cookie
-            on_slider = _on_slider_page()
-            on_login = (not on_slider) and _on_login_page()
-            if on_slider:
+            if _on_slider_page():
                 saw_slider = True
-            if on_login:
-                saw_login = True
+                break
 
             now = time.monotonic()
             if now - last_probe >= 1.5:
@@ -595,43 +550,65 @@ class MarketAccessSession:
                 _save_cookie(last_cookie)
                 if _probe_ok():
                     if progress:
-                        if saw_slider:
-                            progress(
-                                "ECOSteam · 滑块验证完成，关闭窗口并继续采集…"
-                            )
-                        elif saw_login:
-                            progress(
-                                "ECOSteam · 登录已恢复，关闭窗口并继续采集…"
-                            )
-                        else:
-                            progress("ECOSteam · 接口已恢复，继续采集…")
+                        progress("ECOSteam · 接口已恢复，无需滑块…")
                     return "cleared"
-
-            if progress and now - last_progress >= 3.0:
-                _restore_access_window(page)
-                if on_slider:
-                    progress(
-                        "ECOSteam · 请在已打开的窗口中拖动完成滑块验证…"
-                    )
-                elif on_login:
-                    progress(
-                        "ECOSteam · 检测到未登录：请在已打开的窗口中重新登录 ECO…"
-                    )
-                else:
-                    progress(
-                        "ECOSteam · 请在已打开的窗口中完成滑块验证，或重新登录 ECO…"
-                    )
+            if progress and require_slider and now - last_progress >= 3.0:
+                progress(
+                    "ECOSteam · 验证窗口在任务栏；等待滑块页面出现…"
+                )
                 last_progress = now
             page.wait_for_timeout(400)
 
-        _save_cookie(last_cookie)
-        if require_slider:
-            raise RuntimeError(
-                "等待 ECOSteam 处理超时：请在已打开的窗口完成滑块验证或重新登录后保持页面打开"
-            )
+        if not saw_slider:
+            if progress:
+                progress("ECOSteam · 未检测到滑块，关闭窗口…")
+            _save_cookie(last_cookie)
+            return "no_slider"
+
+        # Phase 2: real slider — restore taskbar window and prompt in the app.
+        _restore_access_window(page)
         if progress:
-            progress("ECOSteam · 未检测到需处理的验证，关闭窗口…")
-        return "no_slider"
+            progress(
+                "ECOSteam · 检测到滑块：已打开任务栏窗口，请完成滑动验证；"
+                "完成后窗口会自动关闭并继续采集…"
+            )
+        while time.monotonic() < deadline:
+            raise_if_cancelled(cancel_check)
+            if not self._context.pages:
+                _save_cookie(last_cookie)
+                return "cleared"
+
+            cookie = _read_cookie()
+            if cookie:
+                last_cookie = cookie
+            on_slider = _on_slider_page()
+            now = time.monotonic()
+
+            if not on_slider:
+                _save_cookie(last_cookie)
+                if now - last_probe >= 1.5:
+                    last_probe = now
+                    if _probe_ok():
+                        if progress:
+                            progress(
+                                "ECOSteam · 滑块验证完成，关闭窗口并继续采集…"
+                            )
+                        return "cleared"
+
+            if progress and now - last_progress >= 3.0:
+                if on_slider:
+                    _restore_access_window(page)
+                    progress(
+                        "ECOSteam · 请在已打开的窗口中拖动完成滑块验证…"
+                    )
+                else:
+                    progress("ECOSteam · 滑块已完成，正在确认接口…")
+                last_progress = now
+            page.wait_for_timeout(500)
+
+        raise RuntimeError(
+            "等待 ECOSteam 滑块验证超时：请在任务栏打开的窗口完成滑块后保持页面打开"
+        )
 
 
 _SESSIONS: dict[str, MarketAccessSession] = {}
