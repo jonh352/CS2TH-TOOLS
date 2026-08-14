@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame
 
 from core.collected_json import list_collected_json, save_collected_json
 from core.data_utils import QUALITY_MAP
@@ -140,16 +140,89 @@ class MaterialCollectionFlowTests(unittest.TestCase):
         self.assertIn("已停止采集", page.collection_status.text())
         self.assertFalse(page.collection_import_button.isHidden())
 
-    def test_special_collection_uses_same_completion_actions(self) -> None:
+    def test_special_collection_keeps_candidates_internal_without_solution(self) -> None:
         page = PlatformPage()
+        page.show_special_wear_materials(
+            {
+                "source": "special_wear",
+                "target_name": "AK-47 | 传承",
+                "target_paint_index": "123",
+                "target_min_wear": 0.13,
+                "target_max_wear": 0.14,
+                "slot_count": 10,
+                "materials": [
+                    {
+                        "name": "AK-47 | 夜愿",
+                        "min_wear": 0.1,
+                        "max_wear": 0.2,
+                        "wear_value": 0.15,
+                    }
+                ],
+            }
+        )
         page._collection_started_at = 20.0
         with patch("ui.pages.platforms.time.monotonic", return_value=23.2):
             page._special_collection_completed([_candidate()], [], "")
-        self.assertIn("BUFF 1 条｜悠悠 0 条｜C5 0 条｜ECO 0 条，共 1 条", page.collection_status.text())
+        self.assertIn("候选池 1 件", page.collection_status.text())
+        self.assertIn("未找到能命中特殊磨损的10件组合", page.collection_status.text())
         self.assertIn("共计 3.2 秒", page.collection_status.text())
         self.assertEqual(page.collection_status.property("collectionState"), "complete")
-        self.assertFalse(page.collection_import_button.isHidden())
-        self.assertFalse(page.collection_save_json_button.isHidden())
+        self.assertTrue(page.collection_import_button.isHidden())
+        self.assertTrue(page.collection_save_json_button.isHidden())
+
+    def test_special_payload_always_routes_to_smart_solver(self) -> None:
+        page = PlatformPage()
+        page._special_payload = {
+            "source": "special_wear",
+            "smart_solve": True,
+            "target_name": "AK-47 | 传承",
+            "target_paint_index": "",
+            "materials": [{"name": "AK-47 | 夜愿"}],
+        }
+        page._set_mode(1)
+        with patch.object(page, "_start_special_collection") as special_start, patch.object(
+            page, "_start_collection"
+        ) as ordinary_start:
+            page._toggle_collection()
+        special_start.assert_called_once_with()
+        ordinary_start.assert_not_called()
+
+    def test_special_collection_renders_grouped_solution_cards(self) -> None:
+        page = PlatformPage()
+        page.show_special_wear_materials(
+            {
+                "source": "special_wear",
+                "target_name": "AK-47 | 传承",
+                "target_paint_index": "123",
+                "target_min_wear": 0.13,
+                "target_max_wear": 0.14,
+                "slot_count": 5,
+                "materials": [
+                    {
+                        "name": "AK-47 | 夜愿",
+                        "min_wear": 0.1,
+                        "max_wear": 0.2,
+                        "wear_value": 0.15,
+                    }
+                ],
+            }
+        )
+        page._collection_started_at = 10.0
+        recipe = {"cost": 10.0, "substrates_display": [_candidate(i) for i in range(5)]}
+        with patch("ui.pages.platforms.time.monotonic", return_value=12.0), patch.object(
+            page, "_special_solution_card", return_value=QFrame()
+        ):
+            page._special_collection_completed(
+                [_candidate(i) for i in range(5)], [recipe], ""
+            )
+
+        self.assertEqual(len(page._special_solution_recipes), 1)
+        self.assertFalse(page.special_results_title.isHidden())
+        self.assertEqual(page.special_results_layout.count(), 1)
+        self.assertIn("智能配单结果 · 1 组", page.special_results_title.text())
+        self.assertIn("找到 1 组可购买方案", page.collection_status.text())
+        self.assertTrue(page.collection_import_button.isHidden())
+        self.assertTrue(page.collection_save_json_button.isHidden())
 
     def test_shared_text_prompt_is_wide_and_uses_chinese_actions(self) -> None:
         dialog = create_wide_text_input_dialog(
@@ -160,7 +233,7 @@ class MaterialCollectionFlowTests(unittest.TestCase):
         )
         self.assertGreaterEqual(dialog.minimumWidth(), 520)
         self.assertGreaterEqual(dialog.minimumHeight(), 180)
-        self.assertEqual(dialog.textValue(), "https://cs2th.cn/recipe/test")
+        self.assertEqual(dialog.value(), "https://cs2th.cn/recipe/test")
 
     def test_saved_recipe_row_has_card_spacing(self) -> None:
         row = _SavedRecipeRow(

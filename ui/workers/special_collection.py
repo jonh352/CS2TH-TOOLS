@@ -6,6 +6,7 @@ from threading import Event
 
 from PySide6.QtCore import QThread, Signal
 
+from core.alchemy_calc import ComputationCancelled
 from core.alchemy_special_wear import compute_special_wear_recipes
 from core.collection_cancel import CollectionCancelled
 from ui.workers.material_collection import collect_candidates_parallel
@@ -74,6 +75,28 @@ class SpecialCollectionWorker(QThread):
             f"候选池共 {len(candidates)} 件，"
             f"正在组合最省成本的{self.slot_count}件…"
         )
+        # Candidate collection and recipe solving are two distinct phases.  Reset
+        # the shared progress bar here so a completed scrape is not mistaken for
+        # a completed special-wear run while the 5/10-item search is still active.
+        self.progress_units.emit(0, 100)
+
+        def report_solve_progress(
+            _checked: int,
+            _total: int,
+            _nodes: int,
+            pct: int,
+            _round_idx: int,
+            _rounds: int,
+            _n_inst: int,
+            _k: int,
+        ) -> None:
+            progress_pct = max(0, min(100, int(pct)))
+            self.progress.emit(
+                f"正在从 {len(candidates)} 件候选中组合"
+                f"{self.slot_count}件特殊磨损方案 · {progress_pct}%"
+            )
+            self.progress_units.emit(progress_pct, 100)
+
         try:
             recipes, error = compute_special_wear_recipes(
                 candidates,
@@ -82,9 +105,10 @@ class SpecialCollectionWorker(QThread):
                 self.target_wear_low,
                 self.target_wear_high,
                 rounds=3,
+                progress_callback=report_solve_progress,
                 cancel_check=self._is_stop_requested,
             )
-        except CollectionCancelled:
+        except (CollectionCancelled, ComputationCancelled):
             self.completed.emit(candidates, [], "已停止采集")
             return
         except Exception as exc:  # noqa: BLE001 - keep the GUI worker alive
@@ -97,6 +121,7 @@ class SpecialCollectionWorker(QThread):
                 f"组合计算失败：{exc}",
             )
             return
+        self.progress_units.emit(100, 100)
         message = str(error or "")
         if errors:
             suffix = "；".join(errors)

@@ -168,6 +168,8 @@ class PlatformPage(QWidget):
         self._collection_link_done = 0
         self._special_payload: dict = {}
         self._special_slot_count = 10
+        self._special_solution_recipes: list[dict] = []
+        self._special_results_status_text = ""
         saved_settings = load_app_settings()
         raw_intervals = saved_settings.get("material_collection_intervals")
         self._saved_intervals = raw_intervals if isinstance(raw_intervals, dict) else {}
@@ -599,6 +601,17 @@ class PlatformPage(QWidget):
         self._special_collection_host.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._special_collection_host)
 
+        # Smart-solve results belong above the (potentially very long) source
+        # material list so users see the grouped 5/10-item recipes as soon as
+        # collection finishes.
+        self.special_results_title = QLabel("智能配单结果")
+        self.special_results_title.setObjectName("sectionTitle")
+        self.special_results_title.hide()
+        layout.addWidget(self.special_results_title)
+        self.special_results_layout = QVBoxLayout()
+        self.special_results_layout.setSpacing(10)
+        layout.addLayout(self.special_results_layout)
+
         materials_frame, materials_outer = panel(page)
         materials_frame.setObjectName("platformMaterialsPanel")
         materials_heading = QHBoxLayout()
@@ -622,13 +635,6 @@ class PlatformPage(QWidget):
         materials_outer.addWidget(self.special_materials_host, 1)
         layout.addWidget(materials_frame, 1)
 
-        self.special_results_title = QLabel("智能配单结果")
-        self.special_results_title.setObjectName("sectionTitle")
-        self.special_results_title.hide()
-        layout.addWidget(self.special_results_title)
-        self.special_results_layout = QVBoxLayout()
-        self.special_results_layout.setSpacing(10)
-        layout.addLayout(self.special_results_layout)
         return page
 
     def _build_custom_materials_empty(self, parent: QWidget) -> QFrame:
@@ -799,6 +805,22 @@ class PlatformPage(QWidget):
 
         # Idle: only show complete actions on the mode that produced results.
         self.collection_progress_widget.hide()
+        has_special_solutions = bool(
+            index == _MODE_CUSTOM
+            and self._custom_has_special_target()
+            and self._special_solution_recipes
+        )
+        if has_special_solutions:
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+            self._apply_collection_status_text(
+                self._special_results_status_text
+                or f"智能配单完成 · 找到 {len(self._special_solution_recipes)} 组方案",
+                state="complete",
+            )
+            self.collection_toggle_button.setEnabled(True)
+            self.collection_toggle_button.setText("重新采集并配单")
+            return
         has_results = bool(self._collected_items) and self._results_owner_mode == index
         if has_results:
             self.collection_import_button.show()
@@ -829,6 +851,13 @@ class PlatformPage(QWidget):
 
     def _custom_has_special_target(self) -> bool:
         """True when custom mode came from 特殊磨损 (can run smart solve)."""
+        source = str(self._special_payload.get("source") or "").strip().lower()
+        explicitly_special = source == "special_wear" or bool(
+            self._special_payload.get("smart_solve")
+        )
+        if explicitly_special:
+            return True
+        # Compatibility with payloads created by older builds.
         return bool(str(self._special_payload.get("target_paint_index") or "").strip())
 
     def _uncheck_candidate_source(self, provider: str) -> None:
@@ -1594,6 +1623,12 @@ class PlatformPage(QWidget):
         if not isinstance(payload, dict):
             return
         self._special_payload = dict(payload)
+        # Keep the special-wear workflow explicit after it enters the shared
+        # custom-collection page.  The target marker is also understood by older
+        # payloads, but this flag prevents it from ever falling through to the
+        # ordinary "collect rows only" worker.
+        self._special_payload["source"] = "special_wear"
+        self._special_payload["smart_solve"] = True
         self._special_slot_count = (
             5 if int(payload.get("slot_count") or 10) == 5 else 10
         )
@@ -1616,12 +1651,15 @@ class PlatformPage(QWidget):
             "开始采集将抓取挂单并智能配单（间隔至少 3 秒，C5 至少 5 秒）。"
         )
         self._collected_items = []
+        self._special_solution_recipes = []
+        self._special_results_status_text = ""
         self.collection_import_button.hide()
         self.collection_save_json_button.hide()
         self.collection_toggle_button.setEnabled(bool(materials))
         self.collection_toggle_button.setText("开始采集")
         self._set_collection_status_text(
-            "勾选已登录的候选源后开始；完成后可导入计算或保存为 JSON"
+            f"勾选已登录的候选源后开始；完成后将列出可炼出目标磨损的"
+            f"{self._special_slot_count}件组合"
         )
         self.special_solve_button.setEnabled(bool(materials))
         self.special_solve_button.setText(
@@ -1685,6 +1723,8 @@ class PlatformPage(QWidget):
         self.collection_import_button.hide()
         self.collection_save_json_button.hide()
         self._collected_items = []
+        self._special_solution_recipes = []
+        self._special_results_status_text = ""
         self._collection_started_at = time.monotonic()
         self._set_collection_status_text("正在抓取特殊磨损候选并智能配方…")
         self._show_collection_progress(done=0, total=max(1, len(materials) * len(providers)))
@@ -1752,15 +1792,10 @@ class PlatformPage(QWidget):
         self._collected_items = [
             dict(item) for item in candidate_rows if isinstance(item, dict)
         ]
-        status = (
-            f"采集完成 · {format_collection_platform_counts(self._collected_items)}，"
-            f"共计 {elapsed:.1f} 秒"
-        )
-        self._end_collection_owner(
-            keep_results=bool(self._collected_items),
-            status_text=status,
-        )
-        self._sync_collection_chrome_for_mode(self.mode_stack.currentIndex())
+        # In special-wear mode the raw listing pool is an implementation detail.
+        # Only complete 5/10-item solutions are user-facing results, matching the
+        # original dedicated special-wear collector.
+        self._end_collection_owner(keep_results=False)
         from collections import Counter
 
         counts = Counter(
@@ -1772,25 +1807,41 @@ class PlatformPage(QWidget):
             f"{key.upper()} {value}件" for key, value in counts.items()
         )
         if not recipe_rows:
-            self.special_collection_status.setText(
+            no_solution_status = (
                 f"候选池 {len(candidate_rows)} 件"
                 + (f"（{source_text}）" if source_text else "")
                 + (
                     f"；{message or f'未找到能命中特殊磨损的{self._special_slot_count}件组合'}"
                 )
+                + f"；共计 {elapsed:.1f} 秒"
             )
+            self._special_solution_recipes = []
+            self._special_results_status_text = no_solution_status
+            self.special_collection_status.setText(no_solution_status)
+            self.collection_import_button.hide()
+            self.collection_save_json_button.hide()
+            self._apply_collection_status_text(no_solution_status, state="complete")
             show_toast(
                 self,
                 f"没有找到可用的{self._special_slot_count}件组合",
                 style="warning",
             )
             return
-        self.special_collection_status.setText(
+        self._special_solution_recipes = [
+            dict(recipe) for recipe in recipe_rows if isinstance(recipe, dict)
+        ]
+        solved_status = (
             f"候选池 {len(candidate_rows)} 件"
             + (f"（{source_text}）" if source_text else "")
             + f"；找到 {len(recipe_rows)} 组可购买方案。"
             + (f" 部分来源提示：{message}" if message else "")
+            + f" 共计 {elapsed:.1f} 秒"
         )
+        self._special_results_status_text = solved_status
+        self.special_collection_status.setText(solved_status)
+        self.collection_import_button.hide()
+        self.collection_save_json_button.hide()
+        self._apply_collection_status_text(solved_status, state="complete")
         self.special_results_title.setText(
             f"智能配单结果 · {len(recipe_rows)} 组"
         )
@@ -2001,6 +2052,7 @@ class PlatformPage(QWidget):
             return "采集预设中没有可采集材料"
         display_title = str(title or "").strip() or "采集预设"
         self._special_payload = {
+            "source": "collection_preset",
             "materials": materials,
             "target_name": display_title,
             "target_paint_index": "",
@@ -2010,6 +2062,8 @@ class PlatformPage(QWidget):
             "from_preset": True,
         }
         self._special_slot_count = 10
+        self._special_solution_recipes = []
+        self._special_results_status_text = ""
         self.special_source_title.setText(f"{display_title} · 自定义采集")
         self.special_source_meta.setText(
             f"来自采集预设 · {len(materials)} 种材料；"

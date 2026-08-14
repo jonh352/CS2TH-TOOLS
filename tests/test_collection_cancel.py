@@ -11,9 +11,62 @@ from ui.workers.material_collection import (
     MaterialCollectionWorker,
     dedupe_candidates_keep_cheapest,
 )
+from ui.workers.special_collection import SpecialCollectionWorker
 
 
 class CollectionCancellationTests(unittest.TestCase):
+    def test_special_worker_groups_candidates_with_legacy_solver(self) -> None:
+        candidates = [
+            {
+                "platform": "buff",
+                "listing_id": str(index),
+                "goods_id": str(index),
+                "goods_name": "skin-a",
+                "float_value": 0.1 + index / 1000,
+                "price": float(index + 1),
+            }
+            for index in range(5)
+        ]
+        recipe = {"cost": 15.0, "substrates_display": candidates}
+        worker = SpecialCollectionWorker(
+            materials=[{"name": "skin-a", "min_wear": 0.1, "max_wear": 0.2}],
+            providers=["buff"],
+            provider_intervals={"buff": 5},
+            target_paint_index="321",
+            target_wear_low=0.131,
+            target_wear_high=0.132,
+            slot_count=5,
+        )
+        emitted: list[tuple] = []
+        units: list[tuple[int, int]] = []
+        worker.completed.connect(
+            lambda rows, recipes, message: emitted.append((rows, recipes, message))
+        )
+        worker.progress_units.connect(lambda done, total: units.append((done, total)))
+
+        def fake_solve(rows, price_map, paint_index, low, high, **kwargs):
+            self.assertEqual(rows, candidates)
+            self.assertEqual(price_map, {})
+            self.assertEqual(paint_index, "321")
+            self.assertEqual((low, high), (0.131, 0.132))
+            self.assertEqual(kwargs["rounds"], 3)
+            kwargs["progress_callback"](0, 1, 0, 67, 1, 3, 5, 5)
+            return [recipe], None
+
+        with patch(
+            "ui.workers.special_collection.collect_candidates_parallel",
+            return_value=(candidates, [], {}),
+        ), patch(
+            "ui.workers.special_collection.compute_special_wear_recipes",
+            side_effect=fake_solve,
+        ):
+            worker.run()
+
+        self.assertEqual(emitted, [(candidates, [recipe], "")])
+        self.assertIn((0, 100), units)
+        self.assertIn((67, 100), units)
+        self.assertEqual(units[-1], (100, 100))
+
     def test_interruptible_wait_stops_immediately(self) -> None:
         with self.assertRaises(CollectionCancelled):
             interruptible_wait(30, lambda: True)
