@@ -43,7 +43,7 @@ from ui.dialog_topmost_support import (
 
 # --- 底物一条购买链接（与表格中带链接行一一对应）---------------------------------
 
-_QR_PX = 360
+_QR_PX = 200
 _QR_BOX = 6
 _QR_BORDER = 3
 _QR_INNER_PAD = 6
@@ -73,14 +73,15 @@ def normalize_purchase_url_key(url: str) -> str:
 
 def hint_for_platform(platform: str) -> str:
     p = (platform or "").strip().lower()
+    suffix = "或者点击下面蓝色字体进行网页购买"
     if p == "c5":
-        return "请使用相机或C5 APP扫码"
+        return f"请使用相机或C5 APP扫码{suffix}"
     elif p == "eco":
-        return "请使用相机或ECO APP扫码"
+        return f"请使用相机或ECO APP扫码{suffix}"
     elif p == "yyyp":
-        return "请使用相机扫码"
-    else: # buff
-        return "请使用相机扫码或打开链接后使用BUFF扫码"
+        return f"请使用相机扫码{suffix}"
+    else:  # buff
+        return f"请使用相机扫码或打开链接后使用BUFF扫码{suffix}"
 
 
 def _substrate_name_link_html(url: str, name: str) -> str:
@@ -90,13 +91,26 @@ def _substrate_name_link_html(url: str, name: str) -> str:
     if not display:
         return "—"
     if not u:
-        return html.escape(display, quote=False)
+        return (
+            '<html><head><style type="text/css">'
+            "body { margin: 0; font-size: 16px; font-weight: 700; }"
+            "</style></head><body>"
+            f"{html.escape(display, quote=False)}"
+            "</body></html>"
+        )
     esc = html.escape(display, quote=False)
     href = html.escape(u, quote=True)
-    # QLabel 内部 QTextDocument：全局 CSS 比 <a style> / 窗口 QSS 更可靠地去掉链接下划线
+    # QLabel 内部 QTextDocument：链接样式写在文档 CSS 里，突出网页购买入口
     return (
         '<html><head><style type="text/css">'
-        "a { text-decoration: none; }"
+        "body { margin: 0; }"
+        "a {"
+        "  text-decoration: none;"
+        "  color: #1d4ed8;"
+        "  font-size: 16px;"
+        "  font-weight: 700;"
+        "}"
+        "a:hover { color: #1e40af; text-decoration: underline; }"
         "</style></head><body>"
         f'<a href="{href}">{esc}</a>'
         "</body></html>"
@@ -309,16 +323,18 @@ class PurchaseQrDialog(QDialog):
 
         self._hint = _center_label("purchaseQrHint")
         root.addWidget(self._hint)
-        root.addSpacing(10)
+        root.addSpacing(14)
 
         self._name_lb = _center_label("purchaseQrSubstrate")
         self._name_lb.setTextFormat(Qt.TextFormat.RichText)
         self._name_lb.setOpenExternalLinks(True)
+        self._name_lb.setCursor(Qt.CursorShape.PointingHandCursor)
         root.addWidget(self._name_lb)
-        root.addSpacing(10)
+        root.addSpacing(6)
 
         self._wear_price_lb = _center_label("purchaseQrSubstrateMeta")
         root.addWidget(self._wear_price_lb)
+        root.addSpacing(14)
 
         inner = QFrame(box)
         inner.setObjectName("purchaseQrInner")

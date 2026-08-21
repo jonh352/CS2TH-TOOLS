@@ -31,6 +31,7 @@ _LOGIN_URLS = {
     "buff": "https://buff.163.com/account/login",
     "yyyp": "https://www.youpin898.com/",
     "c5": "https://www.c5game.com/login",
+    # ECO has no dedicated /login route; login is a homepage modal (.loginBtn).
     "eco": "https://www.ecosteam.cn/",
 }
 
@@ -744,6 +745,46 @@ def _finish_eco_login(
     }
 
 
+def _open_eco_login_layer(page) -> bool:
+    """Open ECO's homepage login/QR modal (site has no standalone login URL)."""
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=15_000)
+    except Exception:
+        pass
+    # Already signed-in chrome: do not force the modal.
+    try:
+        if page.locator(".nav-logining:not(.hide)").count() > 0:
+            return False
+    except Exception:
+        pass
+    try:
+        btn = page.locator(".loginBtn").first
+        btn.wait_for(state="visible", timeout=8_000)
+        btn.click(timeout=5_000)
+        return True
+    except Exception:
+        pass
+    # Fallback when the header button is hidden but the plugin is loaded.
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                  try {
+                    if (window.jQuery && jQuery.fn && jQuery.fn.showLoginLayer) {
+                      jQuery(document.body).showLoginLayer({ showLogin: true });
+                      return true;
+                    }
+                  } catch (e) {}
+                  const btn = document.querySelector('.loginBtn');
+                  if (btn) { btn.click(); return true; }
+                  return false;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
 # Attach optimized capture helpers to the worker class.
 def _capture_buff(self, context, page) -> dict[str, Any]:
     page.goto(_LOGIN_URLS["buff"], wait_until="commit", timeout=45_000)
@@ -1068,8 +1109,15 @@ def _capture_eco(self, context, page) -> dict[str, Any]:
     context.on("request", inspect_request)
     context.on("page", on_new_page)
     page = focus_single_page(context, preferred=page)
-    page.goto(_LOGIN_URLS["eco"], wait_until="commit", timeout=45_000)
+    page.goto(_LOGIN_URLS["eco"], wait_until="domcontentloaded", timeout=45_000)
     page = focus_single_page(context, preferred=page)
+    if _open_eco_login_layer(page):
+        self.progress.emit("eco", "已打开登录弹层，请扫码或手机登录…")
+    else:
+        self.progress.emit(
+            "eco",
+            "请在弹出窗口完成 ECOSteam 登录（可点右上角「登录/注册」）…",
+        )
     try:
         last_cookie = _cookie_header(context.cookies(), "ecosteam.cn")
     except Exception:

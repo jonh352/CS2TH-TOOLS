@@ -500,13 +500,12 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_no_overlap_check.setToolTip(
             "勾选后每件材料最多进入一个配方；程序选出当前最高期望配方后扣除其材料，"
             "再用剩余材料继续计算。例如100件军规级材料最多生成10个十合一配方。"
+            "计算时长较长，请谨慎勾选。"
         )
         self.step3_no_overlap_check.setObjectName("alchemyNoOverlapCheck")
-        self.step3_no_overlap_check.setChecked(True)
+        self.step3_no_overlap_check.setChecked(False)
         self.step3_no_overlap_check.setCursor(Qt.PointingHandCursor)
-        self.step3_no_overlap_check.setToolTip(
-            "材料冲突时仅保留期望值更高的配方"
-        )
+        self.step3_no_overlap_check.toggled.connect(self._on_no_overlap_toggled)
         _overlap_layout.addWidget(
             self.step3_no_overlap_check,
             0,
@@ -702,8 +701,10 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step2_mode_target_btn.setChecked(mode == "target")
         self.step2_mode_special_btn.setChecked(mode == "special_wear")
         self.step2_mode_container.sync_mode_slider(animate=False)
-        non_overlapping = d.get("non_overlapping_recipes", True) is not False
+        non_overlapping = bool(d.get("non_overlapping_recipes", False))
+        self.step3_no_overlap_check.blockSignals(True)
         self.step3_no_overlap_check.setChecked(non_overlapping)
+        self.step3_no_overlap_check.blockSignals(False)
         self._step2_update_norm_row_visibility()
 
         def _norm_f(key: str, default: float) -> float:
@@ -736,6 +737,11 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         except (TypeError, ValueError):
             r = ALCHEMY_SPECIAL_WEAR_DEFAULT_ROUNDS
         self.step2_special_rounds_spin.setValue(max(1, min(50, r)))
+
+    def _on_no_overlap_toggled(self, checked: bool) -> None:
+        if checked:
+            show_alert(self, "提示", "计算时长较长, 谨慎勾选")
+        self.save_step2_wear_prefs_for_exit()
 
     def showEvent(self, event: QShowEvent):
         super().showEvent(event)

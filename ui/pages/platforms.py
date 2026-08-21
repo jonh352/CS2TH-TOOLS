@@ -173,7 +173,7 @@ class PlatformPage(QWidget):
         saved_settings = load_app_settings()
         raw_intervals = saved_settings.get("material_collection_intervals")
         self._saved_intervals = raw_intervals if isinstance(raw_intervals, dict) else {}
-        self._saved_silent = bool(saved_settings.get("material_collection_silent", False))
+        self._saved_silent = bool(saved_settings.get("material_collection_silent", True))
         self._saved_include_alternatives = bool(
             saved_settings.get("material_collection_include_alternatives", False)
         )

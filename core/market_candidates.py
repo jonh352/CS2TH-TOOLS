@@ -1587,6 +1587,75 @@ def _extract_listing_id(item: dict[str, Any]) -> str:
     return ""
 
 
+def _first_nonempty_str(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value in (None, ""):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _extract_eco_goods_num(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    found = _first_nonempty_str(
+        item,
+        "GoodsNum",
+        "goodsNum",
+        "GoodsNumber",
+        "goodsNumber",
+        "listing_id",
+    )
+    if found:
+        return found
+    return _extract_listing_id(item)
+
+
+def _eco_wear_band_texts(wear: float) -> tuple[str, str]:
+    """min = wear truncated to 4dp; max = that value + 0.0001 (same as BUFF)."""
+    return _wear_band_4dp_texts(wear)
+
+
+def _eco_purchase_link(
+    *,
+    goods_id: int | str = 0,
+    wear: float | None = None,
+    item: dict[str, Any] | None = None,
+    goods_num: str = "",
+    **_unused: Any,
+) -> str:
+    """ECO goods page with tight wear band and optional goodsNum deep-link."""
+    try:
+        link_id = int(goods_id or 0)
+    except (TypeError, ValueError):
+        link_id = 0
+    if link_id <= 0:
+        return "https://www.ecosteam.cn/market/730-1.html?game=730"
+
+    if wear is None and isinstance(item, dict):
+        wear = _extract_listing_wear(item)
+    if wear is not None:
+        min_text, max_text = _eco_wear_band_texts(float(wear))
+        path = (
+            f"https://www.ecosteam.cn/goods/730-{link_id}"
+            f"-1-laypagesale-0-1-0-0-0-0-0-{min_text}-{max_text}"
+            f"-00-00-0-0-0-0.html"
+        )
+    else:
+        path = (
+            f"https://www.ecosteam.cn/goods/730-{link_id}"
+            f"-1-laypagesale-0-1.html"
+        )
+
+    gnum = str(goods_num or "").strip() or _extract_eco_goods_num(item)
+    if gnum:
+        return f"{path}?goodsNum={quote(gnum, safe='')}&tradeType=1"
+    return path
+
+
 def _iter_listing_rows(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -1616,6 +1685,38 @@ def _iter_listing_rows(payload: Any) -> list[dict[str, Any]]:
         if rows:
             return rows
     return []
+
+
+def _c5_purchase_link(item_id: int | str, wear: float) -> str:
+    """Buy URL filtered to this listing's exact wear (min == max)."""
+    wear_text = f"{float(wear):.18f}".rstrip("0").rstrip(".") or "0"
+    return (
+        f"https://www.c5game.com/csgo/{item_id}/item/sell"
+        f"?minWear={wear_text}&maxWear={wear_text}"
+    )
+
+
+def _buff_purchase_link(goods_id: int | str, wear: float) -> str:
+    """Buy URL with a tight paintwear band around this listing.
+
+    min_paintwear = wear truncated to 4 decimal places;
+    max_paintwear = that value + 0.0001.
+    """
+    min_text, max_text = _wear_band_4dp_texts(wear)
+    return (
+        f"https://buff.163.com/goods/{goods_id}"
+        f"?from=market#tab=selling"
+        f"&min_paintwear={min_text}&max_paintwear={max_text}"
+    )
+
+
+def _wear_band_4dp_texts(wear: float) -> tuple[str, str]:
+    """Truncate wear to 4dp; max = that value + 0.0001."""
+    min_wear = int(float(wear) * 10000) / 10000.0
+    max_wear = min_wear + 0.0001
+    min_text = f"{min_wear:.4f}"
+    max_text = f"{max_wear:.5f}".rstrip("0").rstrip(".") or "0"
+    return min_text, max_text
 
 
 def _c5_request_headers(
@@ -1916,10 +2017,7 @@ def fetch_buff_candidates(
                         "goods_id": f"buff:{order_id or goods_id}:{wear}",
                         "platform": "buff",
                         "listing_id": order_id,
-                        "purchase_link": (
-                            f"https://buff.163.com/goods/{goods_id}"
-                            f"?from=market#tab=selling"
-                        ),
+                        "purchase_link": _buff_purchase_link(goods_id, wear),
                     }
                 )
             # Price-asc pages: once the page is entirely above the recipe cap, stop.
@@ -2171,10 +2269,7 @@ def _rows_from_c5_openapi_payload(
                 "goods_id": f"c5:{listing_id or item_id}:{wear}",
                 "platform": "c5",
                 "listing_id": listing_id,
-                "purchase_link": (
-                    f"https://www.c5game.com/csgo/{item_id}/item/sell"
-                    f"?minWear={min_wear:.8f}&maxWear={max_wear:.8f}"
-                ),
+                "purchase_link": _c5_purchase_link(item_id, wear),
             }
         )
     if not out and not has_more and not _iter_listing_rows(data):
@@ -2231,10 +2326,7 @@ def _rows_from_c5_payload(
                 "goods_id": f"c5:{listing_id or item_id}:{wear}",
                 "platform": "c5",
                 "listing_id": listing_id,
-                "purchase_link": (
-                    f"https://www.c5game.com/csgo/{item_id}/item/sell"
-                    f"?minWear={min_wear:.8f}&maxWear={max_wear:.8f}"
-                ),
+                "purchase_link": _c5_purchase_link(item_id, wear),
             }
         )
     return out
@@ -2288,11 +2380,6 @@ def _rows_from_eco_payload(
             continue
         listing_id = _extract_listing_id(item)
         link_id = int(goods_id or 0)
-        purchase_link = (
-            f"https://www.ecosteam.cn/goods/730-{link_id}-1-laypagesale-0-1"
-            if link_id > 0
-            else "https://www.ecosteam.cn/market/730-1.html?game=730"
-        )
         out.append(
             {
                 "goods_name": display_name,
@@ -2301,7 +2388,12 @@ def _rows_from_eco_payload(
                 "goods_id": f"eco:{listing_id or link_id or 'hash'}:{wear}",
                 "platform": "eco",
                 "listing_id": listing_id,
-                "purchase_link": purchase_link,
+                "purchase_link": _eco_purchase_link(
+                    goods_id=link_id,
+                    wear=wear,
+                    item=item,
+                    goods_num=listing_id,
+                ),
             }
         )
     return out
@@ -2382,10 +2474,6 @@ def _rows_from_eco_html(
 ) -> list[dict[str, Any]]:
     parser = _EcoSalePageParser()
     parser.feed(str(html or ""))
-    purchase_link = (
-        f"https://www.ecosteam.cn/goods/730-{goods_id}"
-        "-1-laypagesale-0-1.html"
-    )
     out: list[dict[str, Any]] = []
     for item in parser.rows:
         wear_match = re.search(r"(?:0|1)\.\d+", item.get("wear", ""))
@@ -2396,7 +2484,8 @@ def _rows_from_eco_html(
         price = float(price_match.group(0))
         if price <= 0 or not _in_range(wear, min_wear, max_wear):
             continue
-        listing_id = item.get("listing_id") or item.get("asset_id") or ""
+        asset_id = str(item.get("asset_id") or "").strip()
+        listing_id = str(item.get("listing_id") or asset_id or "").strip()
         out.append(
             {
                 "goods_name": display_name,
@@ -2405,7 +2494,12 @@ def _rows_from_eco_html(
                 "goods_id": f"eco:{listing_id or goods_id}:{wear}",
                 "platform": "eco",
                 "listing_id": listing_id,
-                "purchase_link": purchase_link,
+                "purchase_link": _eco_purchase_link(
+                    goods_id=goods_id,
+                    wear=wear,
+                    item=item,
+                    goods_num=listing_id,
+                ),
             }
         )
     return out

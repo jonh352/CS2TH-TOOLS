@@ -1429,6 +1429,20 @@ QLabel#loginTitle {{
   font-size: 18px;
   font-weight: 800;
 }}
+QLabel#purchaseQrHint {{
+  color: {muted};
+  font-size: 12px;
+}}
+QLabel#purchaseQrSubstrate {{
+  color: {blue};
+  font-size: 16px;
+  font-weight: 700;
+  padding: 4px 2px;
+}}
+QLabel#purchaseQrSubstrateMeta {{
+  color: {dim};
+  font-size: 12px;
+}}
 QLabel#loginError {{
   color: {rose};
 }}
