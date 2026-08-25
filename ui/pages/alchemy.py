@@ -7,6 +7,7 @@ import math
 import hashlib
 
 import numpy as np
+from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 from collections.abc import Mapping
@@ -16,9 +17,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QFrame,
     QScrollArea, QLabel, QSizePolicy, QLayout,
     QStackedWidget, QButtonGroup, QToolTip, QProgressBar, QDialog,
-    QSpinBox, QCheckBox,
+    QSpinBox, QCheckBox, QInputDialog,
 )
-from PySide6.QtCore import Qt, QEvent, QTimer, QObject
+from PySide6.QtCore import Qt, QEvent, QTimer, QObject, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QCursor, QPalette, QShowEvent
 
 from ui.app_settings import (
@@ -29,7 +30,7 @@ from ui.app_settings import (
     save_alchemy_step2_wear_ui,
     save_last_recipe_save_folder_id,
 )
-from ui.feedback import show_alert
+from ui.feedback import ask_confirmation, show_alert
 from ui.dialogs.alert_dialog import WearInputNoticeDialog
 from ui.dialogs.exclude_saved_recipes_dialog import ExcludeSavedRecipesDialog
 from ui.dialogs.import_steam_inventory_dialog import ImportSteamInventoryDialog
@@ -57,8 +58,10 @@ from ui.widgets.toast import show_toast
 from config import (
     ALCHEMY_ICON_PATH,
     ALCHEMY_SPECIAL_WEAR_DEFAULT_ROUNDS,
+    COLLECTED_JSON_DIR,
     CONTENT_PAGE_LAYOUT_MARGINS,
 )
+from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from core.alchemy_quality import (
     canonical_goods_name_for_lookup,
     get_quality_from_goods_name,
@@ -73,7 +76,20 @@ from core.alchemy_calc import (
     try_build_product_price_map_from_disk,
 )
 from core.data_utils import SkinInstance, SkinTemplate, inventory_wear_chinese
-from core.inventory_steam_accounts import profile_inventory_data_path
+from core.inventory_steam_accounts import (
+    combo_display_name_for_profile,
+    get_active_profile_id,
+    list_profile_entries,
+    load_steam_account_config_dict,
+    profile_inventory_data_path,
+)
+from core.purchase_tracking import load_profile_inventory_items
+from core.purchase_batches import (
+    add_recipe_to_purchase_batch,
+    create_purchase_batch,
+    list_purchase_batches,
+    purchase_batch_summary,
+)
 from core.saved_recipes import (
     SUBSTRATE_ALCHEMY_META_EXCLUDED_KEY,
     SUBSTRATE_ALCHEMY_META_LOCKED_KEY,
@@ -93,6 +109,7 @@ REQUIRED_KEYS = frozenset({"float_value", "goods_id", "goods_name", "platform", 
 
 # 与 CollapsibleGroup 中「库存」组标签一致；用于合并导入时识别非库存行
 _INVENTORY_PLATFORMS = frozenset({"inventory", "steam_inventory"})
+_NEW_PURCHASE_BATCH_LABEL = "＋ 新建采购批次"
 logger = logging.getLogger(__name__)
 
 
@@ -150,6 +167,8 @@ def _substrate_group_sort_key(goods_name: str) -> tuple:
 
 class AlchemyPage(AlchemyModeMixin, QWidget):
     """炼金页面 - 右上角选择文件按钮，按 goods_name 聚合展示"""
+
+    navigation_route_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -459,7 +478,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         step3_layout.setContentsMargins(0, 0, 0, 0)
         step3_layout.setSpacing(16)
         step3_top = QHBoxLayout()
-        step3_top.setSpacing(16)
+        step3_top.setSpacing(12)
         self._step3_title_icon = QLabel(self)
         self._step3_title_icon.setObjectName("contentPageTitleIcon")
         self._step3_title_icon.setFixedSize(28, 28)
@@ -488,8 +507,23 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_min_be_spin.setToolTip(
             "仅搜索保本率不低于该值的配方"
         )
+        self.step3_max_be_label = QLabel("最高保本率")
+        self.step3_max_be_label.setObjectName("alchemyStep2NormLabel")
+        self.step3_max_be_spin = QSpinBox(self._step3_min_be_row)
+        self.step3_max_be_spin.setObjectName("alchemyStep2NormSpin")
+        self.step3_max_be_spin.setRange(0, 100)
+        self.step3_max_be_spin.setValue(100)
+        self.step3_max_be_spin.setSuffix("%")
+        self.step3_max_be_spin.setFixedWidth(
+            12 + 12 + 34 + _min_be_fm.horizontalAdvance("100%") + 10
+        )
+        self.step3_max_be_spin.setToolTip(
+            "仅搜索保本率不高于该值的配方"
+        )
         _min_be_layout.addWidget(self.step3_min_be_label, 0, Qt.AlignVCenter)
         _min_be_layout.addWidget(self.step3_min_be_spin, 0, Qt.AlignVCenter)
+        _min_be_layout.addWidget(self.step3_max_be_label, 0, Qt.AlignVCenter)
+        _min_be_layout.addWidget(self.step3_max_be_spin, 0, Qt.AlignVCenter)
         step3_top.addWidget(self._step3_min_be_row, 0, Qt.AlignVCenter)
         self._step3_recipe_overlap_row = QWidget()
         self._step3_recipe_overlap_row.setObjectName("alchemyStep3RecipeOverlapRow")
@@ -622,6 +656,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
 
         main_layout.addWidget(self.step_stack, 1)
         self.step_stack.setCurrentIndex(0)
+        self.step_stack.currentChanged.connect(self._on_navigation_step_changed)
 
         self._page_title_icon_labels = (
             self._step1_title_icon,
@@ -645,6 +680,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self._step2_wear_special_max: float = 1.0
         self._step2_norm_signal_conns: list = []
         self._step3_recipe_groups: list[RecipeResultGroup] = []
+        self._step3_batch_source_id: str = ""
         self._calc_worker: Optional["CalcProcessRunner"] = None
         self._special_wear_runner: Optional["SpecialWearCalcRunner"] = None
         self._fetch_worker: Optional["FetchPriceWorker"] = None
@@ -671,6 +707,26 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self._refresh_count_timer: QTimer | None = None
         self._alchemy_theme_icon_refresh_pending = False
         self._load_step2_wear_prefs_from_disk()
+
+    def navigation_subroute(self) -> str:
+        return ("materials", "wear", "results")[
+            max(0, min(2, self.step_stack.currentIndex()))
+        ]
+
+    def navigation_route_label(self) -> str:
+        labels = {
+            "materials": "炼金计算 · 底物数据",
+            "wear": "炼金计算 · 产物磨损",
+            "results": "炼金计算 · 配方结果",
+        }
+        return labels[self.navigation_subroute()]
+
+    def restore_navigation_subroute(self, route: str) -> None:
+        index = {"materials": 0, "wear": 1, "results": 2}.get(route, 0)
+        self.step_stack.setCurrentIndex(index)
+
+    def _on_navigation_step_changed(self, _index: int) -> None:
+        self.navigation_route_changed.emit(self.navigation_subroute())
 
     def save_step2_wear_prefs_for_exit(self) -> None:
         """关闭时保存磨损模式、特殊磨损轮数与配方材料去重选择。"""
@@ -1061,6 +1117,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             if item and item.spacerItem():
                 del item
         self._step3_save_location_row.setVisible(False)
+        self._step3_batch_source_id = ""
 
     @staticmethod
     def _is_step3_validation_error(message: str) -> bool:
@@ -1141,8 +1198,15 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         if not recipes:
             self._step3_save_location_row.setVisible(False)
             min_be_pct = int(self.step3_min_be_spin.value())
-            if min_be_pct > 0 and self.get_step2_mode() in ("scan", "target"):
-                msg = f"未找到保本率 ≥ {min_be_pct}% 的配方"
+            max_be_pct = int(self.step3_max_be_spin.value())
+            if (
+                (min_be_pct > 0 or max_be_pct < 100)
+                and self.get_step2_mode() in ("scan", "target")
+            ):
+                msg = (
+                    f"未找到保本率在 {min_be_pct}%～{max_be_pct}% "
+                    "范围内的配方"
+                )
             else:
                 msg = "未找到符合条件的配方"
             show_alert(self, "计算完成", f"{msg}\n\n{elapsed_str}")
@@ -1158,6 +1222,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 set_substrate_action_state=self._set_recipe_substrate_action_state,
             )
             group.save_requested.connect(self._on_recipe_save_requested)
+            group.add_to_purchase_batch_requested.connect(
+                self._on_recipe_add_to_purchase_batch_requested
+            )
             self.step3_results_layout.addWidget(group)
             self._step3_recipe_groups.append(group)
         self.step3_results_layout.addStretch(1)
@@ -1171,6 +1238,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self._step3_save_default_btn.blockSignals(False)
         self._step3_save_custom_btn.blockSignals(False)
         self._step3_save_location_row.setVisible(True)
+        self._step3_batch_source_id = f"alchemy-{time.time_ns()}"
         self._step3_save_location_switch.sync_mode_slider(animate=False)
         self._sync_step3_save_button_labels()
 
@@ -1239,6 +1307,122 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             show_toast(self, "配方已保存到「配方管理」", style="success")
         except OSError as e:
             show_toast(self, f"保存失败：{e}", style="error")
+
+    def _create_purchase_batch_path(self) -> Path | None:
+        accounts = [
+            entry for entry in list_profile_entries() if str(entry.get("id") or "")
+        ]
+        if not accounts:
+            show_toast(self, "请先在 Steam 库存添加收货账号", style="warning")
+            return None
+        if not ask_confirmation(
+            self,
+            "创建采购批次",
+            "创建时会把该账号当前本地库存记为基线。请确认已经在 Steam 库存页刷新过该账号库存。",
+        ):
+            return None
+        default_name = datetime.now().strftime("采购批次 %Y-%m-%d %H:%M")
+        name, accepted = get_wide_text_input(
+            self,
+            title="新建采购批次",
+            label="批次名称：",
+            value=default_name,
+        )
+        if not accepted or not name.strip():
+            return None
+        account_labels = [combo_display_name_for_profile(entry) for entry in accounts]
+        active_id = get_active_profile_id()
+        current = next(
+            (
+                index
+                for index, entry in enumerate(accounts)
+                if str(entry.get("id") or "") == active_id
+            ),
+            0,
+        )
+        account_label, accepted = QInputDialog.getItem(
+            self,
+            "选择收货账号",
+            "Steam 收货账号：",
+            account_labels,
+            current,
+            False,
+        )
+        if not accepted:
+            return None
+        entry = accounts[account_labels.index(account_label)]
+        profile_id = str(entry.get("id") or "")
+        cfg = load_steam_account_config_dict(profile_id)
+        try:
+            return create_purchase_batch(
+                name,
+                profile_id=profile_id,
+                steam_id=str(cfg.get("steam_id") or ""),
+                account_name=account_label,
+                inventory_items=load_profile_inventory_items(profile_id),
+            )
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"采购批次创建失败：{exc}", style="warning")
+            return None
+
+    def _choose_purchase_batch_path(self):
+        batches = list_purchase_batches()
+        labels: list[str] = []
+        for _path, batch in batches:
+            summary = purchase_batch_summary(batch)
+            labels.append(
+                f"{batch.get('name') or '未命名批次'} · "
+                f"{batch.get('account_name') or 'Steam'} · "
+                f"{summary['recipes']}配方/{summary['total']}件"
+            )
+        labels.append(_NEW_PURCHASE_BATCH_LABEL)
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "加入采购批次",
+            "选择目标批次：",
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return None
+        if selected == _NEW_PURCHASE_BATCH_LABEL:
+            return self._create_purchase_batch_path()
+        return batches[labels.index(selected)][0]
+
+    def _alchemy_purchase_title(self, rank: int, recipe: dict) -> str:
+        wear = float(recipe.get("avg_nfv") or 0)
+        return f"炼金计算方案 {rank:02d} · 归一化磨损 {wear:.9f}"
+
+    def _add_alchemy_recipe_to_batch(
+        self,
+        path: Path,
+        rank: int,
+        recipe: dict,
+    ) -> bool:
+        source_id = self._step3_batch_source_id or "alchemy-current"
+        add_recipe_to_purchase_batch(
+            path,
+            recipe,
+            title=self._alchemy_purchase_title(rank, recipe),
+            source_ref=f"{source_id}:{rank}",
+        )
+        return True
+
+    def _on_recipe_add_to_purchase_batch_requested(
+        self,
+        rank: int,
+        recipe: dict,
+    ) -> None:
+        path = self._choose_purchase_batch_path()
+        if path is None:
+            return
+        try:
+            self._add_alchemy_recipe_to_batch(path, rank, recipe)
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"加入采购批次失败：{exc}", style="warning")
+            return
+        show_toast(self, "配方已加入采购批次", style="success")
 
     def _on_clear_file(self):
         """清除所有已加载的数据"""
@@ -1948,10 +2132,19 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             )
 
     def _on_select_file(self):
+        # 小助手自己保存的采集 JSON 是最常用的数据源，因此原生文件
+        # 选择器优先从该目录打开；用户仍可在选择器中切换到任意目录。
+        initial_directory = ""
+        try:
+            COLLECTED_JSON_DIR.mkdir(parents=True, exist_ok=True)
+            initial_directory = str(COLLECTED_JSON_DIR)
+        except OSError:
+            # 数据目录暂时不可用时仍允许选择外部 JSON，不阻断导入流程。
+            pass
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "选择 JSON / JSONL 文件（可多选）",
-            "",
+            initial_directory,
             "数据文件 (*.jsonl *.json);;JSONL 文件 (*.jsonl);;JSON 文件 (*.json);;所有文件 (*.*)"
         )
         if paths:

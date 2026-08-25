@@ -89,6 +89,33 @@ class AlchemyWorkerTests(unittest.TestCase):
         self.assertEqual(len(self._run_target(non_overlapping_recipes=True)), 1)
         self.assertEqual(len(self._run_target(non_overlapping_recipes=False)), 2)
 
+    def test_target_worker_forwards_break_even_range(self) -> None:
+        rows = _rows(10)
+        worker = _CalcPoolThread(
+            selected_data=rows,
+            price_map={},
+            norm_min=0.5,
+            norm_max=0.5,
+            mode="target",
+            min_break_even_rate=0.25,
+            max_break_even_rate=0.75,
+            non_overlapping_recipes=False,
+        )
+        with (
+            patch(
+                "ui.workers.alchemy_workers.partition_selected_data_by_tradeup_group",
+                return_value=[("军规级", False, 10, rows)],
+            ),
+            patch(
+                "ui.workers.alchemy_workers.compute_recipes",
+                return_value=([], None),
+            ) as compute,
+        ):
+            worker.run()
+
+        self.assertEqual(compute.call_args.kwargs["min_break_even_rate"], 0.25)
+        self.assertEqual(compute.call_args.kwargs["max_break_even_rate"], 0.75)
+
     def test_running_progress_never_claims_one_hundred_percent(self) -> None:
         class Sink:
             def __init__(self) -> None:
@@ -127,6 +154,7 @@ class AlchemyWorkerTests(unittest.TestCase):
                 mode="target",
                 timeout=30,
                 min_break_even_rate=0,
+                max_break_even_rate=1,
                 cancel_check=lambda: False,
             )
 

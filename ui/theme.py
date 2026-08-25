@@ -152,6 +152,38 @@ QFrame#brandDivider {{
   background: {border};
   border: 0;
 }}
+  QFrame#navigationHistoryOverlay {{
+    background: transparent;
+    border: 0;
+  }}
+  QPushButton#navigationHistoryButton {{
+    min-width: 26px;
+    max-width: 26px;
+    min-height: 18px;
+    max-height: 18px;
+  padding: 0;
+  color: {text};
+  background: transparent;
+  border: 1px solid transparent;
+    border-radius: 6px;
+    font-size: 18px;
+    font-weight: 900;
+}}
+QPushButton#navigationHistoryButton:hover {{
+  color: {cyan};
+  background: {cyan_dim};
+  border-color: {border_strong};
+}}
+QPushButton#navigationHistoryButton:pressed {{
+  color: {cyan_hover};
+  background: {card_hover};
+  border-color: {cyan};
+}}
+QPushButton#navigationHistoryButton:disabled {{
+  color: {dim};
+  background: transparent;
+  border-color: transparent;
+}}
 QPushButton#navButton {{
   min-height: 38px;
   padding: 0 13px;
@@ -924,6 +956,45 @@ QPushButton#alchemyExcludeRecipeBtn {{
   color: {amber};
   background: {amber_dim};
   border-color: {amber};
+}}
+QPushButton#purchaseBatchReconcileBtn {{
+  min-height: 40px;
+  max-height: 40px;
+  color: #FFFFFF;
+  background: #16A34A;
+  border-color: #16A34A;
+  font-weight: 800;
+}}
+QPushButton#purchaseBatchReconcileBtn:hover {{
+  color: #FFFFFF;
+  background: #15803D;
+  border-color: #15803D;
+}}
+QPushButton#purchaseBatchReconcileBtn:pressed {{
+  color: #FFFFFF;
+  background: #166534;
+  border-color: #166534;
+  padding-top: 1px;
+}}
+QPushButton#purchaseBatchViewMaterialsBtn {{
+  min-height: 40px;
+  max-height: 40px;
+  color: {primary_text};
+  background: qlineargradient(
+    x1:0, y1:0, x2:1, y2:0,
+    stop:0 {cyan}, stop:1 {blue}
+  );
+  border-color: {cyan};
+  font-weight: 800;
+}}
+QPushButton#purchaseBatchViewMaterialsBtn:hover {{
+  color: {primary_text};
+  border-color: {cyan_hover};
+}}
+QPushButton#purchaseBatchViewMaterialsBtn:pressed {{
+  color: {primary_text};
+  border-color: {cyan_hover};
+  padding-top: 1px;
 }}
 QPushButton#alchemyResetWearBtn, QPushButton#alchemyStep2WearNoticeBtn {{
   color: {muted};

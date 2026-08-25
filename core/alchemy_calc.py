@@ -32,7 +32,13 @@ from .alchemy_quality import (
     get_template_from_goods_name,
     resolve_inventory_skin_template,
 )
-from .data_utils import QUALITY_MAP, SkinInstance, SkinTemplate, UPPER_QUALITY_MAP
+from .data_utils import (
+    QUALITY_MAP,
+    SkinInstance,
+    SkinTemplate,
+    UPPER_QUALITY_MAP,
+    wear_as_float32,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -923,6 +929,160 @@ def backpack(
     # return _pick_backpack_solutions_float32_valid(dp[k - 1], k, max_nfv, return_topk)
     return [_reconstruct_solution(sol) for sol in dp[k - 1][-return_topk:]]
 
+
+_CONSTRAINED_MIX_MAX_PATTERNS = 4096
+_CONSTRAINED_MIX_MAX_FRONT_NODES = 96
+
+
+def _outcome_mix_signature(substrate: SkinInstance) -> tuple[str, ...]:
+    """A collection/outcome identity used to preserve break-even diversity."""
+    return tuple(sorted(str(pid) for pid in substrate.skin_template.upper_skins or []))
+
+
+def _update_dominance_per_outcome_mix(
+    substrates: list[SkinInstance],
+    k: int,
+) -> list[SkinInstance]:
+    """Apply dominance inside each outcome group instead of across groups.
+
+    Cross-group dominance is valid for a pure ROI objective, but it can erase an
+    expensive collection whose product probabilities are required by a
+    break-even constraint.
+    """
+    grouped: dict[tuple[str, ...], list[SkinInstance]] = {}
+    for substrate in substrates:
+        grouped.setdefault(_outcome_mix_signature(substrate), []).append(substrate)
+    filtered: list[SkinInstance] = []
+    for rows in grouped.values():
+        filtered.extend(update_dominance(rows, k))
+    return filtered
+
+
+def _trim_mix_front(nodes: list[tuple]) -> list[tuple]:
+    """Bound a per-mix Pareto front while retaining its full NFV span."""
+    limit = _CONSTRAINED_MIX_MAX_FRONT_NODES
+    if len(nodes) <= limit:
+        return nodes
+    indexes = {
+        round(index * (len(nodes) - 1) / (limit - 1))
+        for index in range(limit)
+    }
+    return [nodes[index] for index in sorted(indexes)]
+
+
+def _trim_mix_patterns(
+    fronts: dict[tuple[int, ...], list[tuple]],
+) -> dict[tuple[int, ...], list[tuple]]:
+    """Keep objective leaders plus evenly spread collection-count patterns."""
+    limit = _CONSTRAINED_MIX_MAX_PATTERNS
+    if len(fronts) <= limit:
+        return fronts
+    ranked = sorted(
+        fronts,
+        key=lambda key: fronts[key][-1][1] if fronts[key] else -float("inf"),
+        reverse=True,
+    )
+    keep = set(ranked[: limit // 2])
+    ordered = sorted(fronts)
+    sample_count = limit - len(keep)
+    if sample_count > 0:
+        for index in range(sample_count):
+            position = round(index * (len(ordered) - 1) / max(1, sample_count - 1))
+            keep.add(ordered[position])
+            if len(keep) >= limit:
+                break
+    if len(keep) < limit:
+        keep.update(key for key in ranked if key not in keep and len(keep) < limit)
+    return {key: fronts[key] for key in keep}
+
+
+def backpack_preserving_outcome_mix(
+    substrates: list[SkinInstance],
+    k: int,
+    max_nfv: float,
+    timeout: float = -1,
+    return_topk_per_mix: int = 3,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    solution_accepts: Optional[Callable[[list[SkinInstance]], bool]] = None,
+) -> list[list[SkinInstance]]:
+    """Search Pareto fronts separately for each collection-count pattern.
+
+    A recipe's collection-count pattern determines its product probabilities.
+    Keeping those patterns separate prevents the unconstrained ROI winner from
+    deleting all low/high break-even candidates before the requested range is
+    evaluated.
+    """
+    if k <= 0 or len(substrates) < k:
+        return []
+    signatures = sorted({_outcome_mix_signature(sub) for sub in substrates})
+    group_index = {signature: index for index, signature in enumerate(signatures)}
+    zero_mix = (0,) * len(signatures)
+    start_time = time.time()
+    max_nfv_total = max_nfv * k
+    vals = [s.normalized_value for s in substrates]
+    suffix_min = _suffix_min_nfv_sums(vals, k)
+    fronts_by_count: list[dict[tuple[int, ...], list[tuple]]] = [
+        {} for _ in range(k)
+    ]
+    base_fronts = {zero_mix: [(0.0, 0.0, None, None)]}
+
+    for p, substrate in enumerate(substrates):
+        if cancel_check is not None and cancel_check():
+            raise ComputationCancelled
+        if timeout > 0 and time.time() - start_time > timeout:
+            break
+        substrate_group = group_index[_outcome_mix_signature(substrate)]
+        snfv = substrate.normalized_value
+        sval = substrate.value
+        for count_index in range(k - 1, -1, -1):
+            previous = (
+                base_fronts
+                if count_index == 0
+                else fronts_by_count[count_index - 1]
+            )
+            if not previous:
+                continue
+            remaining = k - count_index - 1
+            if remaining > 0 and math.isinf(suffix_min[p][remaining]):
+                continue
+            tail_min = 0.0 if remaining == 0 else suffix_min[p][remaining]
+            current = fronts_by_count[count_index]
+            for mix, nodes in list(previous.items()):
+                next_mix_list = list(mix)
+                next_mix_list[substrate_group] += 1
+                next_mix = tuple(next_mix_list)
+                additions = []
+                for node in nodes:
+                    new_nfv = node[0] + snfv
+                    if new_nfv >= max_nfv_total:
+                        break
+                    if remaining > 0 and new_nfv + tail_min >= max_nfv_total:
+                        break
+                    additions.append((new_nfv, node[1] + sval, substrate, node))
+                if not additions:
+                    continue
+                existing = current.get(next_mix)
+                merged = additions if not existing else merge_node(existing, additions)
+                current[next_mix] = _trim_mix_front(merged)
+            if len(current) > _CONSTRAINED_MIX_MAX_PATTERNS * 2:
+                fronts_by_count[count_index] = _trim_mix_patterns(current)
+
+    final_fronts = _trim_mix_patterns(fronts_by_count[k - 1])
+    accepted: list[tuple[tuple, list[SkinInstance]]] = []
+    per_mix = max(1, int(return_topk_per_mix))
+    for nodes in final_fronts.values():
+        mix_count = 0
+        for tail in reversed(nodes):
+            solution = _reconstruct_solution(tail)
+            if solution_accepts is not None and not solution_accepts(solution):
+                continue
+            accepted.append((tail, solution))
+            mix_count += 1
+            if mix_count >= per_mix:
+                break
+    accepted.sort(key=lambda pair: pair[0][1])
+    return [solution for _tail, solution in accepted]
+
 def dinkelbach(
     substrates: list[SkinInstance],
     k: int,
@@ -931,6 +1091,9 @@ def dinkelbach(
     return_topk: int = 1,
     cancel_check: Optional[Callable[[], bool]] = None,
     required_substrates: Optional[list[SkinInstance]] = None,
+    preserve_outcome_mix: bool = False,
+    break_even_range: tuple[float, float] | None = None,
+    break_even_price_map: dict | None = None,
 ) -> Union[Optional[dict], list[dict]]:
     """Dinkelbach 迭代求最大收益率配方。
     return_topk>0 时，收敛后从 dp[k-1] 取 topk 个解按收益率排序返回。"""
@@ -987,7 +1150,43 @@ def dinkelbach(
         if rate > max_rate:
             max_rate = rate
         if phi < 1e-8:
-            for optional_solution in solutions:
+            candidate_solutions = solutions
+            if preserve_outcome_mix:
+                solution_accepts = None
+                if break_even_range is not None and break_even_price_map is not None:
+                    lower, upper = break_even_range
+
+                    def solution_accepts(optional_solution: list[SkinInstance]) -> bool:
+                        return _solution_matches_break_even_range(
+                            [*required, *optional_solution],
+                            k,
+                            break_even_price_map,
+                            lower,
+                            upper,
+                        )
+
+                remaining_timeout = timeout
+                if timeout > 0:
+                    remaining_timeout = max(
+                        0.001,
+                        timeout - (time.time() - start_time),
+                    )
+                diverse_substrates = _update_dominance_per_outcome_mix(
+                    substrates,
+                    optional_k,
+                )
+                diverse_substrates = sort_substrate(diverse_substrates)
+                diverse_solutions = backpack_preserving_outcome_mix(
+                    diverse_substrates,
+                    optional_k,
+                    residual_avg_nfv,
+                    remaining_timeout,
+                    return_topk_per_mix=min(5, max(1, return_topk)),
+                    cancel_check=cancel_check,
+                    solution_accepts=solution_accepts,
+                )
+                candidate_solutions = diverse_solutions
+            for optional_solution in candidate_solutions:
                 solution = sort_solution([*required, *optional_solution])
                 cost = fixed_cost + sum(s.price for s in optional_solution)
                 expectation = fixed_expectation + sum(s.expectation for s in optional_solution)
@@ -1007,6 +1206,44 @@ def dinkelbach(
 def get_k_from_quality(quality: str) -> int:
     """底物品质为隐秘则 k=5，否则 k=10。"""
     return 5 if quality == "隐秘" else 10
+
+
+def tradeup_average_normalized_float32(
+    substrates: list[tuple[SkinTemplate, float]],
+) -> float:
+    """按统一的 binary32 口径计算底物平均归一化磨损。
+
+    每件真实磨损、归一化结果、逐项累加以及最终平均都显式舍入为
+    IEEE754 binary32，避免调用方因 ``numpy.float32``/Python ``float``
+    类型传播不同而得到相邻的两个结果。
+    """
+    if not substrates:
+        raise ValueError("无底物")
+    total = wear_as_float32(0.0)
+    for template, raw_wear in substrates:
+        span = float(template.max_float) - float(template.min_float)
+        if span <= 0:
+            normalized = 0.0
+        else:
+            wear = wear_as_float32(raw_wear)
+            normalized = wear_as_float32(
+                (wear - float(template.min_float)) / span
+            )
+            normalized = max(0.0, min(1.0, normalized))
+        total = wear_as_float32(total + normalized)
+    return wear_as_float32(total / len(substrates))
+
+
+def tradeup_product_wear_float32(
+    avg_nfv: float,
+    product_template: SkinTemplate,
+) -> float:
+    """把平均归一化磨损映射为最终可表示的 CS2 binary32 产物磨损。"""
+    normalized = max(0.0, min(1.0, wear_as_float32(avg_nfv)))
+    output = float(product_template.min_float) + normalized * (
+        float(product_template.max_float) - float(product_template.min_float)
+    )
+    return wear_as_float32(output)
 
 
 def compute_tradeup_simulation_products(
@@ -1031,8 +1268,7 @@ def compute_tradeup_simulation_products(
     if len(substrates) != k:
         return f"底物数量应为 {k} 件", [], None
 
-    nfvs = [SkinTemplate.float_to_normalized(np.float32(w), t.min_float, t.max_float) for t, w in substrates]
-    avg_nfv = sum(nfvs) / len(nfvs)
+    avg_nfv = tradeup_average_normalized_float32(substrates)
 
     pid_map = get_pid_map()
     product_probs: dict[tuple, dict] = {}
@@ -1048,7 +1284,7 @@ def compute_tradeup_simulation_products(
             if not tpl:
                 continue
             name = f"{tpl.weapon_name} | {tpl.skin_name}" if tpl.skin_name else tpl.weapon_name
-            float_val = SkinTemplate.normalized_to_float(avg_nfv, tpl.min_float, tpl.max_float)
+            float_val = tradeup_product_wear_float32(avg_nfv, tpl)
             key = (pid, float_val)
             if key not in product_probs:
                 wb_list = tpl.weapon_box_name or []
@@ -1194,7 +1430,7 @@ def _product_prob_map_for_recipe_ui(
             if not tpl:
                 continue
             name = f"{tpl.weapon_name} | {tpl.skin_name}" if tpl.skin_name else tpl.weapon_name
-            float_val = SkinTemplate.normalized_to_float(avg_nfv, tpl.min_float, tpl.max_float)
+            float_val = tradeup_product_wear_float32(avg_nfv, tpl)
             appearance = SkinInstance.get_appearance(float_val)
             if appearance and "|" in name:
                 name = f"{name}（{appearance}）"
@@ -1381,16 +1617,69 @@ def _expectation_rate_from_prob_map(
     return expectation, rate
 
 
+def _solution_matches_break_even_range(
+    solution: list[SkinInstance],
+    k: int,
+    price_map: dict,
+    min_break_even_rate: float,
+    max_break_even_rate: float,
+) -> bool:
+    """Evaluate the exact product probabilities before a candidate leaves search."""
+    if len(solution) != k or k <= 0:
+        return False
+    avg_nfv = sum(float(sub.normalized_value) for sub in solution) / k
+    product_probs = _product_prob_map_for_recipe_ui(
+        solution,
+        k,
+        avg_nfv,
+        price_map,
+    )
+    break_even_rate = _break_even_rate_from_prob_map(
+        product_probs,
+        sum(float(sub.price) for sub in solution),
+    )
+    lower = max(0.0, min(1.0, float(min_break_even_rate)))
+    upper = max(0.0, min(1.0, float(max_break_even_rate)))
+    return lower <= break_even_rate <= upper
+
+
+def _filter_recipes_by_break_even_range(
+    recipes: list[dict],
+    min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
+) -> list[dict]:
+    """Return recipes whose break-even rate is inside the inclusive range."""
+    lower = max(0.0, min(1.0, float(min_break_even_rate)))
+    upper = max(0.0, min(1.0, float(max_break_even_rate)))
+    if lower > upper:
+        return []
+    return [
+        recipe
+        for recipe in recipes
+        if lower <= float(recipe.get("break_even_rate") or 0) <= upper
+    ]
+
+
+def _break_even_range_is_constrained(
+    min_break_even_rate: float,
+    max_break_even_rate: float,
+) -> bool:
+    lower = max(0.0, min(1.0, float(min_break_even_rate)))
+    upper = max(0.0, min(1.0, float(max_break_even_rate)))
+    return lower > 0.0 or upper < 1.0
+
+
 def _finalize_recipes_from_rate_results(
     results: list[dict],
     k: int,
     price_map: dict,
     min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
 ) -> list[dict]:
     """将 dinkelbach 产出的多条结果去重、按展示收益率取 top N，并组装 UI 用 recipe 字典。
 
     期望/收益率/保本率均从 ``_product_prob_map_for_recipe_ui`` 重算，与产物表及特殊磨损模式一致；
-    Dinkelbach 仅用于筛选底物组合。``min_break_even_rate`` > 0 时仅保留保本率不低于该值的配方。
+    Dinkelbach 仅用于筛选底物组合；最终仅保留保本率落在给定闭区间内的配方。
     """
     if not results:
         return []
@@ -1417,9 +1706,11 @@ def _finalize_recipes_from_rate_results(
             "products_display": products_display,
         })
     recipes.sort(key=lambda x: x["rate"], reverse=True)
-    threshold = max(0.0, float(min_break_even_rate))
-    if threshold > 0:
-        recipes = [r for r in recipes if float(r.get("break_even_rate") or 0) >= threshold]
+    recipes = _filter_recipes_by_break_even_range(
+        recipes,
+        min_break_even_rate,
+        max_break_even_rate,
+    )
     return recipes[:ALCHEMY_RESULT_DISPLAY_TOP_N]
 
 
@@ -1450,6 +1741,8 @@ def worker_scan_single_nfv(
     k: int,
     sorted_nfv_cache: dict[tuple, list[float]],
     timeout: float,
+    min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
 ) -> list[dict]:
     """子进程入口：单个归一化磨损点的 dinkelbach 扫描。须为模块级函数以便 pickle。
     instances 由 prepare 一次后随任务 pickle 传入；各子进程为独立反序列化副本，可原地 assign_expectation。"""
@@ -1462,6 +1755,8 @@ def worker_scan_single_nfv(
         k,
         sorted_nfv_cache,
         timeout,
+        min_break_even_rate,
+        max_break_even_rate,
     )
 
 
@@ -1476,6 +1771,8 @@ def init_scan_worker_pool(
     sorted_nfv_cache: dict[tuple, list[float]],
     k: int,
     timeout: float,
+    min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
 ) -> None:
     """ProcessPool 各 worker 仅初始化一次，避免每个 nfv 任务重复 pickle 大体量底物数据。"""
     global _scan_pool_ctx
@@ -1487,6 +1784,8 @@ def init_scan_worker_pool(
         "sorted_nfv_cache": sorted_nfv_cache,
         "k": k,
         "timeout": timeout,
+        "min_break_even_rate": min_break_even_rate,
+        "max_break_even_rate": max_break_even_rate,
     }
 
 
@@ -1504,6 +1803,8 @@ def worker_scan_single_nfv_task(nfv: float) -> list[dict]:
         ctx["k"],
         ctx["sorted_nfv_cache"],
         ctx["timeout"],
+        ctx["min_break_even_rate"],
+        ctx["max_break_even_rate"],
     )
 
 
@@ -1516,6 +1817,8 @@ def _worker_scan_single_nfv_impl(
     k: int,
     sorted_nfv_cache: dict[tuple, list[float]],
     timeout: float,
+    min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
 ) -> list[dict]:
     if not instances:
         return []
@@ -1527,6 +1830,12 @@ def _worker_scan_single_nfv_impl(
         timeout,
         return_topk=ALCHEMY_SCAN_MODE_DINKELBACH_TOPK,
         required_substrates=required_instances,
+        preserve_outcome_mix=_break_even_range_is_constrained(
+            min_break_even_rate,
+            max_break_even_rate,
+        ),
+        break_even_range=(min_break_even_rate, max_break_even_rate),
+        break_even_price_map=price_map,
     )
     return res if res else []
 
@@ -1541,6 +1850,7 @@ def compute_recipes(
     progress_queue: Optional[multiprocessing.Queue] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     min_break_even_rate: float = 0.0,
+    max_break_even_rate: float = 1.0,
 ) -> tuple[list[dict], Optional[str]]:
     """
     计算 top10 配方。
@@ -1572,6 +1882,12 @@ def compute_recipes(
                 return_topk=ALCHEMY_SCAN_MODE_DINKELBACH_TOPK,
                 cancel_check=cancel_check,
                 required_substrates=required_instances,
+                preserve_outcome_mix=_break_even_range_is_constrained(
+                    min_break_even_rate,
+                    max_break_even_rate,
+                ),
+                break_even_range=(min_break_even_rate, max_break_even_rate),
+                break_even_price_map=price_map,
             )
             results.extend(res)
             if progress_queue is not None:
@@ -1590,6 +1906,12 @@ def compute_recipes(
             return_topk=ALCHEMY_TARGET_MODE_DINKELBACH_TOPK,
             cancel_check=cancel_check,
             required_substrates=required_instances,
+            preserve_outcome_mix=_break_even_range_is_constrained(
+                min_break_even_rate,
+                max_break_even_rate,
+            ),
+            break_even_range=(min_break_even_rate, max_break_even_rate),
+            break_even_price_map=price_map,
         )
         if cancel_check is not None and cancel_check():
             raise ComputationCancelled
@@ -1598,6 +1920,10 @@ def compute_recipes(
         raise ValueError(f"无效的 mode: {mode}")
 
     recipes = _finalize_recipes_from_rate_results(
-        results, k, price_map, min_break_even_rate=min_break_even_rate
+        results,
+        k,
+        price_map,
+        min_break_even_rate=min_break_even_rate,
+        max_break_even_rate=max_break_even_rate,
     )
     return recipes, None

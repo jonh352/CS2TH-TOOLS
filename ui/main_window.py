@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -57,6 +58,13 @@ ACCOUNT_PLAN_LABELS = {
 }
 
 
+@dataclass(frozen=True)
+class _NavigationRoute:
+    page_key: str
+    subroute: str = ""
+    label: str = field(default="", compare=False)
+
+
 class _BrandHomeLink(QFrame):
     """Clickable brand block linking back to the CS2TH website."""
 
@@ -78,6 +86,9 @@ class MainWindow(QMainWindow):
         self._logout_worker: LogoutWorker | None = None
         self._access_allowed = False
         self._pending_recipe_reference = ""
+        self._navigation_history: list[_NavigationRoute] = []
+        self._navigation_history_index = -1
+        self._restoring_navigation = False
         self._auth_recheck_timer = QTimer(self)
         self._auth_recheck_timer.setSingleShot(True)
         self._auth_recheck_timer.timeout.connect(self._start_auth_validation)
@@ -125,6 +136,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._startup_placeholder)
         root.addWidget(self.stack, 1)
         self.setCentralWidget(root_widget)
+        self._build_navigation_history_overlay(root_widget)
+        self.stack.installEventFilter(self)
         self.toast = ToastWidget(root_widget, top_inset_px=70)
         self.toast.hide()
 
@@ -140,6 +153,7 @@ class MainWindow(QMainWindow):
         )
         QTimer.singleShot(0, self._start_auth_validation)
         QTimer.singleShot(0, lambda: self._activate("alchemy"))
+        QTimer.singleShot(0, self._position_navigation_history_overlay)
         self._sync_account_button()
 
     def _build_topbar(self) -> QFrame:
@@ -227,6 +241,50 @@ class MainWindow(QMainWindow):
         self._sync_theme_button()
         return topbar
 
+    def _build_navigation_history_overlay(self, parent: QWidget) -> None:
+        self._navigation_history_overlay = QFrame(parent)
+        self._navigation_history_overlay.setObjectName("navigationHistoryOverlay")
+        self._navigation_history_overlay.setFixedSize(60, 20)
+        row = QHBoxLayout(self._navigation_history_overlay)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.navigation_back_button = QPushButton("←", self._navigation_history_overlay)
+        self.navigation_back_button.setObjectName("navigationHistoryButton")
+        self.navigation_back_button.setFixedSize(28, 20)
+        self.navigation_back_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.navigation_back_button.setToolTip("无可返回界面")
+        self.navigation_back_button.setAccessibleName("返回上一个界面")
+        self.navigation_back_button.setEnabled(False)
+        self.navigation_back_button.clicked.connect(self._navigate_back)
+        row.addWidget(self.navigation_back_button)
+        self.navigation_forward_button = QPushButton(
+            "→", self._navigation_history_overlay
+        )
+        self.navigation_forward_button.setObjectName("navigationHistoryButton")
+        self.navigation_forward_button.setFixedSize(28, 20)
+        self.navigation_forward_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.navigation_forward_button.setToolTip("无可前进界面")
+        self.navigation_forward_button.setAccessibleName("前进到下一个界面")
+        self.navigation_forward_button.setEnabled(False)
+        self.navigation_forward_button.clicked.connect(self._navigate_forward)
+        row.addWidget(self.navigation_forward_button)
+        self._navigation_history_overlay.raise_()
+
+    def _position_navigation_history_overlay(self) -> None:
+        if not hasattr(self, "_navigation_history_overlay"):
+            return
+        self._navigation_history_overlay.move(12, self.stack.y())
+        self._navigation_history_overlay.raise_()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if watched is getattr(self, "stack", None) and event.type() in {
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        }:
+            QTimer.singleShot(0, self._position_navigation_history_overlay)
+        return super().eventFilter(watched, event)
+
     def _build_page(self, key: str) -> QWidget:
         if key == "alchemy":
             from ui.pages.alchemy import AlchemyPage
@@ -312,13 +370,20 @@ class MainWindow(QMainWindow):
             page.setProperty("cs2thPaletteTheme", self.theme_name)
             self.pages[key] = page
             self.stack.addWidget(page)
+            route_signal = getattr(page, "navigation_route_changed", None)
+            if route_signal is not None:
+                route_signal.connect(
+                    lambda _subroute="", page_key=key: self._on_page_route_changed(
+                        page_key
+                    )
+                )
             if key != "about":
                 apply_page_interaction_lock(page, not self._access_allowed)
             return page
         finally:
             QApplication.restoreOverrideCursor()
 
-    def _activate(self, key: str) -> None:
+    def _activate(self, key: str, *, record_history: bool = True) -> None:
         previous_key = self._active_page_key
         previous = self.pages.get(self._active_page_key)
         if (
@@ -349,6 +414,99 @@ class MainWindow(QMainWindow):
             button.setProperty("active", button_key == key)
             button.style().unpolish(button)
             button.style().polish(button)
+        if record_history and not self._restoring_navigation:
+            self._record_current_navigation_route()
+
+    def _current_navigation_route(self) -> _NavigationRoute | None:
+        key = self._active_page_key
+        if not key:
+            return None
+        page = self.pages.get(key)
+        subroute = ""
+        label = dict(PAGE_DEFINITIONS).get(key, key)
+        if page is not None:
+            route_getter = getattr(page, "navigation_subroute", None)
+            if callable(route_getter):
+                subroute = str(route_getter() or "")
+            label_getter = getattr(page, "navigation_route_label", None)
+            if callable(label_getter):
+                page_label = str(label_getter() or "").strip()
+                if page_label:
+                    label = page_label
+        return _NavigationRoute(key, subroute, label)
+
+    def _record_current_navigation_route(self) -> None:
+        route = self._current_navigation_route()
+        if route is None:
+            return
+        if (
+            0 <= self._navigation_history_index < len(self._navigation_history)
+            and self._navigation_history[self._navigation_history_index] == route
+        ):
+            self._sync_navigation_history_buttons()
+            return
+        if self._navigation_history_index + 1 < len(self._navigation_history):
+            del self._navigation_history[self._navigation_history_index + 1 :]
+        self._navigation_history.append(route)
+        if len(self._navigation_history) > 50:
+            overflow = len(self._navigation_history) - 50
+            del self._navigation_history[:overflow]
+        self._navigation_history_index = len(self._navigation_history) - 1
+        self._sync_navigation_history_buttons()
+
+    def _on_page_route_changed(self, page_key: str) -> None:
+        if self._restoring_navigation or page_key != self._active_page_key:
+            return
+        self._record_current_navigation_route()
+
+    def _navigate_back(self) -> None:
+        if self._navigation_history_index <= 0:
+            return
+        self._navigation_history_index -= 1
+        self._restore_navigation_route(
+            self._navigation_history[self._navigation_history_index]
+        )
+
+    def _navigate_forward(self) -> None:
+        if self._navigation_history_index + 1 >= len(self._navigation_history):
+            return
+        self._navigation_history_index += 1
+        self._restore_navigation_route(
+            self._navigation_history[self._navigation_history_index]
+        )
+
+    def _restore_navigation_route(self, route: _NavigationRoute) -> None:
+        self._restoring_navigation = True
+        try:
+            if route.page_key != self._active_page_key:
+                self._activate(route.page_key, record_history=False)
+            page = self.pages.get(route.page_key)
+            restore = getattr(page, "restore_navigation_subroute", None)
+            if callable(restore):
+                restore(route.subroute)
+        finally:
+            self._restoring_navigation = False
+            self._sync_navigation_history_buttons()
+
+    def _sync_navigation_history_buttons(self) -> None:
+        if not hasattr(self, "navigation_back_button"):
+            return
+        can_back = self._navigation_history_index > 0
+        can_forward = (
+            self._navigation_history_index + 1 < len(self._navigation_history)
+        )
+        self.navigation_back_button.setEnabled(can_back)
+        self.navigation_forward_button.setEnabled(can_forward)
+        self.navigation_back_button.setToolTip(
+            f"返回：{self._navigation_history[self._navigation_history_index - 1].label}"
+            if can_back
+            else "无可返回界面"
+        )
+        self.navigation_forward_button.setToolTip(
+            f"前进：{self._navigation_history[self._navigation_history_index + 1].label}"
+            if can_forward
+            else "无可前进界面"
+        )
 
     def _warn_feature_locked(self) -> None:
         if self._access_allowed:
@@ -608,11 +766,13 @@ class MainWindow(QMainWindow):
             apply_page_interaction_lock(page, not allowed)
         if allowed:
             self._access_banner.hide()
+            QTimer.singleShot(0, self._position_navigation_history_overlay)
             return
         self._access_banner_label.setText(message)
         self._access_banner_action.setText("去登录" if show_login else "查看账号")
         self._access_banner_action.show()
         self._access_banner.show()
+        QTimer.singleShot(0, self._position_navigation_history_overlay)
 
     def _schedule_auth_recheck(self, session: AuthSession) -> None:
         delay_seconds = 300.0

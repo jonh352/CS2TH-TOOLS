@@ -58,6 +58,7 @@ from core.inventory_steam_accounts import (
     update_profile_display_name,
 )
 from core.platform_links import MARKETPLACES, links_for_template
+from core.purchase_batches import reconcile_all_purchase_records_for_profile
 from config import CONTENT_PAGE_LAYOUT_MARGINS
 from ui.components import PageHeader, panel
 from ui.feedback import ask_confirmation
@@ -669,6 +670,21 @@ class InventoryPage(QWidget):
             )
             update_profile_display_name(profile_id, str(profile.get("personaname") or "Steam"))
         self._reload_accounts(profile_id)
+        try:
+            reconciliation = reconcile_all_purchase_records_for_profile(profile_id, items)
+        except Exception as exc:
+            self._render_completion_status += f"；配方采购核对失败：{exc}"
+            self.status_label.setText(self._render_completion_status)
+            return
+        matched = int(reconciliation.get("matched") or 0)
+        waiting = int(reconciliation.get("waiting") or 0)
+        save_failures = int(reconciliation.get("save_failures") or 0)
+        if matched:
+            self._render_completion_status += f"；配方采购新入库 {matched} 件"
+        if waiting:
+            self._render_completion_status += f"，仍待入库 {waiting} 件"
+        if save_failures:
+            self._render_completion_status += f"；{save_failures} 个配方状态保存失败"
         self.status_label.setText(self._render_completion_status)
 
     def _remove_account(self) -> None:

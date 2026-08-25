@@ -56,6 +56,7 @@ def _build_non_overlapping_group_recipes(
     mode: str,
     timeout: float,
     min_break_even_rate: float,
+    max_break_even_rate: float,
     cancel_check,
 ) -> list[dict]:
     """Repeatedly solve, consume the winner's physical items, and solve again."""
@@ -86,6 +87,7 @@ def _build_non_overlapping_group_recipes(
             progress_queue=None,
             cancel_check=cancel_check,
             min_break_even_rate=min_break_even_rate,
+            max_break_even_rate=max_break_even_rate,
         )
     return selected
 
@@ -159,6 +161,7 @@ class _CalcPoolThread(QThread):
         norm_max,
         mode: str,
         min_break_even_rate: float = 0.0,
+        max_break_even_rate: float = 1.0,
         non_overlapping_recipes: bool = True,
         parent=None,
     ):
@@ -169,6 +172,7 @@ class _CalcPoolThread(QThread):
         self._norm_max = norm_max
         self._mode = mode
         self._min_break_even_rate = max(0.0, float(min_break_even_rate))
+        self._max_break_even_rate = min(1.0, max(0.0, float(max_break_even_rate)))
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
 
     def _wait_future_result_or_cancel(
@@ -265,6 +269,8 @@ class _CalcPoolThread(QThread):
                             sorted_nfv_cache,
                             k,
                             timeout,
+                            self._min_break_even_rate,
+                            self._max_break_even_rate,
                         ),
                     )
                     hard_cancel = False
@@ -325,6 +331,7 @@ class _CalcPoolThread(QThread):
                         k,
                         self._price_map,
                         min_break_even_rate=self._min_break_even_rate,
+                        max_break_even_rate=self._max_break_even_rate,
                     )
                     if self._non_overlapping_recipes:
                         group_rows = next(
@@ -343,6 +350,7 @@ class _CalcPoolThread(QThread):
                             mode="scan",
                             timeout=timeout,
                             min_break_even_rate=self._min_break_even_rate,
+                            max_break_even_rate=self._max_break_even_rate,
                             cancel_check=self.isInterruptionRequested,
                         )
                     _tag_recipe_group(recipes, quality, stat_trak)
@@ -366,6 +374,7 @@ class _CalcPoolThread(QThread):
                         progress_queue=None,
                         cancel_check=self.isInterruptionRequested,
                         min_break_even_rate=self._min_break_even_rate,
+                        max_break_even_rate=self._max_break_even_rate,
                     )
                     if err:
                         first_error = first_error or err
@@ -381,6 +390,7 @@ class _CalcPoolThread(QThread):
                             mode="target",
                             timeout=timeout,
                             min_break_even_rate=self._min_break_even_rate,
+                            max_break_even_rate=self._max_break_even_rate,
                             cancel_check=self.isInterruptionRequested,
                         )
                     _tag_recipe_group(recipes, quality, stat_trak)
@@ -564,6 +574,7 @@ class CalcProcessRunner(QObject):
         norm_max,
         mode: str,
         min_break_even_rate: float = 0.0,
+        max_break_even_rate: float = 1.0,
         non_overlapping_recipes: bool = True,
         parent=None,
     ):
@@ -576,6 +587,7 @@ class CalcProcessRunner(QObject):
         self._norm_max = norm_max
         self._mode = mode
         self._min_break_even_rate = max(0.0, float(min_break_even_rate))
+        self._max_break_even_rate = min(1.0, max(0.0, float(max_break_even_rate)))
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
         self._thread: _CalcPoolThread | None = None
 
@@ -587,6 +599,7 @@ class CalcProcessRunner(QObject):
             self._norm_max,
             self._mode,
             self._min_break_even_rate,
+            self._max_break_even_rate,
             self._non_overlapping_recipes,
             parent=self,
         )

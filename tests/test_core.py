@@ -27,10 +27,14 @@ from core.auth_client import (
 )
 from core.float32_wear_prefix import find_float32_range_intersection
 from core.alchemy_calc import (
+    _filter_recipes_by_break_even_range,
     _fetch_product_price_from_api,
     apply_inventory_buff_prices,
+    dinkelbach,
     backfill_missing_substrate_prices,
     build_price_map,
+    compute_recipes,
+    compute_tradeup_simulation_products,
     eligible_selected_data_for_target,
     filter_non_overlapping_recipes,
     get_expectation_map,
@@ -39,7 +43,11 @@ from core.alchemy_calc import (
     partition_selected_data_by_tradeup_group,
     _sorted_product_nfvs,
 )
-from core.data_utils import SkinTemplate
+from core.alchemy_special_wear import (
+    _recipe_from_solution,
+    _validated_special_wear_recipes,
+)
+from core.data_utils import SkinInstance, SkinTemplate
 from core.platform_links import links_for_recipe_material, links_for_template
 from core.market_candidates import (
     c5_signer_collection_scope,
@@ -139,6 +147,178 @@ class MetadataTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertLess(low, high)
         self.assertGreater(len(template.lower_skins), 0)
+
+    def test_break_even_rate_filter_uses_inclusive_minimum_and_maximum(self) -> None:
+        recipes = [
+            {"name": "low", "break_even_rate": 0.20},
+            {"name": "minimum", "break_even_rate": 0.30},
+            {"name": "middle", "break_even_rate": 0.50},
+            {"name": "maximum", "break_even_rate": 0.70},
+            {"name": "high", "break_even_rate": 0.80},
+        ]
+
+        filtered = _filter_recipes_by_break_even_range(recipes, 0.30, 0.70)
+
+        self.assertEqual(
+            [recipe["name"] for recipe in filtered],
+            ["minimum", "middle", "maximum"],
+        )
+
+    def test_break_even_rate_filter_rejects_reversed_range(self) -> None:
+        recipes = [{"break_even_rate": 0.50}]
+        self.assertEqual(
+            _filter_recipes_by_break_even_range(recipes, 0.70, 0.30),
+            [],
+        )
+
+    def test_constrained_search_preserves_expensive_outcome_mix(self) -> None:
+        templates_by_outcomes: dict[tuple[str, ...], SkinTemplate] = {}
+        for template in get_pid_map().values():
+            signature = tuple(sorted(str(pid) for pid in template.upper_skins or []))
+            if signature and template.max_float > template.min_float:
+                templates_by_outcomes.setdefault(signature, template)
+            if len(templates_by_outcomes) >= 2:
+                break
+        self.assertGreaterEqual(len(templates_by_outcomes), 2)
+        template_a, template_b = list(templates_by_outcomes.values())[:2]
+
+        cheap_a = SkinInstance(template_a, normalized_value=0.10, price=1.0)
+        cheap_b = SkinInstance(template_a, normalized_value=0.11, price=1.0)
+        expensive_mix = SkinInstance(template_b, normalized_value=0.12, price=100.0)
+        cheap_a.expectation = 10.0
+        cheap_b.expectation = 10.0
+        expensive_mix.expectation = 100.0
+        substrates = [cheap_a, cheap_b, expensive_mix]
+
+        unconstrained = dinkelbach(
+            substrates,
+            2,
+            0.90,
+            return_topk=1,
+            preserve_outcome_mix=False,
+        )
+        constrained = dinkelbach(
+            substrates,
+            2,
+            0.90,
+            return_topk=1,
+            preserve_outcome_mix=True,
+        )
+        with patch(
+            "core.alchemy_calc._solution_matches_break_even_range",
+            side_effect=lambda solution, *_args: expensive_mix in solution,
+        ):
+            range_constrained = dinkelbach(
+                substrates,
+                2,
+                0.90,
+                return_topk=1,
+                preserve_outcome_mix=True,
+                break_even_range=(0.0, 0.10),
+                break_even_price_map={},
+            )
+
+        self.assertTrue(unconstrained)
+        self.assertTrue(constrained)
+        self.assertTrue(range_constrained)
+        self.assertFalse(
+            any(
+                expensive_mix in recipe["solution"]
+                for recipe in unconstrained
+            )
+        )
+        self.assertTrue(
+            any(
+                expensive_mix in recipe["solution"]
+                for recipe in constrained
+            )
+        )
+        self.assertTrue(
+            all(
+                expensive_mix in recipe["solution"]
+                for recipe in range_constrained
+            )
+        )
+
+    def test_break_even_range_activates_constraint_aware_candidate_search(self) -> None:
+        rows, _template = self._tradeup_rows("军规级", False, 10)
+        with patch("core.alchemy_calc.dinkelbach", return_value=[]) as solve:
+            recipes, error = compute_recipes(
+                rows,
+                {},
+                0.50,
+                0.50,
+                mode="target",
+                max_break_even_rate=0.10,
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(recipes, [])
+        self.assertTrue(solve.call_args.kwargs["preserve_outcome_mix"])
+
+    def test_special_wear_boundary_recipe_uses_simulation_float32_result(self) -> None:
+        pid_map = get_pid_map()
+        m4 = pid_map["1281"]
+        glock = pid_map["1282"]
+        output = pid_map["1280"]
+        wears = [
+            0.103063017129898071,
+            0.110177859663963318,
+            0.107255019247531891,
+            0.115088120102882385,
+            0.115885466337203979,
+            0.130994781851768494,
+            0.122246250510215759,
+            0.133971914649009705,
+            0.134800836443901062,
+            0.137539818882942200,
+        ]
+        templates = [m4, m4, glock, glock, glock, m4, glock, glock, glock, glock]
+        substrates = list(zip(templates, wears))
+
+        error, rows, avg_nfv = compute_tradeup_simulation_products(substrates)
+        self.assertIsNone(error)
+        self.assertIsNotNone(avg_nfv)
+        output_row = next(
+            row for row in rows if row["skin_template"].paint_index == "1280"
+        )
+        self.assertEqual(output_row["float_value"], 0.131451994180679321)
+
+        instances = [
+            SkinInstance(template, wear, price=1.0)
+            for template, wear in substrates
+        ]
+        recipe = _recipe_from_solution(instances, 10, {})
+        self.assertEqual(recipe["avg_nfv"], avg_nfv)
+
+        low, high, range_error = find_float32_range_intersection(
+            "0.1314520", output.min_float, output.max_float
+        )
+        self.assertIsNone(range_error)
+        self.assertEqual(
+            _validated_special_wear_recipes([recipe], output, low, high),
+            [],
+        )
+
+        corrected = list(substrates)
+        corrected[8] = (glock, 0.1348012)
+        error, corrected_rows, corrected_avg = compute_tradeup_simulation_products(
+            corrected
+        )
+        self.assertIsNone(error)
+        corrected_output = next(
+            row["float_value"]
+            for row in corrected_rows
+            if row["skin_template"].paint_index == "1280"
+        )
+        self.assertTrue(low <= corrected_output <= high)
+        corrected_recipe = {"avg_nfv": corrected_avg}
+        self.assertEqual(
+            _validated_special_wear_recipes(
+                [corrected_recipe], output, low, high
+            )[0]["special_wear_output_float"],
+            corrected_output,
+        )
 
     def test_marketplace_links_use_template_ids(self) -> None:
         template = get_name_map()["AK-47 | 传承"]
@@ -1697,14 +1877,80 @@ class MetadataTests(unittest.TestCase):
                 },
             ),
             patch(
-                "core.market_candidates._lookup_c5_user_profile",
-                return_value=("C5用户", 12),
+                "core.market_candidates._probe_c5_account_login",
+                return_value={
+                    "provider": "c5",
+                    "ok": True,
+                    "indeterminate": False,
+                    "message": "C5GAME 登录有效",
+                    "account_name": "C5用户",
+                    "user_id": 12,
+                },
             ),
         ):
             result = validate_provider_login("c5")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["account_name"], "C5用户")
+
+    def test_c5_login_validation_rejects_sell_list_false_positive(self) -> None:
+        with (
+            patch(
+                "core.market_candidates._c5_auth",
+                return_value=("C5Token=stale-session; path=/", "stale-access-token"),
+            ),
+            patch(
+                "core.market_candidates._probe_c5_collection_login",
+                return_value={
+                    "provider": "c5",
+                    "ok": True,
+                    "indeterminate": False,
+                    "message": "C5GAME 登录有效",
+                },
+            ),
+            patch(
+                "core.market_candidates._probe_c5_account_login",
+                return_value={
+                    "provider": "c5",
+                    "ok": False,
+                    "indeterminate": False,
+                    "message": "C5GAME 登录已失效，请重新登录",
+                },
+            ),
+        ):
+            result = validate_provider_login("c5")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["indeterminate"])
+        self.assertIn("登录已失效", result["message"])
+
+    def test_c5_account_probe_rejects_logged_out_response(self) -> None:
+        from core.market_candidates import _probe_c5_account_login
+
+        class LoggedOutResponse:
+            status_code = 200
+            text = '{"code":401,"msg":"请先登录"}'
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+            @staticmethod
+            def json() -> dict:
+                return {"code": 401, "msg": "请先登录"}
+
+        with patch(
+            "core.market_candidates.requests.get",
+            return_value=LoggedOutResponse(),
+        ):
+            result = _probe_c5_account_login(
+                "C5Token=stale-session",
+                "stale-access-token",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["indeterminate"])
+        self.assertIn("登录已失效", result["message"])
 
     def test_eco_login_validation_returns_account_name(self) -> None:
         with (

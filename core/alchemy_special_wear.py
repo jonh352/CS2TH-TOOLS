@@ -30,10 +30,12 @@ from .alchemy_calc import (
     _products_display_from_prob_map,
     _substrates_display,
     split_required_instance_pairs,
+    tradeup_average_normalized_float32,
+    tradeup_product_wear_float32,
     transform_to_instances,
 )
 from .alchemy_quality import get_pid_map
-from .data_utils import SkinInstance
+from .data_utils import SkinInstance, SkinTemplate
 from .process_pool_kill import shutdown_process_pool_hard
 
 # 仅多进程 worker 子进程在 initializer 中赋值，避免每轮任务重复 pickle 大体量 dict
@@ -66,6 +68,9 @@ def _future_result_poll(
         except TimeoutError:
             continue
 _TOP_N = 10
+# 搜索阶段多保留一些低成本候选，最终按统一 float32 口径验收后再取 Top N。
+# 否则边界附近的无效组合占满 Top N 时，后续实际有效的组合没有机会返回。
+_POST_VALIDATE_CANDIDATE_FACTOR = 10
 # MITM：单侧「恰好选 t 件」的组合数超此值则放弃 MITM（不再尝试其它算法）
 _MAX_MITM_SINGLE_LAYER = 5_500_000
 # 真实磨损 [lo,hi] 闭区间映射到 MITM 半开上界时加的裕量（归一化和尺度）
@@ -162,9 +167,9 @@ def _recipe_from_solution(
     price_map: dict,
 ) -> dict[str, Any]:
     cost = sum(s.price for s in solution)
-    # 与主模式 _finalize_recipes_from_rate_results 一致：底物归一化磨损算术平均
-    nfvs = [s.normalized_value for s in solution]
-    avg_nfv = sum(nfvs) / len(nfvs)
+    avg_nfv = tradeup_average_normalized_float32(
+        [(s.skin_template, float(s.float_value)) for s in solution]
+    )
     product_probs = _product_prob_map_for_recipe_ui(solution, k, avg_nfv, price_map)
     expectation, rate = _expectation_rate_from_prob_map(product_probs, cost)
     break_even_rate = _break_even_rate_from_prob_map(product_probs, cost)
@@ -180,6 +185,26 @@ def _recipe_from_solution(
         "substrates_display": substrates_display,
         "products_display": products_display,
     }
+
+
+def _validated_special_wear_recipes(
+    recipes: list[dict[str, Any]],
+    output_template: SkinTemplate,
+    target_wear_lo: float,
+    target_wear_hi: float,
+) -> list[dict[str, Any]]:
+    """按模拟器相同口径验收搜索结果，并保存唯一可信的产物磨损。"""
+    valid: list[dict[str, Any]] = []
+    for recipe in recipes:
+        try:
+            avg_nfv = float(recipe["avg_nfv"])
+            output_wear = tradeup_product_wear_float32(avg_nfv, output_template)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if target_wear_lo <= output_wear <= target_wear_hi:
+            recipe["special_wear_output_float"] = output_wear
+            valid.append(recipe)
+    return valid
 
 
 def _build_one_sw_recipe_task(
@@ -606,7 +631,7 @@ def _sw_round_worker_task(
         remaining_k,
         sum_lo,
         sum_hi,
-        _TOP_N,
+        _TOP_N * _POST_VALIDATE_CANDIDATE_FACTOR,
         total_combo=total_combo,
         progress_callback=None,
     )
@@ -754,6 +779,12 @@ def compute_special_wear_recipes(
                     hard_cancel_mp = True
                     shutdown_process_pool_hard(ex)
                     raise
+                recipes = _validated_special_wear_recipes(
+                    recipes,
+                    out_tpl,
+                    lo,
+                    hi,
+                )
                 _merge_recipe_list_into_best(best_by_fp, recipes)
                 del recipes
                 last_cc, last_tc, last_nn = cc, tc, nn

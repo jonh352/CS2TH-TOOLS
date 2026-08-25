@@ -28,7 +28,6 @@ from core.saved_recipes import (
     format_recipe_summary_line,
     update_recipe_recipe_dict,
 )
-
 from ..icons import expand_section_triangle_icon
 
 from .collapsible_group import AlchemyRecipeRowHoverTableWidget
@@ -96,6 +95,7 @@ class RecipeResultGroup(QFrame):
     """可折叠的配方结果组 - 标题含成本、期望、收益率、保本率、产物归一化磨损；表内含产物标价。"""
 
     save_requested = Signal(int, dict)  # rank, recipe（深拷贝）
+    add_to_purchase_batch_requested = Signal(int, dict)  # rank, recipe（深拷贝）
 
     def __init__(
         self,
@@ -134,7 +134,6 @@ class RecipeResultGroup(QFrame):
                 and self._set_substrate_action_state is not None
             )
         )
-
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -173,12 +172,27 @@ class RecipeResultGroup(QFrame):
             )
             header_layout.addWidget(self._action_header, 0, Qt.AlignVCenter)
         if enable_save:
+            self.add_to_purchase_batch_btn = QPushButton("加入采购批次")
+            self.add_to_purchase_batch_btn.setObjectName("alchemySelectFileBtn")
+            self.add_to_purchase_batch_btn.setCursor(Qt.PointingHandCursor)
+            self.add_to_purchase_batch_btn.setToolTip(
+                "将此配方及全部材料直接加入采购批次"
+            )
+            self.add_to_purchase_batch_btn.clicked.connect(
+                self._on_add_to_purchase_batch_clicked
+            )
+            header_layout.addWidget(
+                self.add_to_purchase_batch_btn,
+                0,
+                Qt.AlignVCenter,
+            )
             self.save_btn = QPushButton("保存配方")
             self.save_btn.setObjectName("alchemySelectFileBtn")
             self.save_btn.setCursor(Qt.PointingHandCursor)
             self.save_btn.clicked.connect(self._on_save_clicked)
             header_layout.addWidget(self.save_btn, 0, Qt.AlignVCenter)
         else:
+            self.add_to_purchase_batch_btn = None
             self.save_btn = None
         main_layout.addWidget(self.header)
 
@@ -301,10 +315,6 @@ class RecipeResultGroup(QFrame):
                 )
                 self._action_cells.append(action_cell)
                 sub_table.setCellWidget(row, 6, action_cell)
-            else:
-                it6 = QTableWidgetItem("-")
-                it6.setTextAlignment(align)
-                sub_table.setItem(row, 6, it6)
         if self._show_substrate_actions:
             self._refresh_action_header_state()
         content_layout.addWidget(sub_table)
@@ -528,6 +538,12 @@ class RecipeResultGroup(QFrame):
 
     def _on_save_clicked(self):
         self.save_requested.emit(self._rank, copy.deepcopy(self._recipe))
+
+    def _on_add_to_purchase_batch_clicked(self):
+        self.add_to_purchase_batch_requested.emit(
+            self._rank,
+            copy.deepcopy(self._recipe),
+        )
 
     def _on_header_clicked(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

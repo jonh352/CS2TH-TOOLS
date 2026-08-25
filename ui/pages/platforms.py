@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -33,6 +34,7 @@ from core.alchemy_quality import (
     normalize_name,
     strip_appearance_suffix_from_goods_name,
 )
+from core.alchemy_calc import tradeup_product_wear_float32
 from core.auth_client import AuthClient
 from core.collected_json import save_collected_json
 from core.app_settings_store import load_app_settings, update_app_settings
@@ -51,6 +53,11 @@ from core.platform_login_state import (
 )
 from core.recipe_bridge import material_wear_range, saved_recipe_to_bridge_payload
 from core.saved_recipes import list_saved_recipes
+from core.purchase_batches import (
+    add_recipe_to_purchase_batch,
+    list_purchase_batches,
+    purchase_batch_summary,
+)
 from ui.dialogs.pick_saved_recipe_dialog import pick_saved_recipe
 from core.json_store import read_json_dict, write_json
 from core.market_candidates import (
@@ -120,6 +127,7 @@ def format_collection_platform_counts(items: object) -> str:
 class PlatformPage(QWidget):
     import_to_simulation_requested = Signal(object)
     import_to_alchemy_requested = Signal(object, object)
+    navigation_route_changed = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -607,7 +615,17 @@ class PlatformPage(QWidget):
         self.special_results_title = QLabel("智能配单结果")
         self.special_results_title.setObjectName("sectionTitle")
         self.special_results_title.hide()
-        layout.addWidget(self.special_results_title)
+        results_heading = QHBoxLayout()
+        results_heading.addWidget(self.special_results_title)
+        results_heading.addStretch(1)
+        self.special_add_all_to_batch_button = QPushButton("全部加入采购批次")
+        self.special_add_all_to_batch_button.setObjectName("primaryButton")
+        self.special_add_all_to_batch_button.clicked.connect(
+            self._add_all_special_solutions_to_purchase_batch
+        )
+        self.special_add_all_to_batch_button.hide()
+        results_heading.addWidget(self.special_add_all_to_batch_button)
+        layout.addLayout(results_heading)
         self.special_results_layout = QVBoxLayout()
         self.special_results_layout.setSpacing(10)
         layout.addLayout(self.special_results_layout)
@@ -708,7 +726,22 @@ class PlatformPage(QWidget):
         if hasattr(self, "special_solve_button") and not has_materials:
             self.special_solve_button.hide()
 
-    def _set_mode(self, index: int) -> None:
+    def navigation_subroute(self) -> str:
+        return "custom" if self.mode_stack.currentIndex() == _MODE_CUSTOM else "recipe"
+
+    def navigation_route_label(self) -> str:
+        return (
+            "材料采集 · 自定义采集"
+            if self.navigation_subroute() == "custom"
+            else "材料采集 · 配方采集"
+        )
+
+    def restore_navigation_subroute(self, route: str) -> None:
+        index = _MODE_CUSTOM if route == "custom" else _MODE_RECIPE
+        self._set_mode(index, emit_navigation=False)
+
+    def _set_mode(self, index: int, *, emit_navigation: bool = True) -> None:
+        previous_index = self.mode_stack.currentIndex()
         self.mode_stack.setCurrentIndex(index)
         self._place_collection_controls(index)
         self._sync_collection_chrome_for_mode(index)
@@ -717,6 +750,8 @@ class PlatformPage(QWidget):
             button.setProperty("active", button_index == index)
             button.style().unpolish(button)
             button.style().polish(button)
+        if emit_navigation and index != previous_index:
+            self.navigation_route_changed.emit(self.navigation_subroute())
 
     def _place_collection_controls(self, index: int) -> None:
         block = self.collection_action_block
@@ -775,6 +810,13 @@ class PlatformPage(QWidget):
             self.collection_toggle_button.setEnabled(True)
             if self._collection_stopping or self._special_stopping:
                 self.collection_toggle_button.setText("正在停止…")
+            elif self._special_worker is not None and self._special_worker.isRunning():
+                if self._special_worker.phase() == "solve":
+                    self.collection_toggle_button.setText("停止配组")
+                else:
+                    self.collection_toggle_button.setText(
+                        "停止抓取并用已有候选配组"
+                    )
             else:
                 self.collection_toggle_button.setText("停止采集")
             if self._owner_live_status:
@@ -1666,6 +1708,7 @@ class PlatformPage(QWidget):
             f"抓取并智能配{self._special_slot_count}件"
         )
         self.special_results_title.hide()
+        self.special_add_all_to_batch_button.hide()
         _clear_layout(self.special_results_layout)
         _clear_layout(self.special_materials_layout)
         self._reset_collection_links()
@@ -1719,7 +1762,7 @@ class PlatformPage(QWidget):
         self._special_stopping = False
         self._begin_collection_owner()
         self.collection_toggle_button.setEnabled(True)
-        self.collection_toggle_button.setText("停止采集")
+        self.collection_toggle_button.setText("停止抓取并用已有候选配组")
         self.collection_import_button.hide()
         self.collection_save_json_button.hide()
         self._collected_items = []
@@ -1729,6 +1772,7 @@ class PlatformPage(QWidget):
         self._set_collection_status_text("正在抓取特殊磨损候选并智能配方…")
         self._show_collection_progress(done=0, total=max(1, len(materials) * len(providers)))
         self.special_results_title.hide()
+        self.special_add_all_to_batch_button.hide()
         _clear_layout(self.special_results_layout)
         worker = SpecialCollectionWorker(
             materials=materials,
@@ -1749,10 +1793,18 @@ class PlatformPage(QWidget):
         worker.progress.connect(self.special_collection_status.setText)
         worker.progress.connect(self._set_collection_status_text)
         worker.progress_units.connect(self._set_collection_progress_units)
+        worker.phase_changed.connect(self._special_collection_phase_changed)
         worker.completed.connect(self._special_collection_completed)
         worker.finished.connect(worker.deleteLater)
         self._special_worker = worker
         worker.start()
+
+    def _special_collection_phase_changed(self, phase: str) -> None:
+        if str(phase) != "solve":
+            return
+        self._special_stopping = False
+        self.collection_toggle_button.setEnabled(True)
+        self.collection_toggle_button.setText("停止配组")
 
     def _special_collection_completed(
         self,
@@ -1761,7 +1813,6 @@ class PlatformPage(QWidget):
         message: str,
     ) -> None:
         self._special_worker = None
-        was_stopping = self._special_stopping or "已停止" in str(message or "")
         self._special_stopping = False
         self.special_solve_button.setEnabled(True)
         self.special_solve_button.setText(
@@ -1775,20 +1826,6 @@ class PlatformPage(QWidget):
         started_at = self._collection_started_at
         self._collection_started_at = None
         elapsed = max(0.0, time.monotonic() - started_at) if started_at else 0.0
-        if was_stopping:
-            kept = [
-                dict(item) for item in candidate_rows if isinstance(item, dict)
-            ]
-            self._apply_stopped_collection_results(
-                kept,
-                message=str(message or "").strip(),
-                elapsed=elapsed,
-            )
-            status = self.collection_status.text()
-            self.special_collection_status.setText(
-                status if kept else "采集已停止（无已抓取挂单）"
-            )
-            return
         self._collected_items = [
             dict(item) for item in candidate_rows if isinstance(item, dict)
         ]
@@ -1827,13 +1864,24 @@ class PlatformPage(QWidget):
                 style="warning",
             )
             return
-        self._special_solution_recipes = [
-            dict(recipe) for recipe in recipe_rows if isinstance(recipe, dict)
-        ]
+        target_metadata = {
+            "paint_index": str(self._special_payload.get("target_paint_index") or ""),
+            "name": str(self._special_payload.get("target_name") or "特殊磨损目标"),
+            "min_wear": float(self._special_payload.get("target_min_wear") or 0),
+            "max_wear": float(self._special_payload.get("target_max_wear") or 0),
+            "slot_count": self._special_slot_count,
+        }
+        self._special_solution_recipes = []
+        for source_recipe in recipe_rows:
+            if not isinstance(source_recipe, dict):
+                continue
+            enriched_recipe = dict(source_recipe)
+            enriched_recipe["special_wear_target"] = dict(target_metadata)
+            self._special_solution_recipes.append(enriched_recipe)
         solved_status = (
             f"候选池 {len(candidate_rows)} 件"
             + (f"（{source_text}）" if source_text else "")
-            + f"；找到 {len(recipe_rows)} 组可购买方案。"
+            + f"；找到 {len(self._special_solution_recipes)} 组可购买方案。"
             + (f" 部分来源提示：{message}" if message else "")
             + f" 共计 {elapsed:.1f} 秒"
         )
@@ -1843,14 +1891,14 @@ class PlatformPage(QWidget):
         self.collection_save_json_button.hide()
         self._apply_collection_status_text(solved_status, state="complete")
         self.special_results_title.setText(
-            f"智能配单结果 · {len(recipe_rows)} 组"
+            f"智能配单结果 · {len(self._special_solution_recipes)} 组"
         )
         self.special_results_title.show()
-        for index, recipe in enumerate(recipe_rows, start=1):
-            if isinstance(recipe, dict):
-                self.special_results_layout.addWidget(
-                    self._special_solution_card(index, recipe)
-                )
+        self.special_add_all_to_batch_button.show()
+        for index, recipe in enumerate(self._special_solution_recipes, start=1):
+            self.special_results_layout.addWidget(
+                self._special_solution_card(index, recipe)
+            )
         show_toast(
             self,
             f"已找到具体{self._special_slot_count}件材料组合",
@@ -1876,11 +1924,14 @@ class PlatformPage(QWidget):
             self._special_payload.get("target_paint_index") or ""
         )
         target = get_pid_map().get(target_paint_index)
-        output_wear = (
-            target.normalized_to_float(avg_nfv, target.min_float, target.max_float)
-            if target is not None
-            else 0.0
-        )
+        validated_output = recipe.get("special_wear_output_float")
+        if isinstance(validated_output, (int, float)):
+            output_wear = float(validated_output)
+        elif target is not None:
+            # 兼容旧缓存/测试数据；新求解结果均应携带已验收的最终磨损。
+            output_wear = tradeup_product_wear_float32(avg_nfv, target)
+        else:
+            output_wear = 0.0
         title = QLabel(
             f"方案 {index:02d} · 共{slot_count}件 · 总价 ¥{cost:.2f}"
         )
@@ -1897,9 +1948,18 @@ class PlatformPage(QWidget):
                 value
             )
         )
+        add_to_batch = QPushButton("加入采购批次")
+        add_to_batch.setObjectName("primaryButton")
+        add_to_batch.setToolTip("将本方案直接加入独立采购批次，不保存到“已保存配方”")
+        add_to_batch.clicked.connect(
+            lambda _=False, value=dict(recipe): self._add_special_solution_to_purchase_batch(
+                value
+            )
+        )
         top.addWidget(title)
         top.addStretch(1)
         top.addWidget(predicted)
+        top.addWidget(add_to_batch)
         top.addWidget(simulate)
         layout.addLayout(top)
 
@@ -1960,6 +2020,77 @@ class PlatformPage(QWidget):
         payload["substrates_display"] = substrates
         payload["simulation_slot_count"] = slot_count
         self.import_to_simulation_requested.emit(payload)
+
+    def _add_special_solution_to_purchase_batch(self, recipe: dict) -> None:
+        path = self._choose_purchase_batch_path()
+        if path is None:
+            return
+        target_name = str(self._special_payload.get("target_name") or "特殊磨损")
+        output = float(recipe.get("special_wear_output_float") or 0)
+        try:
+            add_recipe_to_purchase_batch(
+                path,
+                recipe,
+                title=f"{target_name} · {output:.7f}",
+            )
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"加入采购批次失败：{exc}", style="warning")
+            return
+        show_toast(self, "方案已加入采购批次", style="success")
+
+    def _choose_purchase_batch_path(self):
+        batches = list_purchase_batches()
+        if not batches:
+            show_toast(
+                self,
+                "请先到“配方管理 → 采购批次”新建批次",
+                style="warning",
+            )
+            return None
+        labels: list[str] = []
+        for _path, batch in batches:
+            summary = purchase_batch_summary(batch)
+            labels.append(
+                f"{batch.get('name') or '未命名批次'} · "
+                f"{batch.get('account_name') or 'Steam'} · "
+                f"{summary['recipes']}配方/{summary['total']}件"
+            )
+        selected, accepted = QInputDialog.getItem(
+            self,
+            "加入采购批次",
+            "选择目标批次：",
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return None
+        index = labels.index(selected)
+        return batches[index][0]
+
+    def _add_all_special_solutions_to_purchase_batch(self) -> None:
+        if not self._special_solution_recipes:
+            return
+        path = self._choose_purchase_batch_path()
+        if path is None:
+            return
+        target_name = str(self._special_payload.get("target_name") or "特殊磨损")
+        added = 0
+        for recipe in self._special_solution_recipes:
+            output = float(recipe.get("special_wear_output_float") or 0)
+            try:
+                add_recipe_to_purchase_batch(
+                    path,
+                    recipe,
+                    title=f"{target_name} · {output:.7f}",
+                )
+            except (OSError, ValueError):
+                continue
+            added += 1
+        if added:
+            show_toast(self, f"已将 {added} 个方案加入采购批次", style="success")
+        else:
+            show_toast(self, "没有方案成功加入采购批次", style="warning")
 
     def _choose_saved_recipe(self) -> None:
         entries = list_saved_recipes()
@@ -2084,6 +2215,7 @@ class PlatformPage(QWidget):
         self.special_solve_button.setEnabled(False)
         self.special_solve_button.hide()
         self.special_results_title.hide()
+        self.special_add_all_to_batch_button.hide()
         _clear_layout(self.special_results_layout)
         _clear_layout(self.special_materials_layout)
         self._reset_collection_links()
@@ -2663,10 +2795,16 @@ class PlatformPage(QWidget):
         if worker is None or not worker.isRunning():
             return
         self._special_stopping = True
-        worker.request_stop()
+        phase = worker.request_stop()
         self.collection_toggle_button.setEnabled(False)
-        self.collection_toggle_button.setText("正在停止…")
-        self._set_collection_status_text("正在停止特殊磨损采集…")
+        if phase == "solve":
+            self.collection_toggle_button.setText("正在停止配组…")
+            self._set_collection_status_text("正在停止特殊磨损配组…")
+        else:
+            self.collection_toggle_button.setText("正在停止抓取…")
+            self._set_collection_status_text(
+                "正在停止抓取；结束后将用已有候选继续配组…"
+            )
 
     def _set_collection_status_state(self, state: str) -> None:
         self.collection_status.setProperty("collectionState", state)

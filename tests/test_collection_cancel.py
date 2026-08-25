@@ -67,6 +67,58 @@ class CollectionCancellationTests(unittest.TestCase):
         self.assertIn((67, 100), units)
         self.assertEqual(units[-1], (100, 100))
 
+    def test_special_worker_stops_scraping_but_solves_with_partial_candidates(self) -> None:
+        candidates = [
+            {
+                "platform": "buff",
+                "listing_id": str(index),
+                "goods_id": str(index),
+                "goods_name": "skin-a",
+                "float_value": 0.1 + index / 1000,
+                "price": float(index + 1),
+            }
+            for index in range(10)
+        ]
+        recipe = {"cost": 55.0, "substrates_display": candidates}
+        worker = SpecialCollectionWorker(
+            materials=[{"name": "skin-a", "min_wear": 0.1, "max_wear": 0.2}],
+            providers=["buff", "c5"],
+            provider_intervals={"buff": 5, "c5": 5},
+            target_paint_index="321",
+            target_wear_low=0.131,
+            target_wear_high=0.132,
+            slot_count=10,
+        )
+        emitted: list[tuple] = []
+        worker.completed.connect(
+            lambda rows, recipes, message: emitted.append((rows, recipes, message))
+        )
+
+        def fake_collect(**_kwargs):
+            self.assertEqual(worker.request_stop(), "scrape")
+            return candidates, ["c5·skin-a：访问受限，本轮已停止该平台采集"], {}
+
+        def fake_solve(rows, _price_map, _paint_index, _low, _high, **kwargs):
+            self.assertEqual(rows, candidates)
+            self.assertFalse(kwargs["cancel_check"]())
+            return [recipe], None
+
+        with patch(
+            "ui.workers.special_collection.collect_candidates_parallel",
+            side_effect=fake_collect,
+        ), patch(
+            "ui.workers.special_collection.compute_special_wear_recipes",
+            side_effect=fake_solve,
+        ):
+            worker.run()
+
+        self.assertEqual(len(emitted), 1)
+        rows, recipes, message = emitted[0]
+        self.assertEqual(rows, candidates)
+        self.assertEqual(recipes, [recipe])
+        self.assertIn("已停止抓取，已使用已有候选完成配组", message)
+        self.assertIn("c5", message)
+
     def test_interruptible_wait_stops_immediately(self) -> None:
         with self.assertRaises(CollectionCancelled):
             interruptible_wait(30, lambda: True)

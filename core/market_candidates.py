@@ -1085,6 +1085,96 @@ def _lookup_c5_user_profile(
     return _extract_account_fields(payload)
 
 
+def _probe_c5_account_login(
+    cookie: str,
+    token: str = "",
+    *,
+    timeout: float = 12.0,
+) -> dict[str, Any]:
+    """Require C5's account endpoint to confirm the saved browser identity.
+
+    The sell-list endpoints can return an empty, parseable payload after the
+    website session has logged out.  Treating "no exception" as a successful
+    login made the material page show 已验证登录 even though the browser-backed
+    collector could no longer fetch listings.
+    """
+    cookie = str(cookie or "").strip()
+    token = _c5_effective_token(cookie, token)
+    headers = {
+        "User-Agent": _UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": _C5_ACCEPT_ENCODING,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Origin": "https://www.c5game.com",
+        "Referer": "https://www.c5game.com/user-center/user",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    if token:
+        headers["x-access-token"] = token
+    try:
+        response = requests.get(_C5_USER_CHECK_API, headers=headers, timeout=timeout)
+        if response.status_code == 429:
+            return _validation_result(
+                "c5",
+                ok=False,
+                indeterminate=True,
+                message="C5GAME 正在限流，暂时无法确认账号登录状态",
+            )
+        if response.status_code in {401, 403}:
+            return _validation_result(
+                "c5",
+                ok=False,
+                message="C5GAME 登录已失效，请重新登录",
+            )
+        response.raise_for_status()
+        payload = response.json() if response.text else {}
+    except requests.RequestException as exc:
+        return _runtime_error_to_validation("c5", exc)
+    except ValueError as exc:
+        return _validation_result(
+            "c5",
+            ok=False,
+            indeterminate=True,
+            message=f"C5GAME 账号接口返回异常：{exc}",
+        )
+    if not isinstance(payload, dict):
+        return _validation_result(
+            "c5",
+            ok=False,
+            indeterminate=True,
+            message="C5GAME 账号接口返回格式异常",
+        )
+    error_code = str(payload.get("errorCode") or payload.get("code") or "")
+    detail = str(payload.get("errorMsg") or payload.get("msg") or "").strip()
+    if error_code in {"101", "401", "403"} or _response_indicates_login_required(
+        payload, detail
+    ):
+        return _validation_result(
+            "c5",
+            ok=False,
+            message="C5GAME 登录已失效，请重新登录",
+        )
+    nickname, user_id = _extract_account_fields(payload)
+    if nickname or user_id not in (None, ""):
+        return _validation_result(
+            "c5",
+            ok=True,
+            message="C5GAME 登录有效",
+            account_name=nickname,
+            user_id=user_id,
+        )
+    return _validation_result(
+        "c5",
+        ok=False,
+        indeterminate=True,
+        message=(
+            "C5GAME 在售接口可访问，但账号登录状态未得到确认；"
+            "请重新点击「登录 / 打开」"
+        ),
+    )
+
+
 def _lookup_eco_user_profile(
     token: str,
     cookie: str = "",
@@ -1335,13 +1425,12 @@ def validate_c5_credentials(
     cookie = str(cookie or "").strip()
     token = _c5_effective_token(cookie, token)
     result = _probe_c5_collection_login(cookie, token, timeout=timeout)
-    return _enrich_c5_account_name(
-        result,
-        cookie,
-        token,
-        timeout=timeout,
-        quick=quick,
-    )
+    if not result.get("ok") or quick:
+        return result
+    # A parseable/empty sell-list response alone does not prove that the
+    # app-owned C5 browser session is logged in.  Require account identity too,
+    # otherwise collection may start with a stale profile and return no rows.
+    return _probe_c5_account_login(cookie, token, timeout=timeout)
 
 
 def validate_c5_openapi_credentials(

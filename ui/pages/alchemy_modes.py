@@ -687,6 +687,11 @@ class AlchemyModeMixin:
         self._disconnect_calc_runner_signals()
         self._calc_start_time = time.time()
         min_break_even_rate = self.step3_min_be_spin.value() / 100.0
+        max_break_even_rate = self.step3_max_be_spin.value() / 100.0
+        if min_break_even_rate > max_break_even_rate:
+            self._step3_set_calc_button_idle()
+            self._show_step3_input_error("最低保本率不能大于最高保本率")
+            return
 
         self._calc_worker = CalcProcessRunner(
             self._selected_data,
@@ -695,6 +700,7 @@ class AlchemyModeMixin:
             norm_max,
             mode,
             min_break_even_rate=min_break_even_rate,
+            max_break_even_rate=max_break_even_rate,
             non_overlapping_recipes=self.step3_no_overlap_check.isChecked(),
         )
         self._calc_finished_conn = self._calc_worker.finished.connect(self._on_calc_finished)

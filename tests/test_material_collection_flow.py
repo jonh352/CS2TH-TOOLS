@@ -113,7 +113,7 @@ class MaterialCollectionFlowTests(unittest.TestCase):
         self.assertFalse(page.collection_import_button.isHidden())
         self.assertFalse(page.collection_save_json_button.isHidden())
 
-    def test_special_stop_keeps_partial_candidates(self) -> None:
+    def test_special_stop_does_not_expose_raw_candidates_as_recipe_results(self) -> None:
         page = PlatformPage()
         page._special_stopping = True
         page._collection_started_at = 5.0
@@ -124,9 +124,9 @@ class MaterialCollectionFlowTests(unittest.TestCase):
                 "已停止采集",
             )
         self.assertEqual(len(page._collected_items), 1)
+        self.assertIn("候选池 1 件", page.collection_status.text())
         self.assertIn("已停止采集", page.collection_status.text())
-        self.assertIn("共 1 条", page.collection_status.text())
-        self.assertFalse(page.collection_import_button.isHidden())
+        self.assertTrue(page.collection_import_button.isHidden())
 
     def test_stop_without_worker_keeps_pending_import(self) -> None:
         page = PlatformPage()
@@ -217,6 +217,16 @@ class MaterialCollectionFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(len(page._special_solution_recipes), 1)
+        self.assertEqual(
+            page._special_solution_recipes[0]["special_wear_target"],
+            {
+                "paint_index": "123",
+                "name": "AK-47 | 传承",
+                "min_wear": 0.13,
+                "max_wear": 0.14,
+                "slot_count": 5,
+            },
+        )
         self.assertFalse(page.special_results_title.isHidden())
         self.assertEqual(page.special_results_layout.count(), 1)
         self.assertIn("智能配单结果 · 1 组", page.special_results_title.text())

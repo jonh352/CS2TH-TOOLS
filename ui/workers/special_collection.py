@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from threading import Event
+from threading import Event, Lock
 
 from PySide6.QtCore import QThread, Signal
 
@@ -15,6 +15,7 @@ from ui.workers.material_collection import collect_candidates_parallel
 class SpecialCollectionWorker(QThread):
     progress = Signal(str)
     progress_units = Signal(int, int)
+    phase_changed = Signal(str)
     completed = Signal(object, object, str)
 
     def __init__(
@@ -37,14 +38,35 @@ class SpecialCollectionWorker(QThread):
         self.target_wear_low = float(target_wear_low)
         self.target_wear_high = float(target_wear_high)
         self.slot_count = 5 if int(slot_count) == 5 else 10
-        self._stop_event = Event()
+        self._stop_scrape_event = Event()
+        self._cancel_solve_event = Event()
+        self._phase_lock = Lock()
+        self._phase = "scrape"
 
-    def request_stop(self) -> None:
-        self._stop_event.set()
-        self.requestInterruption()
+    def phase(self) -> str:
+        with self._phase_lock:
+            return self._phase
 
-    def _is_stop_requested(self) -> bool:
-        return self._stop_event.is_set() or self.isInterruptionRequested()
+    def _set_phase(self, phase: str) -> None:
+        with self._phase_lock:
+            self._phase = phase
+        self.phase_changed.emit(phase)
+
+    def request_stop(self) -> str:
+        """Stop scraping but keep solving; a second-stage stop cancels solving."""
+        phase = self.phase()
+        if phase == "solve":
+            self._cancel_solve_event.set()
+            self.requestInterruption()
+        else:
+            self._stop_scrape_event.set()
+        return phase
+
+    def _is_scrape_stop_requested(self) -> bool:
+        return self._stop_scrape_event.is_set()
+
+    def _is_solve_stop_requested(self) -> bool:
+        return self._cancel_solve_event.is_set() or self.isInterruptionRequested()
 
     def run(self) -> None:
         candidates, errors, _retry_meta = collect_candidates_parallel(
@@ -52,13 +74,10 @@ class SpecialCollectionWorker(QThread):
             providers=self.providers,
             provider_intervals=self.provider_intervals,
             progress=self.progress.emit,
-            cancel_check=self._is_stop_requested,
+            cancel_check=self._is_scrape_stop_requested,
             unit_progress=self.progress_units.emit,
         )
-
-        if self._is_stop_requested():
-            self.completed.emit(candidates, [], "已停止采集")
-            return
+        scrape_stopped = self._is_scrape_stop_requested()
 
         if len(candidates) < self.slot_count:
             detail = "；".join(errors)
@@ -66,15 +85,24 @@ class SpecialCollectionWorker(QThread):
                 f"有效候选只有 {len(candidates)} 件，"
                 f"至少需要 {self.slot_count} 件"
             )
+            if scrape_stopped:
+                message = f"已停止抓取；{message}"
             if detail:
                 message += f"；{detail}"
             self.completed.emit(candidates, [], message)
             return
 
-        self.progress.emit(
-            f"候选池共 {len(candidates)} 件，"
-            f"正在组合最省成本的{self.slot_count}件…"
-        )
+        self._set_phase("solve")
+        if scrape_stopped:
+            self.progress.emit(
+                f"已停止继续抓取，正在用已有 {len(candidates)} 件候选组合"
+                f"{self.slot_count}件方案…"
+            )
+        else:
+            self.progress.emit(
+                f"候选池共 {len(candidates)} 件，"
+                f"正在组合最省成本的{self.slot_count}件…"
+            )
         # Candidate collection and recipe solving are two distinct phases.  Reset
         # the shared progress bar here so a completed scrape is not mistaken for
         # a completed special-wear run while the 5/10-item search is still active.
@@ -106,14 +134,14 @@ class SpecialCollectionWorker(QThread):
                 self.target_wear_high,
                 rounds=3,
                 progress_callback=report_solve_progress,
-                cancel_check=self._is_stop_requested,
+                cancel_check=self._is_solve_stop_requested,
             )
         except (CollectionCancelled, ComputationCancelled):
-            self.completed.emit(candidates, [], "已停止采集")
+            self.completed.emit(candidates, [], "已停止配组")
             return
         except Exception as exc:  # noqa: BLE001 - keep the GUI worker alive
-            if self._is_stop_requested():
-                self.completed.emit(candidates, [], "已停止采集")
+            if self._is_solve_stop_requested():
+                self.completed.emit(candidates, [], "已停止配组")
                 return
             self.completed.emit(
                 candidates,
@@ -123,6 +151,8 @@ class SpecialCollectionWorker(QThread):
             return
         self.progress_units.emit(100, 100)
         message = str(error or "")
+        if scrape_stopped:
+            message = f"已停止抓取，已使用已有候选完成配组；{message}".strip("；")
         if errors:
             suffix = "；".join(errors)
             message = f"{message}；{suffix}".strip("；")
