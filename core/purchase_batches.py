@@ -6,7 +6,7 @@ import copy
 import json
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from core.purchase_tracking import (
     build_material_tracking_rows,
     inventory_item_match_key,
     inventory_item_template_key,
+    inventory_wear_matches_planned,
     received_asset_ids_for_saved_recipes,
     reconcile_saved_recipes_for_profile,
     recipe_substrate_template_key,
@@ -180,6 +181,88 @@ def purchase_batch_summary(batch: dict[str, Any]) -> dict[str, int]:
     counts["total"] = sum(counts.values())
     counts["recipes"] = recipe_count
     return counts
+
+
+def purchase_batch_is_fully_received(batch: dict[str, Any]) -> bool:
+    summary = purchase_batch_summary(batch)
+    return summary["total"] > 0 and summary[STATUS_RECEIVED] == summary["total"]
+
+
+def compute_alchemy_ready_at(verified_at: datetime | None = None) -> datetime:
+    """Next whole hour after verification, plus 7 days (local timezone)."""
+    when = verified_at or datetime.now().astimezone()
+    if when.tzinfo is None:
+        when = when.astimezone()
+    else:
+        when = when.astimezone()
+    floored = when.replace(minute=0, second=0, microsecond=0)
+    next_hour = floored + timedelta(hours=1)
+    return next_hour + timedelta(days=7)
+
+
+def _parse_alchemy_ready_at(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed.astimezone()
+
+
+def format_alchemy_ready_at(value: object) -> str:
+    ready = _parse_alchemy_ready_at(value)
+    if ready is None:
+        return ""
+    local = ready.astimezone()
+    return f"{local.year}-{local.month}-{local.day} {local.hour:02d}:{local.minute:02d}"
+
+
+def purchase_batch_alchemy_status_text(
+    batch: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Orange suffix after batch name: alchemy countdown text, or empty."""
+    if not purchase_batch_is_fully_received(batch):
+        return ""
+    ready = _parse_alchemy_ready_at(batch.get("alchemy_ready_at"))
+    if ready is None:
+        return ""
+    current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.astimezone()
+    else:
+        current = current.astimezone()
+    if current >= ready:
+        return "可炼金"
+    return f"炼金时间:{format_alchemy_ready_at(ready)}"
+
+
+def refresh_purchase_batch_alchemy_ready_at(
+    path: Path,
+    *,
+    verified_at: datetime | None = None,
+) -> str | None:
+    """Record alchemy_ready_at once when a batch first becomes fully received."""
+    batch = load_purchase_batch(path)
+    if purchase_batch_is_fully_received(batch):
+        existing = str(batch.get("alchemy_ready_at") or "").strip()
+        if existing:
+            return existing
+        ready = compute_alchemy_ready_at(verified_at)
+        batch["alchemy_ready_at"] = ready.isoformat()
+        batch["updated_at"] = _utc_now()
+        _write_batch(path, batch)
+        return str(batch["alchemy_ready_at"])
+    if "alchemy_ready_at" in batch:
+        batch.pop("alchemy_ready_at", None)
+        batch["updated_at"] = _utc_now()
+        _write_batch(path, batch)
+    return None
 
 
 def _find_material(
@@ -725,6 +808,13 @@ def purchase_batch_replacement_options(
     return options[:80], target_text
 
 
+def _planned_template_key_from_row(row: dict[str, Any]) -> str:
+    match_key = str(row.get("match_key") or "")
+    if "|wear:" in match_key:
+        return match_key.rsplit("|wear:", 1)[0]
+    return recipe_substrate_template_key({"name": row.get("name")})
+
+
 def _row_matches_inventory(row: dict[str, Any], item: dict[str, Any]) -> bool:
     assetid = str(item.get("assetid") or "")
     if assetid in {str(value) for value in row.get("ignored_asset_ids") or []}:
@@ -740,7 +830,15 @@ def _row_matches_inventory(row: dict[str, Any], item: dict[str, Any]) -> bool:
             )
         except (TypeError, ValueError, OverflowError):
             return False
-    return inventory_item_match_key(item) == str(row.get("match_key") or "")
+    if inventory_item_match_key(item) == str(row.get("match_key") or ""):
+        return True
+    planned_template = _planned_template_key_from_row(row)
+    if not planned_template or inventory_item_template_key(item) != planned_template:
+        return False
+    return inventory_wear_matches_planned(
+        row.get("float_value"),
+        item.get("float", item.get("float_value")),
+    )
 
 
 def _candidate_preserves_replacement_target(
@@ -930,17 +1028,26 @@ def reconcile_purchase_batches_for_profile(
             failures += 1
             failed_matches += matched_by_path.get(path, 0)
     matched -= failed_matches
-    waiting = sum(
-        1
-        for _path, batch in entries
-        for recipe_entry in batch.get("recipes") or []
-        if isinstance(recipe_entry, dict)
-        for row in recipe_entry.get("materials") or []
-        if isinstance(row, dict) and str(row.get("status") or STATUS_PENDING) == STATUS_ORDERED
-    ) + failed_matches
+    waiting_by_path: dict[str, int] = {}
+    for path, batch in entries:
+        waiting_by_path[str(path.resolve())] = sum(
+            1
+            for recipe_entry in batch.get("recipes") or []
+            if isinstance(recipe_entry, dict)
+            for row in recipe_entry.get("materials") or []
+            if isinstance(row, dict)
+            and str(row.get("status") or STATUS_PENDING) == STATUS_ORDERED
+        )
+    waiting = sum(waiting_by_path.values()) + failed_matches
+    matched_by_path_out = {
+        str(path.resolve()): int(count)
+        for path, count in matched_by_path.items()
+    }
     return {
         "matched": matched,
         "waiting": waiting,
+        "matched_by_path": matched_by_path_out,
+        "waiting_by_path": waiting_by_path,
         "tracked_batches": len(entries),
         "save_failures": failures,
         "used_asset_ids": sorted(used),
@@ -968,6 +1075,8 @@ def reconcile_all_purchase_records_for_profile(
         + int(legacy_result.get("matched") or 0),
         "waiting": int(batch_result.get("waiting") or 0)
         + int(legacy_result.get("waiting") or 0),
+        "matched_by_path": dict(batch_result.get("matched_by_path") or {}),
+        "waiting_by_path": dict(batch_result.get("waiting_by_path") or {}),
         "save_failures": int(batch_result.get("save_failures") or 0)
         + int(legacy_result.get("save_failures") or 0),
         "tracked_batches": int(batch_result.get("tracked_batches") or 0),

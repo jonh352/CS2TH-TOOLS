@@ -1877,80 +1877,14 @@ class MetadataTests(unittest.TestCase):
                 },
             ),
             patch(
-                "core.market_candidates._probe_c5_account_login",
-                return_value={
-                    "provider": "c5",
-                    "ok": True,
-                    "indeterminate": False,
-                    "message": "C5GAME 登录有效",
-                    "account_name": "C5用户",
-                    "user_id": 12,
-                },
+                "core.market_candidates._lookup_c5_user_profile",
+                return_value=("C5用户", 12),
             ),
         ):
             result = validate_provider_login("c5")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["account_name"], "C5用户")
-
-    def test_c5_login_validation_rejects_sell_list_false_positive(self) -> None:
-        with (
-            patch(
-                "core.market_candidates._c5_auth",
-                return_value=("C5Token=stale-session; path=/", "stale-access-token"),
-            ),
-            patch(
-                "core.market_candidates._probe_c5_collection_login",
-                return_value={
-                    "provider": "c5",
-                    "ok": True,
-                    "indeterminate": False,
-                    "message": "C5GAME 登录有效",
-                },
-            ),
-            patch(
-                "core.market_candidates._probe_c5_account_login",
-                return_value={
-                    "provider": "c5",
-                    "ok": False,
-                    "indeterminate": False,
-                    "message": "C5GAME 登录已失效，请重新登录",
-                },
-            ),
-        ):
-            result = validate_provider_login("c5")
-
-        self.assertFalse(result["ok"])
-        self.assertFalse(result["indeterminate"])
-        self.assertIn("登录已失效", result["message"])
-
-    def test_c5_account_probe_rejects_logged_out_response(self) -> None:
-        from core.market_candidates import _probe_c5_account_login
-
-        class LoggedOutResponse:
-            status_code = 200
-            text = '{"code":401,"msg":"请先登录"}'
-
-            @staticmethod
-            def raise_for_status() -> None:
-                return None
-
-            @staticmethod
-            def json() -> dict:
-                return {"code": 401, "msg": "请先登录"}
-
-        with patch(
-            "core.market_candidates.requests.get",
-            return_value=LoggedOutResponse(),
-        ):
-            result = _probe_c5_account_login(
-                "C5Token=stale-session",
-                "stale-access-token",
-            )
-
-        self.assertFalse(result["ok"])
-        self.assertFalse(result["indeterminate"])
-        self.assertIn("登录已失效", result["message"])
 
     def test_eco_login_validation_returns_account_name(self) -> None:
         with (

@@ -119,6 +119,7 @@ class RecipeResultGroup(QFrame):
         self._rank = rank
         self._recipe = recipe
         self._recipe_storage_path = recipe_storage_path
+        self._added_to_purchase_batch = False
         self._purchase_cells: list[PurchaseGoButtonCell] = []
         self._action_cells: list[PurchaseActionCell] = []
         self._action_header: SubstrateActionColumnHeader | None = None
@@ -459,6 +460,32 @@ class RecipeResultGroup(QFrame):
     def _refresh_purchase_cells(self) -> None:
         for c in self._purchase_cells:
             c.apply_viewed_state()
+
+    def all_purchase_links_viewed(self) -> bool:
+        if not self._purchase_cells:
+            return False
+        viewed = self._recipe.get("purchase_viewed")
+        if not isinstance(viewed, dict):
+            return False
+        return all(bool(viewed.get(cell.url_key)) for cell in self._purchase_cells)
+
+    def all_substrates_excluded(self) -> bool:
+        if not self._action_cells:
+            return False
+        return all(cell._state() == "excluded" for cell in self._action_cells)
+
+    def is_added_to_purchase_batch(self) -> bool:
+        return self._added_to_purchase_batch
+
+    def mark_added_to_purchase_batch(self) -> None:
+        self._added_to_purchase_batch = True
+
+    def should_warn_before_recalc(self) -> bool:
+        if not self.all_purchase_links_viewed():
+            return False
+        if self.all_substrates_excluded() and self.is_added_to_purchase_batch():
+            return False
+        return True
 
     def _refresh_action_cells(self, _slot: QrSlot | None = None) -> None:
         del _slot

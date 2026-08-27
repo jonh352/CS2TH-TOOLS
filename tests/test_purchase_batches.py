@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -17,13 +18,16 @@ from core.data_utils import SkinTemplate, wear_as_float32
 from core.purchase_batches import (
     add_recipe_to_purchase_batch,
     apply_purchase_batch_replacement,
+    compute_alchemy_ready_at,
     create_purchase_batch,
     list_purchase_batches,
     load_purchase_batch,
     mark_all_purchase_batch_materials_ordered,
+    purchase_batch_alchemy_status_text,
     purchase_batch_replacement_options,
     purchase_batch_summary,
     reconcile_purchase_batches_for_profile,
+    refresh_purchase_batch_alchemy_ready_at,
     set_purchase_batch_material_status,
     toggle_all_purchase_batch_materials_ordered,
     update_purchase_batch_account,
@@ -550,6 +554,170 @@ class PurchaseBatchTests(unittest.TestCase):
 
         self.assertEqual(result["matched"], 1)
         self.assertEqual(result["waiting"], 1)
+
+    def test_reconcile_matches_inventory_by_six_decimal_wear_prefix(self) -> None:
+        from core.purchase_tracking import inventory_wear_matches_planned
+
+        self.assertTrue(
+            inventory_wear_matches_planned(
+                0.014719970524311066,
+                0.014720000326633453,
+            )
+        )
+        self.assertTrue(
+            inventory_wear_matches_planned(
+                0.003004809841513634,
+                0.003005000064149499,
+            )
+        )
+        with TemporaryDirectory() as temp_dir, patch(
+            "core.purchase_batches.PURCHASE_BATCHES_DIR",
+            Path(temp_dir),
+        ):
+            recipe = _special_recipe()
+            recipe["substrates_display"][0]["float_value"] = 0.014719970524311066
+            path = create_purchase_batch(
+                "前缀匹配",
+                profile_id="prefix-profile",
+                steam_id="",
+                account_name="prefix",
+                inventory_items=[],
+            )
+            entry_id = add_recipe_to_purchase_batch(path, recipe)
+            batch = load_purchase_batch(path)
+            row = batch["recipes"][0]["materials"][0]
+            set_purchase_batch_material_status(
+                path, entry_id, str(row["row_id"]), STATUS_ORDERED
+            )
+            result = reconcile_purchase_batches_for_profile(
+                "prefix-profile",
+                [_inventory("steam-1", 0.014720000326633453)],
+            )
+
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["waiting"], 0)
+
+    def test_alchemy_ready_at_is_next_hour_plus_seven_days(self) -> None:
+        verified = datetime(2026, 8, 27, 9, 34, tzinfo=timezone(timedelta(hours=8)))
+        ready = compute_alchemy_ready_at(verified)
+        self.assertEqual(
+            ready,
+            datetime(2026, 9, 3, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+        )
+        self.assertEqual(
+            purchase_batch_alchemy_status_text(
+                {
+                    "alchemy_ready_at": ready.isoformat(),
+                    "recipes": [
+                        {
+                            "materials": [
+                                {"status": STATUS_RECEIVED},
+                            ]
+                        }
+                    ],
+                },
+                now=verified,
+            ),
+            "炼金时间:2026-9-3 10:00",
+        )
+        self.assertEqual(
+            purchase_batch_alchemy_status_text(
+                {
+                    "alchemy_ready_at": ready.isoformat(),
+                    "recipes": [
+                        {
+                            "materials": [
+                                {"status": STATUS_RECEIVED},
+                            ]
+                        }
+                    ],
+                },
+                now=ready,
+            ),
+            "可炼金",
+        )
+
+    def test_refresh_alchemy_ready_at_only_when_fully_received(self) -> None:
+        with TemporaryDirectory() as temp_dir, patch(
+            "core.purchase_batches.PURCHASE_BATCHES_DIR",
+            Path(temp_dir),
+        ):
+            path = create_purchase_batch(
+                "炼金时间",
+                profile_id="alchemy-profile",
+                steam_id="",
+                account_name="alchemy",
+                inventory_items=[],
+            )
+            entry_id = add_recipe_to_purchase_batch(path, _special_recipe(1))
+            batch = load_purchase_batch(path)
+            row = batch["recipes"][0]["materials"][0]
+            set_purchase_batch_material_status(
+                path, entry_id, str(row["row_id"]), STATUS_ORDERED
+            )
+            verified = datetime(2026, 8, 27, 9, 34, tzinfo=timezone(timedelta(hours=8)))
+            self.assertIsNone(
+                refresh_purchase_batch_alchemy_ready_at(path, verified_at=verified)
+            )
+            self.assertNotIn("alchemy_ready_at", load_purchase_batch(path))
+
+            inventory = _inventory("ready-1", float(row["float_value"]))
+            result = reconcile_purchase_batches_for_profile(
+                "alchemy-profile", [inventory]
+            )
+            self.assertEqual(result["matched"], 1)
+            ready_iso = refresh_purchase_batch_alchemy_ready_at(
+                path, verified_at=verified
+            )
+            updated = load_purchase_batch(path)
+
+        self.assertIsNotNone(ready_iso)
+        self.assertEqual(
+            purchase_batch_alchemy_status_text(updated, now=verified),
+            "炼金时间:2026-9-3 10:00",
+        )
+
+    def test_refresh_alchemy_ready_at_is_not_moved_after_it_is_set(self) -> None:
+        with TemporaryDirectory() as temp_dir, patch(
+            "core.purchase_batches.PURCHASE_BATCHES_DIR",
+            Path(temp_dir),
+        ):
+            path = create_purchase_batch(
+                "炼金时间锁定",
+                profile_id="alchemy-lock-profile",
+                steam_id="",
+                account_name="alchemy",
+                inventory_items=[],
+            )
+            entry_id = add_recipe_to_purchase_batch(path, _special_recipe(1))
+            batch = load_purchase_batch(path)
+            row = batch["recipes"][0]["materials"][0]
+            set_purchase_batch_material_status(
+                path, entry_id, str(row["row_id"]), STATUS_ORDERED
+            )
+            first_verified = datetime(
+                2026, 8, 27, 9, 34, tzinfo=timezone(timedelta(hours=8))
+            )
+            reconcile_purchase_batches_for_profile(
+                "alchemy-lock-profile",
+                [_inventory("ready-lock-1", float(row["float_value"]))],
+            )
+            first_ready = refresh_purchase_batch_alchemy_ready_at(
+                path, verified_at=first_verified
+            )
+            later_verified = datetime(
+                2026, 8, 27, 11, 20, tzinfo=timezone(timedelta(hours=8))
+            )
+            second_ready = refresh_purchase_batch_alchemy_ready_at(
+                path, verified_at=later_verified
+            )
+            updated = load_purchase_batch(path)
+
+        self.assertEqual(first_ready, second_ready)
+        self.assertEqual(
+            purchase_batch_alchemy_status_text(updated, now=first_verified),
+            "炼金时间:2026-9-3 10:00",
+        )
 
     def test_list_batches_is_newest_first(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(

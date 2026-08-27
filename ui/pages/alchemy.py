@@ -1092,6 +1092,16 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             show_toast(self, "请先选择底物数据", style="warning")
             return
 
+        if self._step3_should_confirm_recalc():
+            if not ask_confirmation(
+                self,
+                "重新计算",
+                "当前配方购买链接均已查看。\n"
+                "除非材料已全部排除且已加入采购批次，否则重新计算将清空现有结果。\n"
+                "是否继续？",
+            ):
+                return
+
         self._step3_calc_running = True
         self.step3_calc_btn.setText("停止计算")
         self.step3_no_overlap_check.setEnabled(False)
@@ -1118,6 +1128,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 del item
         self._step3_save_location_row.setVisible(False)
         self._step3_batch_source_id = ""
+
+    def _step3_should_confirm_recalc(self) -> bool:
+        return any(group.should_warn_before_recalc() for group in self._step3_recipe_groups)
 
     @staticmethod
     def _is_step3_validation_error(message: str) -> bool:
@@ -1422,6 +1435,10 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         except (OSError, ValueError) as exc:
             show_toast(self, f"加入采购批次失败：{exc}", style="warning")
             return
+        for group in self._step3_recipe_groups:
+            if getattr(group, "_rank", None) == rank:
+                group.mark_added_to_purchase_batch()
+                break
         show_toast(self, "配方已加入采购批次", style="success")
 
     def _on_clear_file(self):

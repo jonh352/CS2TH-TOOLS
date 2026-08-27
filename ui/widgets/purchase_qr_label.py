@@ -703,6 +703,10 @@ class PurchaseGoButtonCell(QWidget):
         lay.addStretch(1)
         self.apply_viewed_state()
 
+    @property
+    def url_key(self) -> str:
+        return self._url_key
+
     def apply_viewed_state(self) -> None:
         pv = self._recipe.get("purchase_viewed")
         viewed = isinstance(pv, dict) and bool(pv.get(self._url_key))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import math
 from pathlib import Path
 
@@ -24,14 +25,16 @@ from PySide6.QtWidgets import (
 
 from core.alchemy_quality import get_template_from_goods_name
 from core.data_utils import SkinInstance
-from core.platform_links import MARKETPLACES, links_for_template
+from core.platform_links import MARKETPLACES, links_for_template, marketplace_by_key
 from core.purchase_batches import (
     apply_purchase_batch_replacement,
     delete_purchase_batch,
     load_purchase_batch,
+    purchase_batch_alchemy_status_text,
     purchase_batch_replacement_options,
     purchase_batch_summary,
     reconcile_all_purchase_records_for_profile,
+    refresh_purchase_batch_alchemy_ready_at,
     set_purchase_batch_material_status,
     toggle_all_purchase_batch_materials_ordered,
 )
@@ -62,6 +65,41 @@ _FILTER_TO_STATUS = {
     "已入库": STATUS_RECEIVED,
     "需补购": STATUS_CANCELLED,
 }
+_PURCHASE_PLATFORM_SHORT_LABELS = {
+    "buff": "BUFF",
+    "yyyp": "悠悠",
+    "c5": "C5",
+    "eco": "ECO",
+    "steam": "Steam",
+    "steam_inventory": "库存",
+}
+
+
+def _platform_key_from_purchase_url(url: str) -> str:
+    host = str(url or "").lower()
+    if "buff.163.com" in host:
+        return "buff"
+    if "youpin898.com" in host:
+        return "yyyp"
+    if "c5game.com" in host:
+        return "c5"
+    if "ecosteam.cn" in host:
+        return "eco"
+    if "steamcommunity.com" in host:
+        return "steam"
+    return ""
+
+
+def _purchase_platform_label(platform: object, url: str = "") -> str:
+    key = str(platform or "").strip().lower()
+    if not key:
+        key = _platform_key_from_purchase_url(url)
+    if key in _PURCHASE_PLATFORM_SHORT_LABELS:
+        return _PURCHASE_PLATFORM_SHORT_LABELS[key]
+    market = marketplace_by_key(key)
+    if market is not None:
+        return market.name
+    return "打开"
 
 
 def _recipe_group_label(index: int) -> str:
@@ -242,7 +280,18 @@ class PurchaseBatchCard(QFrame):
 
     def _refresh_header(self) -> None:
         summary = purchase_batch_summary(self._payload)
-        self._title_label.setText(str(self._payload.get("name") or "未命名采购批次"))
+        batch_name = str(self._payload.get("name") or "未命名采购批次")
+        alchemy_text = purchase_batch_alchemy_status_text(self._payload)
+        if alchemy_text:
+            self._title_label.setTextFormat(Qt.TextFormat.RichText)
+            self._title_label.setText(
+                f'{html.escape(batch_name)}'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;'
+                f'<span style="color:#f59e0b">{html.escape(alchemy_text)}</span>'
+            )
+        else:
+            self._title_label.setTextFormat(Qt.TextFormat.PlainText)
+            self._title_label.setText(batch_name)
         self._summary_label.setText(
             f"账号：{self._payload.get('account_name') or 'Steam'} · "
             f"{summary['recipes']} 个配方 / {summary['total']} 件 · "
@@ -549,11 +598,13 @@ class PurchaseBatchCard(QFrame):
         wrap = QWidget(self)
         layout = QHBoxLayout(wrap)
         layout.setContentsMargins(4, 2, 4, 2)
-        button = QPushButton("打开", wrap)
-        button.setMinimumHeight(34)
+        platform = str(substrate.get("platform") or material.get("platform") or "")
         replacement = material.get("replacement")
         if isinstance(replacement, dict):
             template = get_template_from_goods_name(str(replacement.get("name") or ""))
+            label = _purchase_platform_label(platform)
+            button = QPushButton(label, wrap)
+            button.setMinimumHeight(34)
             if template is None:
                 button.setEnabled(False)
             else:
@@ -566,7 +617,7 @@ class PurchaseBatchCard(QFrame):
                     url = str(links.get(market.key) or "")
                     if not url or url == market.home_url:
                         continue
-                    action = menu.addAction(market.name)
+                    action = menu.addAction(_purchase_platform_label(market.key))
                     action.triggered.connect(
                         lambda _checked=False, value=url: QDesktopServices.openUrl(QUrl(value))
                     )
@@ -574,6 +625,9 @@ class PurchaseBatchCard(QFrame):
                 button.setEnabled(not menu.isEmpty())
         else:
             url = str(substrate.get("purchase_link") or "")
+            label = _purchase_platform_label(platform, url)
+            button = QPushButton(label, wrap)
+            button.setMinimumHeight(34)
             button.setEnabled(bool(url))
             button.clicked.connect(
                 lambda _checked=False, value=url: QDesktopServices.openUrl(QUrl(value))
@@ -593,7 +647,12 @@ class PurchaseBatchCard(QFrame):
             self._add_action_button(layout, "标记已买", lambda: self._set_status(entry_id, row_id, STATUS_ORDERED))
             self._add_action_button(layout, "找替代", lambda: self._show_replacements(entry_id, row_id))
         elif status == STATUS_ORDERED:
-            self._add_action_button(layout, "标记没买到", lambda: self._set_status(entry_id, row_id, STATUS_CANCELLED))
+            self._add_action_button(
+                layout, "找替代", lambda: self._show_replacements(entry_id, row_id)
+            )
+            self._add_action_button(
+                layout, "标记没买到", lambda: self._set_status(entry_id, row_id, STATUS_CANCELLED)
+            )
         elif status == STATUS_RECEIVED:
             self._add_action_button(layout, "撤销入库", lambda: self._set_status(entry_id, row_id, STATUS_ORDERED))
         else:
@@ -667,13 +726,17 @@ class PurchaseBatchCard(QFrame):
                 profile_id,
                 load_profile_inventory_items(profile_id),
             )
+            refresh_purchase_batch_alchemy_ready_at(self._path)
         except Exception as exc:
             show_toast(self, f"库存核对失败：{exc}", style="warning")
             return
+        batch_key = str(self._path.resolve())
+        matched = int((result.get("matched_by_path") or {}).get(batch_key, 0))
+        waiting = int((result.get("waiting_by_path") or {}).get(batch_key, 0))
         show_toast(
             self,
-            f"新入库 {int(result.get('matched') or 0)} 件，仍待入库 {int(result.get('waiting') or 0)} 件",
-            style="success" if result.get("matched") else "info",
+            f"本批次新入库 {matched} 件，仍待入库 {waiting} 件",
+            style="success" if matched else "info",
         )
         self._reload()
 

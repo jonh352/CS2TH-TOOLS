@@ -22,15 +22,56 @@ from ui.dialogs.purchase_replacement_dialog import PurchaseReplacementDialog
 from ui.pages.platforms import PlatformPage
 from ui.pages.alchemy import AlchemyPage
 from ui.pages.recipe_manage import RecipeManagePage
+from ui.widgets.purchase_qr_label import QrSlot, normalize_purchase_url_key
 from ui.widgets.recipe_result_group import RecipeResultGroup
-from ui.widgets.purchase_batch_card import PurchaseBatchCard
+from ui.widgets.purchase_batch_card import (
+    PurchaseBatchCard,
+    _purchase_platform_label,
+)
 from ui.theme import build_stylesheet
+
+
+def _recipe_with_purchase_links(*, viewed: bool = True, count: int = 2) -> dict:
+    substrates = []
+    purchase_viewed: dict[str, bool] = {}
+    for index in range(count):
+        url = f"https://buff.163.com/goods/{index}"
+        substrates.append(
+            {
+                "name": f"AK-47 | Test {index}",
+                "float_value": 0.1 + index * 0.01,
+                "price": 10.0,
+                "platform": "buff",
+                "purchase_link": url,
+                "weapon_box": "box",
+            }
+        )
+        if viewed:
+            purchase_viewed[normalize_purchase_url_key(url)] = True
+    recipe = {
+        "substrates_display": substrates,
+        "products_display": [],
+        "cost": 10.0 * count,
+    }
+    if purchase_viewed:
+        recipe["purchase_viewed"] = purchase_viewed
+    return recipe
 
 
 class PurchaseBatchUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
+
+    def test_purchase_platform_label_uses_short_names(self) -> None:
+        self.assertEqual(_purchase_platform_label("buff"), "BUFF")
+        self.assertEqual(_purchase_platform_label("yyyp"), "悠悠")
+        self.assertEqual(_purchase_platform_label("c5"), "C5")
+        self.assertEqual(_purchase_platform_label("eco"), "ECO")
+        self.assertEqual(
+            _purchase_platform_label("", "https://buff.163.com/goods/1"),
+            "BUFF",
+        )
 
     def test_recipe_manage_has_purchase_batch_tab_between_saved_views(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(
@@ -65,6 +106,84 @@ class PurchaseBatchUiTests(unittest.TestCase):
         button_texts = [button.text() for button in page.findChildren(QPushButton)]
 
         self.assertNotIn("当前结果加入采购批次", button_texts)
+
+    def test_recipe_result_group_warns_before_recalc_when_all_links_viewed(self) -> None:
+        recipe = _recipe_with_purchase_links(viewed=True, count=2)
+        group = RecipeResultGroup(
+            1,
+            recipe,
+            enable_save=True,
+            get_substrate_action_state=lambda _slot: "neutral",
+            set_substrate_action_state=lambda _slot, _state: None,
+        )
+
+        self.assertTrue(group.should_warn_before_recalc())
+
+        recipe["purchase_viewed"].pop(next(iter(recipe["purchase_viewed"])))
+        group._refresh_purchase_cells()
+        self.assertFalse(group.should_warn_before_recalc())
+
+        recipe = _recipe_with_purchase_links(viewed=True, count=2)
+        group = RecipeResultGroup(
+            1,
+            recipe,
+            enable_save=True,
+            get_substrate_action_state=lambda _slot: "excluded",
+            set_substrate_action_state=lambda _slot, _state: None,
+        )
+        self.assertTrue(group.should_warn_before_recalc())
+
+        recipe = _recipe_with_purchase_links(viewed=True, count=2)
+        group = RecipeResultGroup(
+            1,
+            recipe,
+            enable_save=True,
+            get_substrate_action_state=lambda _slot: "neutral",
+            set_substrate_action_state=lambda _slot, _state: None,
+        )
+        group.mark_added_to_purchase_batch()
+        self.assertTrue(group.should_warn_before_recalc())
+
+        recipe = _recipe_with_purchase_links(viewed=True, count=2)
+        group = RecipeResultGroup(
+            1,
+            recipe,
+            enable_save=True,
+            get_substrate_action_state=lambda _slot: "excluded",
+            set_substrate_action_state=lambda _slot, _state: None,
+        )
+        group.mark_added_to_purchase_batch()
+        self.assertFalse(group.should_warn_before_recalc())
+
+    def test_alchemy_page_confirms_before_recalc_when_recipe_ready(self) -> None:
+        page = AlchemyPage()
+        page._selected_data = [{"name": "test", "float_value": 0.1}]
+        recipe = _recipe_with_purchase_links(viewed=True, count=2)
+        group = RecipeResultGroup(
+            1,
+            recipe,
+            enable_save=True,
+            get_substrate_action_state=lambda _slot: "neutral",
+            set_substrate_action_state=lambda _slot, _state: None,
+        )
+        page._step3_recipe_groups = [group]
+
+        self.assertTrue(page._step3_should_confirm_recalc())
+
+        with patch("ui.pages.alchemy.ask_confirmation", return_value=False) as confirm:
+            page._on_step3_start_calc()
+
+        confirm.assert_called_once()
+        self.assertFalse(page._step3_calc_running)
+
+        with patch("ui.pages.alchemy.ask_confirmation", return_value=True):
+            with patch("ui.pages.alchemy.FetchPriceWorker") as worker_cls:
+                worker = worker_cls.return_value
+                page._on_step3_start_calc()
+
+        self.assertTrue(page._step3_calc_running)
+        worker_cls.assert_called_once()
+        worker.start.assert_called_once()
 
     def test_alchemy_result_can_join_batch_and_duplicate_click_is_blocked(self) -> None:
         recipe = _special_recipe()

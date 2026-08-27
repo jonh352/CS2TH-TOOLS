@@ -50,6 +50,30 @@ def _wear_bits(value: object) -> str:
     return struct.pack("<f", wear).hex()
 
 
+def wear_decimal_prefix_6(value: object) -> str:
+    """Steam wear shown to 6 decimal places; used for inventory reconciliation."""
+    try:
+        wear = wear_as_float32(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not math.isfinite(wear) or wear < 0.0 or wear > 1.0:
+        return ""
+    if wear >= 1.0 - 1e-9:
+        return "1.000000"
+    return f"{round(wear, 6):.6f}"
+
+
+def inventory_wear_matches_planned(planned: object, actual: object) -> bool:
+    """Match exact float32 bits, or the same 6-decimal wear prefix as Steam shows."""
+    planned_bits = _wear_bits(planned)
+    actual_bits = _wear_bits(actual)
+    if planned_bits and actual_bits and planned_bits == actual_bits:
+        return True
+    planned_prefix = wear_decimal_prefix_6(planned)
+    actual_prefix = wear_decimal_prefix_6(actual)
+    return bool(planned_prefix and planned_prefix == actual_prefix)
+
+
 def _template_key_from_recipe_substrate(substrate: dict[str, Any]) -> str:
     template = get_template_from_goods_name(str(substrate.get("name") or ""))
     if template is not None:
