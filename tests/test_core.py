@@ -2756,6 +2756,10 @@ class AuthTests(unittest.TestCase):
                             "member_until": 2_000_000_000,
                             "free_max_cost": 20,
                         },
+                        "client_update": {
+                            "latest_version": "9.9.9",
+                            "download_url": "https://cs2th.cn/tradeup-assistant",
+                        },
                     },
                 )
 
@@ -2781,7 +2785,10 @@ class AuthTests(unittest.TestCase):
             loaded = client.load_local_session()
             self.assertEqual(loaded, session)
             refreshed = client.validate_session(session)
-            self.assertEqual(refreshed, session)
+            self.assertEqual(refreshed.access_token, session.access_token)
+            self.assertEqual(refreshed.account, session.account)
+            self.assertIsNotNone(refreshed.client_update)
+            self.assertEqual(refreshed.client_update.latest_version, "9.9.9")
             client.logout(session)
             self.assertFalse(session_file.exists())
             self.assertEqual(http.calls[-1][1], "https://cs2th.cn/api/auth/logout")

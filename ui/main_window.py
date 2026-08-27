@@ -29,9 +29,11 @@ from config import (
 )
 from core.app_protocol import FOCUS_COMMAND, recipe_reference_from_command
 from core.auth_client import AuthClient, AuthSession, has_tradeup_access
+from core.client_update import is_version_older
 from core.close_behavior_prefs import load_close_behavior
 from ui.access_lock import apply_page_interaction_lock
 from ui.dialogs.account_dialog import AccountDialog
+from ui.dialogs.alert_dialog import ClientUpdateDialog
 from ui.dialogs.information_dialogs import SettingsDialog
 from ui.login_dialog import LoginDialog
 from ui.theme import apply_theme
@@ -126,6 +128,8 @@ class MainWindow(QMainWindow):
         self._access_banner_action.clicked.connect(self._account_clicked)
         banner_row.addWidget(self._access_banner_action, 0)
         root.addWidget(self._access_banner)
+
+        self._client_update_prompt_shown = False
 
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
@@ -789,6 +793,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.auth_session = session
         self._sync_account_button()
+        self._maybe_show_client_update(session)
         allowed = bool(has_tradeup_access(session) and not error)
         if allowed and session is not None:
             self._set_access_ui(allowed=True, message="", show_login=False)
@@ -824,6 +829,20 @@ class MainWindow(QMainWindow):
         )
         if not self._active_page_key:
             self._activate("alchemy")
+
+    def _maybe_show_client_update(self, session: AuthSession | None) -> None:
+        if self._client_update_prompt_shown:
+            return
+        info = session.client_update if session is not None else None
+        if info is None or not is_version_older(APP_VERSION, info.latest_version):
+            return
+        self._client_update_prompt_shown = True
+        ClientUpdateDialog(
+            info.latest_version,
+            APP_VERSION,
+            info.download_url,
+            self,
+        ).exec()
 
     def _start_auth_validation(self) -> None:
         if self.auth_session is None or not self.auth_client.enabled:

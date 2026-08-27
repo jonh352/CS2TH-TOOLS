@@ -21,6 +21,7 @@ from config import (
     AUTH_HTTP_TIMEOUT_S,
     AUTH_SESSION_FILE,
 )
+from core.client_update import ClientUpdateInfo, parse_client_update
 
 CLIENT_ID = "cs2th-tools"
 
@@ -49,6 +50,7 @@ class AuthSession:
     access_token: str
     account: Account
     public_beta: dict[str, bool] = field(default_factory=dict)
+    client_update: ClientUpdateInfo | None = None
 
     def has_tradeup_access(self) -> bool:
         beta = self.public_beta or {}
@@ -212,6 +214,7 @@ def _session_from_payload(access_token: str, payload: dict[str, Any]) -> AuthSes
         access_token,
         _account_from_payload(payload),
         {str(key): bool(value) for key, value in public_beta.items()},
+        parse_client_update(payload),
     )
 
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.client_update import DEFAULT_DOWNLOAD_URL
 from ui.app_settings import save_alchemy_wear_step2_notice_dismissed
 from ui.dialog_topmost_support import (
     apply_frameless_modal_geometry,
@@ -103,6 +105,59 @@ class ConfirmDialog(QDialog):
 
         _wire_overlay_dismiss(overlay, box, self, accept=False)
         install_dialog_topmost_follow_parent(self)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        apply_frameless_modal_geometry(self, self.parentWidget())
+
+
+class ClientUpdateDialog(QDialog):
+    """桌面端版本更新提示：每次启动检测到旧版本时弹出。"""
+
+    def __init__(
+        self,
+        latest_version: str,
+        current_version: str,
+        download_url: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        title = "新版本已发布"
+        message = (
+            f"新版本 v{latest_version} 已发布，请下载安装以获得最新功能与修复。\n\n"
+            f"当前版本 v{current_version}"
+        )
+        self._download_url = download_url or DEFAULT_DOWNLOAD_URL
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        overlay, box, layout, close_btn = _build_frameless_modal_content(
+            self,
+            title,
+            message,
+            message_object_name="alertDialogMessage",
+        )
+        main_layout.addWidget(overlay)
+        close_btn.clicked.connect(self.reject)
+
+        add_modal_footer_buttons(
+            layout,
+            cancel_text="下次一定",
+            ok_text="点此下载",
+            on_cancel=self.reject,
+            on_ok=self._open_download,
+        )
+
+        _wire_overlay_dismiss(overlay, box, self, accept=False)
+        install_dialog_topmost_follow_parent(self)
+
+    def _open_download(self) -> None:
+        QDesktopServices.openUrl(QUrl(self._download_url))
+        self.accept()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

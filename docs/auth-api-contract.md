@@ -23,8 +23,12 @@
 响应：
 
 ```json
-{"ok": true, "user": {"id": 1, "username": "name", "is_member": true, "member_until": 0}}
+{"ok": true, "user": {"id": 1, "username": "name", "is_member": true, "member_until": 0}, "client_update": {"latest_version": "1.3.9", "download_url": "https://cs2th.cn/tradeup-assistant"}}
 ```
+
+`client_update` 为可选字段。桌面端在启动校验登录时读取
+`latest_version`，若高于本地版本则每次启动弹出更新提示；`download_url` 缺省时使用
+`https://cs2th.cn/tradeup-assistant`。
 
 ## `POST /api/auth/logout`
 
