@@ -169,6 +169,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
     """炼金页面 - 右上角选择文件按钮，按 goods_name 聚合展示"""
 
     navigation_route_changed = Signal(str)
+    simulate_tradeup_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1238,6 +1239,11 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             group.add_to_purchase_batch_requested.connect(
                 self._on_recipe_add_to_purchase_batch_requested
             )
+            group.simulate_tradeup_requested.connect(
+                lambda recipe_payload: self.simulate_tradeup_requested.emit(
+                    recipe_payload
+                )
+            )
             self.step3_results_layout.addWidget(group)
             self._step3_recipe_groups.append(group)
         self.step3_results_layout.addStretch(1)
@@ -1897,7 +1903,15 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             goods_key = "未知"
         float_value = AlchemyPage._dedupe_float_key_part(data.get("float_value"))
         plat = str(data.get("platform", "") or "").strip().lower() or "buff"
-        return (goods_key, float_value, plat)
+        # Two physical Steam items may legitimately have the same skin and
+        # float.  Keep their asset identities separate so a calculated recipe
+        # can later execute the exact items selected by the optimizer.
+        asset_id = (
+            str(data.get("steam_assetid") or data.get("goods_id") or "")
+            if plat in _INVENTORY_PLATFORMS
+            else ""
+        )
+        return (goods_key, float_value, plat, asset_id)
 
     def _try_add_one_row(self, data: dict) -> bool:
         """校验并写入 _all_data，重复键不覆盖。返回是否新增。"""
@@ -2067,7 +2081,12 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         return [row for row in raw if isinstance(row, dict)]
 
     def _inventory_item_to_alchemy_row(
-        self, item: dict, price_map: dict | None
+        self,
+        item: dict,
+        price_map: dict | None,
+        *,
+        profile_id: str = "",
+        steam_id: str = "",
     ) -> dict | None:
         from core.alchemy_calc import lookup_inventory_item_price_value
 
@@ -2094,6 +2113,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             "goods_name": goods_name,
             "platform": "inventory",
             "price": float(price or 0.0),
+            "steam_assetid": str(item.get("assetid") or ""),
+            "steam_profile_id": str(profile_id or ""),
+            "steam_id": str(steam_id or ""),
         }
 
     def _on_import_steam_inventory(self) -> None:
@@ -2122,10 +2144,16 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             )
             return
         price_map = try_build_product_price_map_from_disk()
+        steam_id = str(load_steam_account_config_dict(profile_id).get("steam_id") or "")
         mapped: list[dict] = []
         skipped = 0
         for item in items:
-            row = self._inventory_item_to_alchemy_row(item, price_map)
+            row = self._inventory_item_to_alchemy_row(
+                item,
+                price_map,
+                profile_id=profile_id,
+                steam_id=steam_id,
+            )
             if row is None:
                 skipped += 1
                 continue

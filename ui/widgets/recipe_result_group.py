@@ -28,6 +28,7 @@ from core.saved_recipes import (
     format_recipe_summary_line,
     update_recipe_recipe_dict,
 )
+from core.steam_tradeup import inventory_recipe_tradeup_readiness
 from ..icons import expand_section_triangle_icon
 
 from .collapsible_group import AlchemyRecipeRowHoverTableWidget
@@ -91,11 +92,93 @@ def _wear_float_selectable_cell(
     return wrap
 
 
+def build_recipe_product_table(
+    parent: QWidget,
+    recipe: dict,
+    *,
+    cost: float | None = None,
+) -> AlchemyRecipeRowHoverTableWidget:
+    """Build the shared product-detail table used by results and purchasing."""
+    table = AlchemyRecipeRowHoverTableWidget(parent)
+    # 独立 objectName：主题 QSS 里 #alchemyTable::item 强写了 color，会盖住 setForeground
+    table.setObjectName("alchemyRecipeProductTable")
+    table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+    table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+    table.setColumnCount(5)
+    table.setHorizontalHeaderLabels(
+        ["饰品", "磨损度", "武器箱/收藏品", "价格", "概率"]
+    )
+    table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+    table.setColumnWidth(0, 280)
+    for column in range(1, 5):
+        table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+    table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+    table.verticalHeader().setVisible(False)
+    table.verticalHeader().setDefaultSectionSize(50)
+    table.setEditTriggers(AlchemyRecipeRowHoverTableWidget.NoEditTriggers)
+    products = sorted(
+        list(recipe.get("products_display", [])),
+        key=_product_row_price,
+        reverse=True,
+    )
+    table.setRowCount(len(products))
+    raw_cost = recipe.get("cost", 0) if cost is None else cost
+    cost_f = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+    profit_brush = QBrush(QColor("#10b981"))
+    loss_brush = QBrush(QColor("#ef4444"))
+    align = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+    for row, product in enumerate(products):
+        row_brush = (
+            profit_brush if _product_row_price(product) > cost_f else loss_brush
+        )
+        name_item = QTableWidgetItem(product.get("name", ""))
+        name_item.setTextAlignment(align)
+        name_item.setForeground(row_brush)
+        table.setItem(row, 0, name_item)
+        float_value = product.get("float_value", 0)
+        table.setCellWidget(
+            row,
+            1,
+            _wear_float_selectable_cell(
+                table,
+                float_value,
+                text_color=row_brush.color().name(),
+            ),
+        )
+        box_item = QTableWidgetItem(product.get("weapon_box", ""))
+        box_item.setTextAlignment(align)
+        box_item.setForeground(row_brush)
+        table.setItem(row, 2, box_item)
+        raw_price = product.get("price", 0)
+        price_value = _product_row_price(product)
+        profit = price_value - cost_f
+        price_text = (
+            f"{price_value:.2f} ({profit:+.2f})"
+            if isinstance(raw_price, (int, float))
+            else f"{raw_price} ({profit:+.2f})"
+        )
+        price_item = QTableWidgetItem(price_text)
+        price_item.setTextAlignment(align)
+        price_item.setForeground(row_brush)
+        table.setItem(row, 3, price_item)
+        probability = product.get("prob", 0)
+        probability_item = QTableWidgetItem(
+            f"{probability:.2%}"
+            if isinstance(probability, (int, float))
+            else str(probability)
+        )
+        probability_item.setTextAlignment(align)
+        probability_item.setForeground(row_brush)
+        table.setItem(row, 4, probability_item)
+    return table
+
+
 class RecipeResultGroup(QFrame):
     """可折叠的配方结果组 - 标题含成本、期望、收益率、保本率、产物归一化磨损；表内含产物标价。"""
 
     save_requested = Signal(int, dict)  # rank, recipe（深拷贝）
     add_to_purchase_batch_requested = Signal(int, dict)  # rank, recipe（深拷贝）
+    simulate_tradeup_requested = Signal(dict)
 
     def __init__(
         self,
@@ -173,6 +256,22 @@ class RecipeResultGroup(QFrame):
             )
             header_layout.addWidget(self._action_header, 0, Qt.AlignVCenter)
         if enable_save:
+            inventory_ready, inventory_reason = inventory_recipe_tradeup_readiness(
+                recipe
+            )
+            self.simulate_tradeup_btn = QPushButton("模拟并汰换")
+            self.simulate_tradeup_btn.setObjectName("alchemySelectFileBtn")
+            self.simulate_tradeup_btn.setCursor(Qt.PointingHandCursor)
+            self.simulate_tradeup_btn.setToolTip(inventory_reason)
+            self.simulate_tradeup_btn.setVisible(inventory_ready)
+            self.simulate_tradeup_btn.clicked.connect(
+                self._on_simulate_tradeup_clicked
+            )
+            header_layout.addWidget(
+                self.simulate_tradeup_btn,
+                0,
+                Qt.AlignVCenter,
+            )
             self.add_to_purchase_batch_btn = QPushButton("加入采购批次")
             self.add_to_purchase_batch_btn.setObjectName("alchemySelectFileBtn")
             self.add_to_purchase_batch_btn.setCursor(Qt.PointingHandCursor)
@@ -193,6 +292,7 @@ class RecipeResultGroup(QFrame):
             self.save_btn.clicked.connect(self._on_save_clicked)
             header_layout.addWidget(self.save_btn, 0, Qt.AlignVCenter)
         else:
+            self.simulate_tradeup_btn = None
             self.add_to_purchase_batch_btn = None
             self.save_btn = None
         main_layout.addWidget(self.header)
@@ -323,66 +423,7 @@ class RecipeResultGroup(QFrame):
         prod_label = QLabel("产物")
         prod_label.setObjectName("alchemyProductName")
         content_layout.addWidget(prod_label)
-        prod_table = AlchemyRecipeRowHoverTableWidget(self.content_frame)
-        # 独立 objectName：主题 QSS 里 #alchemyTable::item 强写了 color，会盖住 setForeground
-        prod_table.setObjectName("alchemyRecipeProductTable")
-        prod_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        prod_table.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        prod_table.setColumnCount(5)
-        prod_table.setHorizontalHeaderLabels(["饰品", "磨损度", "武器箱/收藏品", "价格", "概率"])
-        prod_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        prod_table.setColumnWidth(0, 280)
-        for col in range(1, 5):
-            prod_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Stretch)
-        prod_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        prod_table.verticalHeader().setVisible(False)
-        prod_table.verticalHeader().setDefaultSectionSize(50)
-        prod_table.setEditTriggers(AlchemyRecipeRowHoverTableWidget.NoEditTriggers)
-        products = sorted(
-            list(recipe.get("products_display", [])),
-            key=_product_row_price,
-            reverse=True,
-        )
-        prod_table.setRowCount(len(products))
-        cost_f = float(cost) if isinstance(cost, (int, float)) else 0.0
-        profit_brush = QBrush(QColor("#10b981"))
-        loss_brush = QBrush(QColor("#ef4444"))
-        for row, p in enumerate(products):
-            row_brush = profit_brush if _product_row_price(p) > cost_f else loss_brush
-            it0 = QTableWidgetItem(p.get("name", ""))
-            it0.setTextAlignment(align)
-            it0.setForeground(row_brush)
-            prod_table.setItem(row, 0, it0)
-            fv = p.get("float_value", 0)
-            prod_table.setCellWidget(
-                row,
-                1,
-                _wear_float_selectable_cell(
-                    prod_table,
-                    fv,
-                    text_color=row_brush.color().name(),
-                ),
-            )
-            it2 = QTableWidgetItem(p.get("weapon_box", ""))
-            it2.setTextAlignment(align)
-            it2.setForeground(row_brush)
-            prod_table.setItem(row, 2, it2)
-            prc = p.get("price", 0)
-            pval = _product_row_price(p)
-            profit = pval - cost_f
-            if isinstance(prc, (int, float)):
-                price_cell = f"{pval:.2f} ({profit:+.2f})"
-            else:
-                price_cell = f"{prc} ({profit:+.2f})"
-            itp = QTableWidgetItem(price_cell)
-            itp.setTextAlignment(align)
-            itp.setForeground(row_brush)
-            prod_table.setItem(row, 3, itp)
-            prob = p.get("prob", 0)
-            it3 = QTableWidgetItem(f"{prob:.2%}" if isinstance(prob, (int, float)) else str(prob))
-            it3.setTextAlignment(align)
-            it3.setForeground(row_brush)
-            prod_table.setItem(row, 4, it3)
+        prod_table = build_recipe_product_table(self.content_frame, recipe)
         content_layout.addWidget(prod_table)
 
         main_layout.addWidget(self.content_frame)
@@ -571,6 +612,9 @@ class RecipeResultGroup(QFrame):
             self._rank,
             copy.deepcopy(self._recipe),
         )
+
+    def _on_simulate_tradeup_clicked(self) -> None:
+        self.simulate_tradeup_requested.emit(copy.deepcopy(self._recipe))
 
     def _on_header_clicked(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

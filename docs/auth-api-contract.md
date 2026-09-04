@@ -23,7 +23,7 @@
 响应：
 
 ```json
-{"ok": true, "user": {"id": 1, "username": "name", "is_member": true, "member_until": 0}, "client_update": {"latest_version": "1.3.9", "download_url": "https://cs2th.cn/tradeup-assistant"}}
+{"ok": true, "user": {"id": 1, "username": "name", "is_member": true, "member_until": 0}, "client_update": {"latest_version": "1.4.1", "download_url": "https://cs2th.cn/tradeup-assistant"}}
 ```
 
 `client_update` 为可选字段。桌面端在启动校验登录时读取

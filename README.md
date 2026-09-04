@@ -5,6 +5,7 @@
 - **炼金计算**：导入底物行情，支持扫描、目标磨损、特殊磨损模式，计算成本、期望、收益率和保本率。
 - **炼金模拟**：五合一/十合一模拟，展示产物概率、磨损和估值，并可保存为配方。
 - **配方管理**：文件夹分类、搜索、拖动排序、批量移动/删除，并可重新导入模拟。
+- **采购与一键汰换**：采购配方核对到齐后，可用 Steam 手机 App 扫码授权，在本机按指定的 10 个资产编号完成真实汰换；成功后自动记录产物并停止校验已消耗材料。
 - **特殊磨损查询**：输入目标皮肤与磨损前缀，按 CS2 `float32` 精度给出真实可达区间，并反算可作为底物的皮肤磨损。
 - **材料采集**：按饰品和外观生成平台直达链接；也可粘贴 CS2TH
   配方链接，展示每种材料、数量和磨损区间，并使用接口返回的最新平台 ID
@@ -120,6 +121,7 @@ cd D:\CS2TH-tools
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+npm install --ignore-scripts
 python main.py
 ```
 
@@ -173,3 +175,5 @@ powershell -ExecutionPolicy Bypass -File .\build_setup.ps1 -OneFile
 ```
 
 登录态不会写入项目目录，也不会提交到 Git。
+一键汰换使用的 Steam 游戏授权也只保存在对应账号的本地目录，并使用 Windows
+DPAPI 加密；授权和库存材料不会上传到 CS2TH 服务端。

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import html
 from collections.abc import Callable
 
-from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QLocale, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QDoubleValidator,
     QFont,
@@ -43,6 +44,11 @@ from core.alchemy_calc import (
     format_inventory_yuan_price,
 )
 from core.alchemy_quality import resolve_inventory_skin_template
+from core.purchase_tracking import (
+    inventory_wear_matches_planned,
+    recipe_substrate_template_key,
+)
+from core.steam_tradeup import tradeup_plan_cached_readiness
 from core.saved_recipes import (
     default_save_recipe_dialog_title,
     format_recipe_summary_line,
@@ -65,7 +71,9 @@ from core.data_utils import (
     wear_zone_index,
 )
 from core.inventory_icons import weapon_image_path_from_skin_template
-from ui.feedback import show_alert
+from ui.dialogs.steam_tradeup_dialog import SteamTradeupDialog
+from ui.dialogs.steam_tradeup_result_dialog import SteamTradeupResultDialog
+from ui.feedback import ask_confirmation, show_alert
 from ui.icons import load_svg_icon
 from ui.widgets.float_line_edit import format_float_shortest
 from ui.widgets.segmented_switch import SegmentedCheckSwitch
@@ -87,6 +95,8 @@ _SIM_RESULT_CARD_HEIGHT = 260
 _SIM_GRID_SPACING = 12
 _SIM_WEAR_MAX_DECIMALS = 18
 _SIM_SUBSTRATE_INVALID_MESSAGE = "请为每个底物槽选择皮肤，并填写磨损"
+# 本进程内：首次「确认一键汰换」需阅读风险；之后重启前不再弹出风险免责声明
+_TRADEUP_RISK_ACKNOWLEDGED_THIS_SESSION = False
 
 # 与需求方提供的品质色一致（非凡未给出，沿用游戏向金色）
 _SIM_QUALITY_BG = {
@@ -522,6 +532,8 @@ class _WearDoubleValidator(QDoubleValidator):
 class _SimulationSubstrateCard(QFrame):
     """单格底物：图区 + 皮肤搜索 + 磨损；左上角外观角标、右上角品质。"""
 
+    input_changed = Signal()
+
     def __init__(
         self,
         index: int,
@@ -585,6 +597,9 @@ class _SimulationSubstrateCard(QFrame):
             auto_pick_first_on_focus_out=True,
         )
         self._skin_search.skin_resolved.connect(self._on_skin_resolved)
+        self._skin_search.skin_resolved.connect(
+            lambda _template: self.input_changed.emit()
+        )
         root.addWidget(self._skin_search)
 
         self._wear_edit = QLineEdit(self)
@@ -604,6 +619,7 @@ class _SimulationSubstrateCard(QFrame):
         self._wear_commit_debounce.timeout.connect(self._on_wear_focus_out_deferred)
         self._wear_edit.returnPressed.connect(self._on_wear_return_pressed)
         self._wear_edit.textChanged.connect(self._sync_appearance_badge_from_wear)
+        self._wear_edit.textEdited.connect(lambda _text: self.input_changed.emit())
         self._wear_edit.installEventFilter(self)
 
     @staticmethod
@@ -880,6 +896,8 @@ class AlchemySimulationPage(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("alchemySimulationPage")
+        self._verified_tradeup_plan: dict | None = None
+        self._loading_verified_tradeup_plan = False
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
@@ -1034,6 +1052,28 @@ class AlchemySimulationPage(QWidget):
         )
         self._results_header_scroll.setWidget(self._results_header_label)
         _rh.addWidget(self._results_header_scroll, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._verified_inventory_badge = QLabel("真实库存配方")
+        self._verified_inventory_badge.setObjectName("verifiedInventoryRecipeBadge")
+        self._verified_inventory_badge.setStyleSheet(
+            "background:#10b981;color:white;border-radius:5px;padding:5px 9px;"
+            "font-weight:600;"
+        )
+        self._verified_inventory_badge.hide()
+        _rh.addWidget(
+            self._verified_inventory_badge,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        self._execute_tradeup_btn = QPushButton("确认一键汰换")
+        self._execute_tradeup_btn.setObjectName("purchaseBatchOneClickTradeupBtn")
+        self._execute_tradeup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._execute_tradeup_btn.clicked.connect(self._execute_verified_tradeup)
+        self._execute_tradeup_btn.hide()
+        _rh.addWidget(
+            self._execute_tradeup_btn,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         _rv.addWidget(self._results_header)
 
         self._apply_results_summary(None)
@@ -1068,6 +1108,7 @@ class AlchemySimulationPage(QWidget):
                 allowed_qualities=None,
                 candidate_popup_above=False,
             )
+            card.input_changed.connect(self._on_substrate_input_changed)
             self._cards.append(card)
 
         # 五合一 / 十合一 各自独立的槽位快照（切换模式时先存后换筛选再恢复）
@@ -1085,13 +1126,181 @@ class AlchemySimulationPage(QWidget):
         self._fetch_worker: QObject | None = None
         self._simulation_price_fetch_busy = False
 
-        QTimer.singleShot(0, self._apply_mode_to_cards)
+        QTimer.singleShot(0, self._apply_initial_mode_to_cards)
 
     def _is_five_mode(self) -> bool:
         return self._mode_five_btn.isChecked()
 
+    def _apply_initial_mode_to_cards(self) -> None:
+        """Apply deferred startup state without invalidating an early real recipe."""
+        was_loading = self._loading_verified_tradeup_plan
+        self._loading_verified_tradeup_plan = True
+        try:
+            self._apply_mode_to_cards()
+        finally:
+            self._loading_verified_tradeup_plan = was_loading
+
     def _visible_slot_count(self) -> int:
         return 5 if self._is_five_mode() else _SIM_MAX_CARDS
+
+    def _verified_plan_matches_cards(self) -> bool:
+        plan = self._verified_tradeup_plan
+        if not isinstance(plan, dict):
+            return False
+        materials = [
+            row for row in plan.get("materials") or [] if isinstance(row, dict)
+        ]
+        material_count = len(materials)
+        if material_count not in (5, 10) or self._visible_slot_count() != material_count:
+            return False
+        for card, material in zip(self._cards[:material_count], materials):
+            name = card.selected_display_name()
+            wear = _parse_wear_value(card.wear_text())
+            if not name or wear is None:
+                return False
+            if recipe_substrate_template_key({"name": name}) != recipe_substrate_template_key(
+                {"name": material.get("name")}
+            ):
+                return False
+            if not inventory_wear_matches_planned(
+                material.get("float_value"), wear
+            ):
+                return False
+        return True
+
+    def _clear_verified_tradeup(self, *, notify: bool = False) -> None:
+        had_plan = self._verified_tradeup_plan is not None
+        self._verified_tradeup_plan = None
+        self._verified_inventory_badge.hide()
+        self._execute_tradeup_btn.hide()
+        if notify and had_plan:
+            show_toast(
+                self,
+                "材料已修改，当前结果仅用于模拟，已取消真实库存执行资格",
+                style="info",
+            )
+
+    def _on_substrate_input_changed(self) -> None:
+        if self._loading_verified_tradeup_plan:
+            return
+        if self._verified_tradeup_plan is not None and not self._verified_plan_matches_cards():
+            self._clear_verified_tradeup(notify=True)
+
+    def _sync_verified_tradeup_controls(self) -> None:
+        ready = bool(
+            self._verified_tradeup_plan is not None
+            and self._results_section.isVisible()
+            and self._verified_plan_matches_cards()
+        )
+        self._verified_inventory_badge.setVisible(ready)
+        self._execute_tradeup_btn.setVisible(ready)
+
+    def import_verified_tradeup_plan(self, plan: dict) -> str | None:
+        materials = [
+            row for row in plan.get("materials") or [] if isinstance(row, dict)
+        ]
+        asset_ids = [str(value or "") for value in plan.get("asset_ids") or []]
+        material_count = len(materials)
+        if material_count not in (5, 10) or len(asset_ids) != material_count:
+            return "一键汰换仅支持 10 件材料或 5 件隐秘级材料"
+        if any(not value for value in asset_ids) or len(set(asset_ids)) != material_count:
+            return "真实库存材料的 Steam 资产编号无效"
+        recipe = {
+            "simulation_slot_count": material_count,
+            "substrates_display": [
+                {
+                    "name": str(row.get("name") or ""),
+                    "float_value": row.get("float_value"),
+                }
+                for row in materials
+            ],
+        }
+        self._loading_verified_tradeup_plan = True
+        try:
+            error = self.import_substrates_from_recipe_dict(recipe)
+        finally:
+            self._loading_verified_tradeup_plan = False
+        if error:
+            self._clear_verified_tradeup()
+            return error
+        self._verified_tradeup_plan = copy.deepcopy(plan)
+        if not self._verified_plan_matches_cards():
+            self._clear_verified_tradeup()
+            return "真实库存材料与模拟槽位不一致，请重新核对"
+        self._verified_inventory_badge.setText("真实库存配方 · 等待模拟")
+        self._verified_inventory_badge.show()
+        self._execute_tradeup_btn.hide()
+        QTimer.singleShot(0, self._on_start_calculate_clicked)
+        return None
+
+    def _execute_verified_tradeup(self) -> None:
+        plan = self._verified_tradeup_plan
+        if not isinstance(plan, dict) or not self._verified_plan_matches_cards():
+            self._clear_verified_tradeup(notify=True)
+            return
+        live_ready, live_reason = tradeup_plan_cached_readiness(plan)
+        if not live_ready:
+            show_alert(self, "无法一键汰换", live_reason)
+            return
+        material_count = len(plan.get("materials") or [])
+        material_lines = "\n".join(
+            f"{index}. {row.get('name') or '未知材料'}  "
+            f"{float(row.get('float_value') or 0):.10f}"
+            for index, row in enumerate(plan.get("materials") or [], start=1)
+        )
+        global _TRADEUP_RISK_ACKNOWLEDGED_THIS_SESSION
+        confirm_kwargs: dict = {
+            "box_width": 800,
+            "ok_text": "已确认在其他地方未登陆游戏",
+        }
+        if not _TRADEUP_RISK_ACKNOWLEDGED_THIS_SESSION:
+            confirm_kwargs["warning_text"] = (
+                "风险提示与免责声明<br>"
+                "1. Steam 当前用户协议对自动化操作存在限制，因此不能承诺账号零风险。"
+                '<a href="https://store.steampowered.com/subscriber_agreement/english/">'
+                "Steam用户协议</a><br>"
+                "2. 汰换随机、材料永久消耗且可能亏损。<br>"
+                "3. 执行期间不能在其他设备或游戏内同时操作材料！！！<br>"
+                "4. Steam 政策变化、网络故障和第三方服务异常存在可能性。"
+            )
+            confirm_kwargs["acknowledgement_text"] = (
+                "我已阅读并理解上述风险，已核对材料，并确认由本人授权执行本次不可撤销的汰换"
+            )
+        if not ask_confirmation(
+            self,
+            "确认一键汰换",
+            f"你已查看本次模拟产物。将使用下列 {material_count} 件真实 Steam 库存材料执行汰换，"
+            "操作不可撤销。\n\n"
+            f"{material_lines}\n\n"
+            "确认后如未保存游戏授权，可选择扫码或账号、密码及 Steam Guard 令牌登录。",
+            **confirm_kwargs,
+        ):
+            return
+        _TRADEUP_RISK_ACKNOWLEDGED_THIS_SESSION = True
+        dialog = SteamTradeupDialog(self.window(), plan)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            payload = dialog.result_payload()
+            outputs = [
+                str(value)
+                for value in payload.get("outputAssetIds") or []
+            ]
+            result_dialog = SteamTradeupResultDialog(
+                self.window(),
+                [
+                    dict(value)
+                    for value in payload.get("resolvedProducts") or []
+                    if isinstance(value, dict)
+                ],
+                output_asset_ids=outputs,
+            )
+            result_dialog.exec()
+            suffix = f"，产物资产 ID：{', '.join(outputs)}" if outputs else ""
+            show_toast(self, f"一键汰换成功{suffix}", style="success")
+            self._clear_verified_tradeup()
+            return
+        message = dialog.result_message()
+        if message and not dialog.result_payload().get("cancelled"):
+            show_toast(self, f"一键汰换未完成：{message}", style="warning")
 
     def _defocus_substrate_line_edits_if_any(self) -> None:
         """切换模式时程序化改写字段会抢走焦点，从底物区输入框移开。"""
@@ -1104,6 +1313,8 @@ class AlchemySimulationPage(QWidget):
             fw.clearFocus()
 
     def _on_mode_changed(self) -> None:
+        if not self._loading_verified_tradeup_plan:
+            self._clear_verified_tradeup(notify=self._verified_tradeup_plan is not None)
         self._apply_mode_to_cards()
         self._defocus_substrate_line_edits_if_any()
         self._mode_switch.sync_mode_slider(animate=True)
@@ -1210,6 +1421,7 @@ class AlchemySimulationPage(QWidget):
         self._result_groups.clear()
         self._result_cards.clear()
         self._apply_results_summary(None)
+        self._execute_tradeup_btn.hide()
 
     def _sync_results_panel_from_cache(self) -> None:
         """按当前五合一/十合一模式从缓存重建产物区 UI。"""
@@ -1603,6 +1815,9 @@ class AlchemySimulationPage(QWidget):
         self._apply_results_summary(recipe)
         self._relayout_results_grid()
         self._update_save_recipe_button_state()
+        if self._verified_tradeup_plan is not None:
+            self._verified_inventory_badge.setText("真实库存配方")
+        self._sync_verified_tradeup_controls()
 
     def import_substrates_from_recipe_dict(self, recipe: dict) -> str | None:
         """
@@ -1610,6 +1825,8 @@ class AlchemySimulationPage(QWidget):
         仅支持 5 个或 10 个底物（五合一 / 十合一）；不拉取价格、不计算模拟结果。
         成功返回 None，失败返回简短错误文案。
         """
+        if not self._loading_verified_tradeup_plan:
+            self._clear_verified_tradeup()
         if not isinstance(recipe, dict):
             return "配方数据无效"
         subs = recipe.get("substrates_display")
@@ -1735,6 +1952,7 @@ class AlchemySimulationPage(QWidget):
         return cnt
 
     def import_inventory_items(self, items: list[dict], *, slot_count: int | None = None) -> str | None:
+        self._clear_verified_tradeup()
         if not isinstance(items, list) or not items:
             return "没有可导入的物品"
         if slot_count in (5, 10):
@@ -1809,6 +2027,7 @@ class AlchemySimulationPage(QWidget):
 
     def _on_clear_data_clicked(self) -> None:
         """清空当前模式下的底物槽与模拟结果，不影响另一模式。"""
+        self._clear_verified_tradeup()
         n = self._visible_slot_count()
         for i in range(n):
             self._cards[i].reset_substrate()
@@ -1843,6 +2062,7 @@ class AlchemySimulationPage(QWidget):
         # WeaponCardImageArea 用内联 qlineargradient（palette 色在写入时已固定），须在每次显示时重算。
         QTimer.singleShot(0, self._refresh_simulation_weapon_image_palettes)
         QTimer.singleShot(0, self._refresh_results_header_for_palette)
+        QTimer.singleShot(0, self._sync_verified_tradeup_controls)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1943,6 +2163,11 @@ class AlchemySimulationPage(QWidget):
         self._simulation_set_calc_idle()
 
     def _on_start_calculate_clicked(self) -> None:
+        if (
+            self._verified_tradeup_plan is not None
+            and not self._verified_plan_matches_cards()
+        ):
+            self._clear_verified_tradeup(notify=True)
         substrate_rows, err = self._validated_visible_substrates()
         if err:
             show_toast(self, err, style="warning")

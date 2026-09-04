@@ -547,6 +547,9 @@ def _try_skin_instance_from_row(item: dict) -> SkinInstance | None:
             price=price_value,
             platform=platform,
             purchase_link=purchase_link,
+            steam_assetid=str(item.get("steam_assetid") or "") or None,
+            steam_profile_id=str(item.get("steam_profile_id") or "") or None,
+            steam_id=str(item.get("steam_id") or "") or None,
         )
     except (ValueError, AssertionError):
         return None
@@ -1405,6 +1408,9 @@ def _substrates_display(solution: list[SkinInstance]) -> list[dict[str, Any]]:
             "platform": s.platform,
             "uuid": s.uuid,
             "purchase_link": s.purchase_link,
+            "steam_assetid": s.steam_assetid,
+            "steam_profile_id": s.steam_profile_id,
+            "steam_id": s.steam_id,
         }
         for s in solution
     ]

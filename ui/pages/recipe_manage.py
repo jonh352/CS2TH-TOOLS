@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLayout,
     QLineEdit,
@@ -76,25 +75,11 @@ from core.saved_recipes import (
     reorder_recipe_folders,
     save_recipe_file,
 )
-from core.inventory_steam_accounts import (
-    combo_display_name_for_profile,
-    get_active_profile_id,
-    list_profile_entries,
-    load_steam_account_config_dict,
-)
-from core.purchase_tracking import load_profile_inventory_items
-from core.purchase_batches import (
-    create_purchase_batch,
-    list_purchase_batches,
-    purchase_batch_summary,
-    update_purchase_batch_account,
-)
 from ui.feedback import ask_confirmation, ask_confirmation_sequence
 from ui.dialogs.move_recipe_folder_dialog import MoveRecipeFolderDialog, build_move_targets
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
 from ui.icons import expand_section_triangle_icon, load_svg_icon
 from ui.widgets.recipe_result_group import RecipeResultGroup
-from ui.widgets.purchase_batch_card import PurchaseBatchCard
 from ui.widgets.toast import show_toast
 from ui.workers.recipe_bridge import RecipeLoadThread
 
@@ -1099,8 +1084,6 @@ class RecipeManagePage(QWidget):
         self._batch_resume_token: int = 0
         self._recipe_import_thread: RecipeLoadThread | None = None
         self._view_mode = "recipes"
-        self._purchase_batch_card_states: dict[str, dict[str, object]] = {}
-        self._purchase_batch_scroll_value = 0
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(*CONTENT_PAGE_LAYOUT_MARGINS)
@@ -1126,11 +1109,9 @@ class RecipeManagePage(QWidget):
         view_group = QButtonGroup(self)
         view_group.setExclusive(True)
         self._recipes_view_btn = QPushButton("已保存配方")
-        self._purchase_batches_view_btn = QPushButton("采购管理")
         self._json_view_btn = QPushButton("已保存 JSON")
         for mode, button in (
             ("recipes", self._recipes_view_btn),
-            ("purchase_batches", self._purchase_batches_view_btn),
             ("json", self._json_view_btn),
         ):
             button.setObjectName("platformModeButton")
@@ -1300,43 +1281,6 @@ class RecipeManagePage(QWidget):
         body_lay.addSpacing(_RECIPE_LEFT_RIGHT_GAP)
         body_lay.addWidget(right_wrap, 1)
 
-        purchase_body = QWidget()
-        purchase_body.setObjectName("recipeManageBody")
-        purchase_lay = QVBoxLayout(purchase_body)
-        purchase_lay.setContentsMargins(0, 0, 0, 0)
-        purchase_lay.setSpacing(12)
-        purchase_toolbar = QWidget()
-        purchase_toolbar.setObjectName("recipeManageToolbar")
-        purchase_tb = QHBoxLayout(purchase_toolbar)
-        purchase_tb.setContentsMargins(12, 8, 12, 8)
-        purchase_location = QLabel("按 Steam 收货账号管理整批配方和材料入库")
-        purchase_location.setObjectName("recipeLocationLabel")
-        purchase_tb.addWidget(purchase_location)
-        purchase_tb.addStretch(1)
-        self._new_purchase_batch_btn = QPushButton("新建采购批次")
-        self._new_purchase_batch_btn.setObjectName("alchemySelectFileBtn")
-        self._new_purchase_batch_btn.clicked.connect(self._create_purchase_batch)
-        purchase_tb.addWidget(self._new_purchase_batch_btn)
-        purchase_lay.addWidget(purchase_toolbar)
-        self._purchase_batch_empty_label = QLabel(
-            "暂无采购批次。先刷新收货账号库存，再新建批次；材料采集得到的方案可直接加入批次。"
-        )
-        self._purchase_batch_empty_label.setObjectName("alchemyStep1Hint")
-        self._purchase_batch_empty_label.setWordWrap(True)
-        purchase_lay.addWidget(self._purchase_batch_empty_label)
-        self._purchase_batch_container = QWidget()
-        self._purchase_batch_container.setObjectName("alchemyGroupsContainer")
-        self._purchase_batch_layout = QVBoxLayout(self._purchase_batch_container)
-        self._purchase_batch_layout.setContentsMargins(0, 0, 0, 0)
-        self._purchase_batch_layout.setSpacing(8)
-        self._purchase_scroll = QScrollArea()
-        self._purchase_scroll.setObjectName("alchemyScrollArea")
-        self._purchase_scroll.setWidgetResizable(True)
-        self._purchase_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._purchase_scroll.setFrameShape(QFrame.NoFrame)
-        self._purchase_scroll.setWidget(self._purchase_batch_container)
-        purchase_lay.addWidget(self._purchase_scroll, 1)
-
         json_body = QWidget()
         json_body.setObjectName("recipeManageBody")
         json_lay = QVBoxLayout(json_body)
@@ -1376,7 +1320,6 @@ class RecipeManagePage(QWidget):
 
         self._body_stack = QStackedWidget()
         self._body_stack.addWidget(body)
-        self._body_stack.addWidget(purchase_body)
         self._body_stack.addWidget(json_body)
         main_layout.addWidget(self._body_stack, 1)
 
@@ -1384,7 +1327,6 @@ class RecipeManagePage(QWidget):
         self._apply_page_title_icon()
         self._refresh_folder_sidebar()
         self._rebuild_recipe_rows()
-        self._rebuild_purchase_batch_rows()
         self._rebuild_collected_json_rows()
 
     def _on_import_cs2th_link(self) -> None:
@@ -1474,7 +1416,6 @@ class RecipeManagePage(QWidget):
         self._sync_batch_primary_stack_geometry()
         self._refresh_folder_sidebar()
         self._rebuild_recipe_rows()
-        self._rebuild_purchase_batch_rows()
         self._rebuild_collected_json_rows()
 
     def navigation_subroute(self) -> str:
@@ -1483,7 +1424,6 @@ class RecipeManagePage(QWidget):
     def navigation_route_label(self) -> str:
         labels = {
             "recipes": "配方管理 · 已保存配方",
-            "purchase_batches": "配方管理 · 采购管理",
             "json": "配方管理 · 已保存 JSON",
         }
         return labels.get(self._view_mode, "配方管理")
@@ -1492,17 +1432,15 @@ class RecipeManagePage(QWidget):
         self._switch_saved_view(mode, emit_navigation=False)
 
     def _switch_saved_view(self, mode: str, *, emit_navigation: bool = True) -> None:
-        if mode not in {"recipes", "purchase_batches", "json"}:
+        if mode not in {"recipes", "json"}:
             mode = "recipes"
         previous_mode = self._view_mode
         if mode != "recipes" and self._batch_mode:
             self._on_batch_done()
         self._view_mode = mode
         showing_recipes = mode == "recipes"
-        showing_batches = mode == "purchase_batches"
-        self._body_stack.setCurrentIndex(0 if showing_recipes else 1 if showing_batches else 2)
+        self._body_stack.setCurrentIndex(0 if showing_recipes else 1)
         self._recipes_view_btn.setChecked(showing_recipes)
-        self._purchase_batches_view_btn.setChecked(showing_batches)
         self._json_view_btn.setChecked(mode == "json")
         self._batch_primary_slot.setVisible(showing_recipes)
         self.import_cs2th_btn.setVisible(showing_recipes and not self._batch_mode)
@@ -1517,213 +1455,10 @@ class RecipeManagePage(QWidget):
         if showing_recipes:
             self._set_batch_ui()
             self._rebuild_recipe_rows()
-        elif showing_batches:
-            self._rebuild_purchase_batch_rows()
         else:
             self._rebuild_collected_json_rows()
         if emit_navigation and mode != previous_mode:
             self.navigation_route_changed.emit(mode)
-
-    def _create_purchase_batch(self) -> None:
-        accounts = [
-            entry for entry in list_profile_entries() if str(entry.get("id") or "")
-        ]
-        if not accounts:
-            show_toast(self, "请先在 Steam 库存添加收货账号", style="warning")
-            return
-        if not ask_confirmation(
-            self,
-            "创建采购批次",
-            "创建时会把该账号当前本地库存记为基线。请确认已经在 Steam 库存页刷新过该账号库存。",
-        ):
-            return
-        default_name = datetime.now().strftime("采购批次 %Y-%m-%d %H:%M")
-        name, accepted = get_wide_text_input(
-            self,
-            title="新建采购批次",
-            label="批次名称：",
-            value=default_name,
-        )
-        if not accepted or not name.strip():
-            return
-        labels = [combo_display_name_for_profile(entry) for entry in accounts]
-        active_id = get_active_profile_id()
-        current = next(
-            (
-                index
-                for index, entry in enumerate(accounts)
-                if str(entry.get("id") or "") == active_id
-            ),
-            0,
-        )
-        account_label, accepted = QInputDialog.getItem(
-            self,
-            "选择收货账号",
-            "Steam 收货账号：",
-            labels,
-            current,
-            False,
-        )
-        if not accepted:
-            return
-        account_index = labels.index(account_label)
-        entry = accounts[account_index]
-        profile_id = str(entry.get("id") or "")
-        cfg = load_steam_account_config_dict(profile_id)
-        try:
-            create_purchase_batch(
-                name,
-                profile_id=profile_id,
-                steam_id=str(cfg.get("steam_id") or ""),
-                account_name=account_label,
-                inventory_items=load_profile_inventory_items(profile_id),
-            )
-        except (OSError, ValueError) as exc:
-            show_toast(self, f"采购批次创建失败：{exc}", style="warning")
-            return
-        self._rebuild_purchase_batch_rows()
-        show_toast(self, "采购批次已创建，可从材料采集加入配方", style="success")
-
-    def _rebuild_purchase_batch_rows(self) -> None:
-        self._capture_purchase_batch_ui_state()
-        while self._purchase_batch_layout.count():
-            item = self._purchase_batch_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        entries = list_purchase_batches()
-        valid_state_keys = {str(path) for path, _payload in entries}
-        self._purchase_batch_card_states = {
-            key: state
-            for key, state in self._purchase_batch_card_states.items()
-            if key in valid_state_keys
-        }
-        self._purchase_batch_empty_label.setVisible(not entries)
-        if self._view_mode == "purchase_batches":
-            recipe_total = sum(
-                len(payload.get("recipes") or []) for _path, payload in entries
-            )
-            material_total = sum(
-                int(purchase_batch_summary(payload).get("total") or 0)
-                for _path, payload in entries
-            )
-            self._title_count_label.setText(
-                f"共{len(entries)}个批次 · {recipe_total}个配方 · {material_total}件材料"
-            )
-        for path, payload in entries:
-            state_key = str(path)
-            card = PurchaseBatchCard(
-                path,
-                payload,
-                self._purchase_batch_container,
-                expanded=False,
-            )
-            card.restore_ui_state(self._purchase_batch_card_states.get(state_key))
-            card.changed.connect(self._update_purchase_batch_title_count)
-            card.deleted.connect(self._rebuild_purchase_batch_rows)
-            card.change_account_requested.connect(
-                self._change_purchase_batch_account
-            )
-            self._purchase_batch_layout.addWidget(card)
-        self._purchase_batch_layout.addStretch(1)
-        scroll_value = self._purchase_batch_scroll_value
-        QTimer.singleShot(
-            0,
-            lambda value=scroll_value: self._purchase_scroll.verticalScrollBar().setValue(
-                value
-            ),
-        )
-
-    def _capture_purchase_batch_ui_state(self) -> None:
-        scroll = getattr(self, "_purchase_scroll", None)
-        if scroll is not None:
-            self._purchase_batch_scroll_value = scroll.verticalScrollBar().value()
-        layout = getattr(self, "_purchase_batch_layout", None)
-        if layout is None:
-            return
-        for index in range(layout.count()):
-            card = layout.itemAt(index).widget()
-            if isinstance(card, PurchaseBatchCard):
-                self._purchase_batch_card_states[str(card._path)] = card.ui_state()
-
-    def _change_purchase_batch_account(self, path: Path) -> None:
-        entries = [
-            entry for entry in list_profile_entries() if str(entry.get("id") or "")
-        ]
-        if not entries:
-            show_toast(self, "请先在 Steam 库存添加收货账号", style="warning")
-            return
-        try:
-            current_batch = next(
-                payload
-                for batch_path, payload in list_purchase_batches()
-                if batch_path == path
-            )
-        except StopIteration:
-            show_toast(self, "采购批次已不存在", style="warning")
-            return
-        labels = [combo_display_name_for_profile(entry) for entry in entries]
-        current_profile_id = str(current_batch.get("profile_id") or "")
-        current_index = next(
-            (
-                index
-                for index, entry in enumerate(entries)
-                if str(entry.get("id") or "") == current_profile_id
-            ),
-            0,
-        )
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "修改收货账号",
-            "Steam 收货账号：",
-            labels,
-            current_index,
-            False,
-        )
-        if not accepted:
-            return
-        selected_entry = entries[labels.index(selected)]
-        profile_id = str(selected_entry.get("id") or "")
-        if profile_id == current_profile_id:
-            show_toast(self, "收货账号没有变化", style="info")
-            return
-        if not ask_confirmation(
-            self,
-            "确认修改收货账号",
-            "建议在开始采购前修改。修改后会以新账号当前库存重新建立入库基线；"
-            "旧账号已经匹配的入库记录将撤销。确定继续吗？",
-        ):
-            return
-        cfg = load_steam_account_config_dict(profile_id)
-        try:
-            reset_count = update_purchase_batch_account(
-                path,
-                profile_id=profile_id,
-                steam_id=str(cfg.get("steam_id") or ""),
-                account_name=selected,
-                inventory_items=load_profile_inventory_items(profile_id),
-            )
-        except (OSError, ValueError) as exc:
-            show_toast(self, f"收货账号修改失败：{exc}", style="warning")
-            return
-        self._rebuild_purchase_batch_rows()
-        message = f"收货账号已改为 {selected}"
-        if reset_count:
-            message += f"，已撤销 {reset_count} 件旧账号入库匹配"
-        show_toast(self, message, style="success")
-
-    def _update_purchase_batch_title_count(self) -> None:
-        if self._view_mode != "purchase_batches":
-            return
-        entries = list_purchase_batches()
-        recipe_total = sum(len(payload.get("recipes") or []) for _path, payload in entries)
-        material_total = sum(
-            int(purchase_batch_summary(payload).get("total") or 0)
-            for _path, payload in entries
-        )
-        self._title_count_label.setText(
-            f"共{len(entries)}个批次 · {recipe_total}个配方 · {material_total}件材料"
-        )
 
     def _open_collected_json_dir(self) -> None:
         COLLECTED_JSON_DIR.mkdir(parents=True, exist_ok=True)

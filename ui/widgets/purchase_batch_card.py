@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import html
 import math
 from pathlib import Path
@@ -23,18 +24,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.alchemy_quality import get_template_from_goods_name
+from core.alchemy_calc import (
+    tradeup_average_normalized_float32,
+    tradeup_product_wear_float32,
+)
+from core.alchemy_quality import (
+    get_pid_map,
+    get_template_from_goods_name,
+)
 from core.data_utils import SkinInstance
 from core.platform_links import MARKETPLACES, links_for_template, marketplace_by_key
 from core.purchase_batches import (
     apply_purchase_batch_replacement,
+    build_purchase_batch_recipe_tradeup_plan,
     delete_purchase_batch,
     load_purchase_batch,
     purchase_batch_alchemy_status_text,
+    purchase_batch_recipe_tradeup_readiness,
     purchase_batch_replacement_options,
     purchase_batch_summary,
     reconcile_all_purchase_records_for_profile,
     refresh_purchase_batch_alchemy_ready_at,
+    resolve_purchase_batch_inventory_departure,
+    set_purchase_batch_recipe_tradeup_completed,
     set_purchase_batch_material_status,
     toggle_all_purchase_batch_materials_ordered,
 )
@@ -45,10 +57,12 @@ from core.purchase_tracking import (
     STATUS_RECEIVED,
     load_profile_inventory_items,
 )
+from core.saved_recipes import format_recipe_summary_line
 from ui.dialogs.purchase_replacement_dialog import PurchaseReplacementDialog
 from ui.feedback import ask_confirmation
 from ui.icons import expand_section_triangle_icon
 from ui.widgets.toast import show_toast
+from ui.widgets.recipe_result_group import build_recipe_product_table
 
 
 _STATUS_LABELS = {
@@ -63,6 +77,7 @@ _FILTER_TO_STATUS = {
     "待购买": STATUS_PENDING,
     "待入库": STATUS_ORDERED,
     "已入库": STATUS_RECEIVED,
+    "待确认离库": "missing_review",
     "需补购": STATUS_CANCELLED,
 }
 _PURCHASE_PLATFORM_SHORT_LABELS = {
@@ -161,10 +176,121 @@ def _planned_batch_cost(payload: dict) -> float:
     )
 
 
+def _purchase_recipe_result_snapshot(entry: dict) -> dict:
+    """Rebuild output wear/probabilities from the recipe's current materials."""
+    recipe = copy.deepcopy(
+        entry.get("recipe") if isinstance(entry.get("recipe"), dict) else {}
+    )
+    substrates = recipe.get("substrates_display") or []
+    pairs = []
+    for material in entry.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        try:
+            substrate = substrates[int(material.get("substrate_index"))]
+        except (IndexError, TypeError, ValueError):
+            substrate = {}
+        substrate = substrate if isinstance(substrate, dict) else {}
+        replacement = material.get("replacement")
+        replacement = replacement if isinstance(replacement, dict) else {}
+        name = str(
+            replacement.get("name")
+            or substrate.get("name")
+            or material.get("name")
+            or ""
+        )
+        template = get_template_from_goods_name(name)
+        if template is None:
+            continue
+        raw_wear = (
+            material.get("matched_float")
+            if str(material.get("status") or "") == STATUS_RECEIVED
+            and material.get("matched_float") is not None
+            else replacement.get("manual_wear")
+            if replacement.get("manual_wear") is not None
+            else substrate.get("float_value", material.get("float_value", 0))
+        )
+        try:
+            pairs.append((template, float(raw_wear)))
+        except (TypeError, ValueError):
+            continue
+
+    materials_count = sum(
+        1 for material in entry.get("materials") or [] if isinstance(material, dict)
+    )
+    if pairs and len(pairs) == materials_count:
+        average = tradeup_average_normalized_float32(pairs)
+        saved_prices: dict[str, object] = {}
+        for product in recipe.get("products_display") or []:
+            if not isinstance(product, dict):
+                continue
+            template = get_template_from_goods_name(str(product.get("name") or ""))
+            if template is not None:
+                saved_prices[str(template.paint_index)] = product.get("price", 0)
+        product_rows: dict[tuple[str, float], dict] = {}
+        pid_map = get_pid_map()
+        for template, _wear in pairs:
+            upper_ids = template.upper_skins or []
+            if not upper_ids:
+                continue
+            probability = (1.0 / len(pairs)) / len(upper_ids)
+            for product_id in upper_ids:
+                product_template = pid_map.get(str(product_id))
+                if product_template is None:
+                    continue
+                output_wear = tradeup_product_wear_float32(
+                    average,
+                    product_template,
+                )
+                key = (str(product_id), float(output_wear))
+                if key not in product_rows:
+                    name = (
+                        f"{product_template.weapon_name} | {product_template.skin_name}"
+                        if product_template.skin_name
+                        else product_template.weapon_name
+                    )
+                    appearance = SkinInstance.get_appearance(output_wear)
+                    if appearance and "|" in name:
+                        name = f"{name}（{appearance}）"
+                    product_rows[key] = {
+                        "name": name,
+                        "float_value": float(output_wear),
+                        "prob": 0.0,
+                        "weapon_box": "、".join(product_template.weapon_box_name or []),
+                        "price": saved_prices.get(str(product_id), 0),
+                    }
+                product_rows[key]["prob"] += probability
+        if product_rows:
+            recipe["products_display"] = list(product_rows.values())
+            recipe["avg_nfv"] = float(average)
+
+    cost = float(_planned_recipe_cost(entry) or 0.0)
+    products = [
+        product
+        for product in recipe.get("products_display") or []
+        if isinstance(product, dict)
+    ]
+    expectation = sum(
+        float(product.get("prob") or 0) * _valid_price(product.get("price"))
+        for product in products
+        if _valid_price(product.get("price")) is not None
+    )
+    recipe["cost"] = cost
+    recipe["expectation"] = expectation
+    recipe["rate"] = expectation / cost - 1.0 if cost > 0 else 0.0
+    recipe["break_even_rate"] = sum(
+        float(product.get("prob") or 0)
+        for product in products
+        if float(product.get("price") or 0) > cost
+    )
+    return recipe
+
+
 class PurchaseBatchCard(QFrame):
     changed = Signal()
     deleted = Signal()
     change_account_requested = Signal(object)
+    simulate_tradeup_requested = Signal(object)
 
     def __init__(
         self,
@@ -173,6 +299,8 @@ class PurchaseBatchCard(QFrame):
         parent: QWidget | None = None,
         *,
         expanded: bool = False,
+        ready_recipe_ids: set[str] | None = None,
+        compact_archive: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("recipeManageRow")
@@ -180,10 +308,19 @@ class PurchaseBatchCard(QFrame):
         self._path = path
         self._payload = payload
         self._expanded = bool(expanded)
+        self._ready_recipe_ids = (
+            {str(value) for value in ready_recipe_ids}
+            if ready_recipe_ids is not None
+            else None
+        )
+        self._compact_archive = bool(compact_archive)
         self._table: QTableWidget | None = None
         self._tables: list[QTableWidget] = []
+        self._product_tables: list[QTableWidget] = []
         self._detail_widgets: list[QWidget] = []
         self._recipe_group_buttons: list[QPushButton] = []
+        self._recipe_tradeup_buttons: list[QPushButton] = []
+        self._recipe_one_click_buttons: list[QPushButton] = []
         self._expanded_recipe_ids: set[str] = set()
 
         root = QVBoxLayout(self)
@@ -215,6 +352,8 @@ class PurchaseBatchCard(QFrame):
             "使用该 Steam 账号最近一次刷新到本地的库存核对"
         )
         self._reconcile_button.clicked.connect(self._reconcile)
+        if self._compact_archive:
+            self._reconcile_button.hide()
         controls_grid.addWidget(
             self._reconcile_button,
             0,
@@ -256,6 +395,11 @@ class PurchaseBatchCard(QFrame):
         delete.setObjectName("alchemyClearFileBtn")
         delete.clicked.connect(self._delete)
         actions.addWidget(delete)
+        if self._compact_archive:
+            filter_label.hide()
+            self._filter.hide()
+            self._mark_all_button.hide()
+            change_account.hide()
         actions.addStretch(1)
         controls_grid.addLayout(actions, 1, 0)
         root.addLayout(controls_grid)
@@ -265,8 +409,8 @@ class PurchaseBatchCard(QFrame):
         self._content_layout.setSpacing(8)
         workflow_hint = QLabel(
             "采购流程：逐件“打开”购买 → 购买成功后“标记已买” → "
-            "刷新对应 Steam 库存后“核对库存”。未到账的材料可标记为“没买到”，"
-            "再筛选“需补购”查看原项重购或安全替代建议。",
+            "刷新对应 Steam 库存后“核对库存” → 材料齐全后可“一键汰换”。"
+            "未到账的材料可标记为“没买到”，再筛选“需补购”查看原项重购或安全替代建议。",
             self._content,
         )
         workflow_hint.setObjectName("alchemyStep1Hint")
@@ -297,6 +441,7 @@ class PurchaseBatchCard(QFrame):
             f"{summary['recipes']} 个配方 / {summary['total']} 件 · "
             f"已入库 {summary[STATUS_RECEIVED]} · 待入库 {summary[STATUS_ORDERED]} · "
             f"待购买 {summary[STATUS_PENDING]} · 需补购 {summary[STATUS_CANCELLED]} · "
+            f"待确认离库 {summary['missing_review']} · "
             f"批次总成本 ¥{_planned_batch_cost(self._payload):.2f}"
         )
         self._toggle_button.setText(
@@ -387,7 +532,15 @@ class PurchaseBatchCard(QFrame):
                 status = str(material.get("status") or STATUS_PENDING)
                 if wanted == "not_received" and status == STATUS_RECEIVED:
                     continue
-                if wanted and wanted != "not_received" and status != wanted:
+                if wanted == "missing_review" and not material.get(
+                    "inventory_missing_since"
+                ):
+                    continue
+                if (
+                    wanted
+                    and wanted not in {"not_received", "missing_review"}
+                    and status != wanted
+                ):
                     continue
                 try:
                     substrate = substrates[int(material.get("substrate_index"))]
@@ -408,7 +561,10 @@ class PurchaseBatchCard(QFrame):
             widget.deleteLater()
         self._detail_widgets.clear()
         self._tables.clear()
+        self._product_tables.clear()
         self._recipe_group_buttons.clear()
+        self._recipe_tradeup_buttons.clear()
+        self._recipe_one_click_buttons.clear()
         self._table = None
         groups = self._recipe_groups()
         if self._filter.currentText() != "全部材料":
@@ -462,22 +618,83 @@ class PurchaseBatchCard(QFrame):
         self._recipe_group_buttons.append(toggle)
         header_layout.addWidget(toggle, 0, Qt.AlignmentFlag.AlignVCenter)
         status_counts = {status: 0 for status in _STATUS_LABELS}
+        missing_review = 0
         for material in entry.get("materials") or []:
             if isinstance(material, dict):
                 status = str(material.get("status") or STATUS_PENDING)
                 if status in status_counts:
                     status_counts[status] += 1
+                if status == STATUS_RECEIVED and material.get(
+                    "inventory_missing_since"
+                ):
+                    missing_review += 1
         summary = QLabel(
             f"{len(entry.get('materials') or [])}件 · "
             f"已入库{status_counts[STATUS_RECEIVED]} · "
             f"待入库{status_counts[STATUS_ORDERED]} · "
             f"待购买{status_counts[STATUS_PENDING]} · "
             f"需补购{status_counts[STATUS_CANCELLED]} · "
+            f"待确认离库{missing_review} · "
             f"成本 ¥{float(_planned_recipe_cost(entry) or 0):.2f}",
             header,
         )
         summary.setObjectName("alchemyStep1Hint")
         header_layout.addWidget(summary, 1, Qt.AlignmentFlag.AlignVCenter)
+        tradeup_completed = bool(entry.get("tradeup_completed"))
+        ready, readiness_reason = purchase_batch_recipe_tradeup_readiness(entry)
+        one_click_button = QPushButton("模拟并汰换", header)
+        one_click_button.setObjectName("purchaseBatchOneClickTradeupBtn")
+        one_click_button.setFixedHeight(32)
+        one_click_button.setMinimumWidth(88)
+        live_ready = ready and (
+            self._ready_recipe_ids is None or entry_id in self._ready_recipe_ids
+        )
+        one_click_button.setEnabled(live_ready)
+        one_click_button.setToolTip(
+            readiness_reason
+            if live_ready or not ready
+            else "请前往“可炼金配方”刷新并确认库存及 CD"
+        )
+        one_click_button.clicked.connect(
+            lambda _checked=False, recipe_id=entry_id: self._request_tradeup_simulation(
+                recipe_id
+            )
+        )
+        self._recipe_one_click_buttons.append(one_click_button)
+        header_layout.addWidget(
+            one_click_button,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        tradeup_button = QPushButton(
+            "已汰换" if tradeup_completed else "未汰换",
+            header,
+        )
+        tradeup_button.setObjectName("purchaseBatchTradeupStateBtn")
+        tradeup_button.setProperty("completed", tradeup_completed)
+        tradeup_button.setCheckable(True)
+        tradeup_button.setChecked(tradeup_completed)
+        tradeup_button.setFixedHeight(32)
+        tradeup_button.setMinimumWidth(88)
+        executed_locally = isinstance(entry.get("tradeup_execution"), dict)
+        tradeup_button.setEnabled(not executed_locally)
+        tradeup_button.setToolTip(
+            "一键汰换成功记录不可撤销"
+            if executed_locally
+            else "已汰换的配方不再校验其材料是否仍在 Steam 库存中"
+        )
+        tradeup_button.clicked.connect(
+            lambda checked, recipe_id=entry_id: self._set_tradeup_completed(
+                recipe_id,
+                checked,
+            )
+        )
+        self._recipe_tradeup_buttons.append(tradeup_button)
+        header_layout.addWidget(
+            tradeup_button,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         root.addWidget(header)
         content = QFrame(group)
         content.setObjectName("alchemyTableFrame")
@@ -485,6 +702,34 @@ class PurchaseBatchCard(QFrame):
         content_layout.setContentsMargins(10, 8, 10, 10)
         table = self._build_material_table(entry, rows, content)
         content_layout.addWidget(table)
+        result_recipe = _purchase_recipe_result_snapshot(entry)
+        products = result_recipe.get("products_display") or []
+        product_label = QLabel("产物", content)
+        product_label.setObjectName("alchemyProductName")
+        content_layout.addWidget(product_label)
+        if products:
+            product_summary = QLabel(
+                format_recipe_summary_line(result_recipe),
+                content,
+            )
+            product_summary.setObjectName("purchaseBatchProductSummary")
+            product_summary.setWordWrap(True)
+            content_layout.addWidget(product_summary)
+            product_table = build_recipe_product_table(
+                content,
+                result_recipe,
+                cost=float(result_recipe.get("cost") or 0),
+            )
+            self._product_tables.append(product_table)
+            content_layout.addWidget(product_table)
+        else:
+            empty_products = QLabel(
+                "该配方没有可用的产物明细",
+                content,
+            )
+            empty_products.setObjectName("alchemyStep1Hint")
+            empty_products.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            content_layout.addWidget(empty_products)
         content.setVisible(expanded)
         root.addWidget(content)
 
@@ -543,6 +788,11 @@ class PurchaseBatchCard(QFrame):
         align = Qt.AlignmentFlag.AlignCenter
         for index, (material, substrate) in enumerate(rows, start=1):
             status = str(material.get("status") or STATUS_PENDING)
+            status_label = (
+                "待确认离库"
+                if status == STATUS_RECEIVED and material.get("inventory_missing_since")
+                else _STATUS_LABELS.get(status, status)
+            )
             replacement = material.get("replacement")
             planned_name = (
                 str(replacement.get("name") or "")
@@ -571,7 +821,7 @@ class PurchaseBatchCard(QFrame):
                 planned_name,
                 planned_wear,
                 f"¥{planned_price:.2f}" if planned_price is not None else "-",
-                _STATUS_LABELS.get(status, status),
+                status_label,
                 actual,
             )
             for column, value in enumerate(values):
@@ -580,7 +830,10 @@ class PurchaseBatchCard(QFrame):
                 if column == 4:
                     item.setForeground(
                         QColor(
-                            "#10b981"
+                            "#f59e0b"
+                            if status == STATUS_RECEIVED
+                            and material.get("inventory_missing_since")
+                            else "#10b981"
                             if status == STATUS_RECEIVED
                             else "#f59e0b"
                             if status == STATUS_ORDERED
@@ -654,7 +907,19 @@ class PurchaseBatchCard(QFrame):
                 layout, "标记没买到", lambda: self._set_status(entry_id, row_id, STATUS_CANCELLED)
             )
         elif status == STATUS_RECEIVED:
-            self._add_action_button(layout, "撤销入库", lambda: self._set_status(entry_id, row_id, STATUS_ORDERED))
+            if material.get("inventory_missing_since"):
+                self._add_action_button(
+                    layout,
+                    "卖家撤回",
+                    lambda: self._resolve_departure(entry_id, row_id, True),
+                )
+                self._add_action_button(
+                    layout,
+                    "正常离库",
+                    lambda: self._resolve_departure(entry_id, row_id, False),
+                )
+            else:
+                self._add_action_button(layout, "撤销入库", lambda: self._set_status(entry_id, row_id, STATUS_ORDERED))
         else:
             self._add_action_button(layout, "替代建议", lambda: self._show_replacements(entry_id, row_id))
             self._add_action_button(layout, "按原项重购", lambda: self._set_status(entry_id, row_id, STATUS_PENDING))
@@ -681,6 +946,36 @@ class PurchaseBatchCard(QFrame):
             return
         self._reload()
 
+    def _set_tradeup_completed(self, entry_id: str, completed: bool) -> None:
+        try:
+            changed = set_purchase_batch_recipe_tradeup_completed(
+                self._path,
+                entry_id,
+                completed,
+            )
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"汰换状态保存失败：{exc}", style="warning")
+            self._reload()
+            return
+        if changed:
+            show_toast(
+                self,
+                "已标记为已汰换，后续库存核对将忽略此配方"
+                if completed
+                else "已恢复为未汰换，后续将继续核对库存",
+                style="success" if completed else "info",
+            )
+        self._reload()
+
+    def _request_tradeup_simulation(self, entry_id: str) -> None:
+        try:
+            plan = build_purchase_batch_recipe_tradeup_plan(self._path, entry_id)
+        except (OSError, ValueError) as exc:
+            show_toast(self, str(exc), style="warning")
+            self._reload()
+            return
+        self.simulate_tradeup_requested.emit(plan)
+
     def _show_replacements(self, entry_id: str, row_id: str) -> None:
         options, target_text = purchase_batch_replacement_options(
             self._payload, entry_id, row_id
@@ -704,6 +999,30 @@ class PurchaseBatchCard(QFrame):
             show_toast(self, f"替代方案保存失败：{exc}", style="warning")
             return
         show_toast(self, "已采用安全替代范围；购买成功后请标记已买", style="success")
+        self._reload()
+
+    def _resolve_departure(
+        self,
+        entry_id: str,
+        row_id: str,
+        seller_reversed: bool,
+    ) -> None:
+        try:
+            changed = resolve_purchase_batch_inventory_departure(
+                self._path,
+                entry_id,
+                row_id,
+                seller_reversed=seller_reversed,
+            )
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"离库状态保存失败：{exc}", style="warning")
+            return
+        if changed:
+            show_toast(
+                self,
+                "已转为需补购" if seller_reversed else "已记录为正常离库",
+                style="warning" if seller_reversed else "success",
+            )
         self._reload()
 
     def _toggle_all_ordered(self) -> None:
@@ -733,10 +1052,14 @@ class PurchaseBatchCard(QFrame):
         batch_key = str(self._path.resolve())
         matched = int((result.get("matched_by_path") or {}).get(batch_key, 0))
         waiting = int((result.get("waiting_by_path") or {}).get(batch_key, 0))
+        missing = int((result.get("missing_by_path") or {}).get(batch_key, 0))
+        message = f"本批次新入库 {matched} 件，仍待入库 {waiting} 件"
+        if missing:
+            message += f"；{missing} 件待确认离库"
         show_toast(
             self,
-            f"本批次新入库 {matched} 件，仍待入库 {waiting} 件",
-            style="success" if matched else "info",
+            message,
+            style="warning" if missing else "success" if matched else "info",
         )
         self._reload()
 

@@ -957,6 +957,89 @@ QPushButton#alchemyExcludeRecipeBtn {{
   background: {amber_dim};
   border-color: {amber};
 }}
+QPushButton#purchaseBatchTradeupStateBtn {{
+  min-height: 30px;
+  max-height: 30px;
+  color: {muted};
+  background: {input};
+  border-color: {border_strong};
+}}
+QPushButton#purchaseBatchTradeupStateBtn:hover {{
+  color: {cyan};
+  border-color: {cyan};
+}}
+QPushButton#purchaseBatchTradeupStateBtn[completed="true"] {{
+  color: #FFFFFF;
+  background: #16A34A;
+  border-color: #16A34A;
+}}
+QPushButton#purchaseBatchOneClickTradeupBtn {{
+  min-height: 30px;
+  max-height: 30px;
+  color: #FFFFFF;
+  background: #EA580C;
+  border-color: #EA580C;
+  font-weight: 800;
+}}
+QPushButton#purchaseBatchOneClickTradeupBtn:hover {{
+  color: #FFFFFF;
+  background: #C2410C;
+  border-color: #C2410C;
+}}
+QPushButton#purchaseBatchOneClickTradeupBtn:disabled {{
+  color: {muted};
+  background: {input};
+  border-color: {border};
+}}
+QLabel#steamTradeupQr {{
+  color: {muted};
+  background: #FFFFFF;
+  border: 1px solid {border_strong};
+  border-radius: 10px;
+}}
+QLabel#confirmationRiskNotice {{
+  color: {text};
+  background: {amber_dim};
+  border: 1px solid {amber};
+  border-radius: 9px;
+  padding: 11px 13px;
+}}
+QLabel#confirmationRiskNotice a {{
+  color: {cyan};
+  text-decoration: underline;
+}}
+QCheckBox#confirmationRiskAcknowledgement {{
+  color: {text};
+  font-weight: 700;
+  spacing: 9px;
+}}
+QFrame#steamTradeupResultCard {{
+  background: {card};
+  border: 1px solid {border_strong};
+  border-radius: 12px;
+}}
+QLabel#steamTradeupResultImage {{
+  color: {muted};
+  background: {input};
+  border: 1px solid {border};
+  border-radius: 10px;
+}}
+QLabel#steamTradeupResultName {{
+  color: {cyan};
+  font-size: 17px;
+  font-weight: 800;
+}}
+QLabel#steamTradeupResultMeta, QLabel#steamTradeupResultFallback {{
+  color: {muted};
+}}
+QLabel#purchaseBatchProductSummary {{
+  color: {cyan};
+  background: {cyan_dim};
+  border: 1px solid {border};
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-weight: 700;
+}}
 QPushButton#purchaseBatchReconcileBtn {{
   min-height: 40px;
   max-height: 40px;
@@ -1019,6 +1102,26 @@ QPushButton#purchaseActionIconBtn[selected="true"] {{
 }}
 
 /* ---------- Segmented controls ---------- */
+QWidget#purchaseManageSectionBar {{
+  background: transparent;
+}}
+QPushButton#purchaseManageSectionButton {{
+  min-height: 34px;
+  padding: 0 16px;
+  color: {muted};
+  background: {input};
+  border-color: {border};
+}}
+QPushButton#purchaseManageSectionButton:hover {{
+  color: {cyan};
+  border-color: {cyan};
+}}
+QPushButton#purchaseManageSectionButton[active="true"],
+QPushButton#purchaseManageSectionButton:checked {{
+  color: {primary_text};
+  background: {cyan};
+  border-color: {cyan};
+}}
 QWidget#alchemyStep2ModeSegmented {{
   background: {input};
   border: 1px solid {border};
@@ -1320,6 +1423,141 @@ QWidget#recipeManageRow {{
 QWidget#recipeManageRow:hover {{
   background: {surface_alt};
   border-color: {border_strong};
+}}
+QFrame#tradeupHistoryDashboard {{
+  background: {surface};
+  border: 1px solid {border};
+  border-radius: 10px;
+}}
+QLabel#tradeupHistorySectionHeading {{
+  color: {text};
+  background: transparent;
+  border: 0;
+  border-left: 5px solid {cyan};
+  padding-left: 9px;
+  font-size: 18px;
+  font-weight: 850;
+}}
+QFrame#tradeupHistoryMetricTile {{
+  background: {surface_alt};
+  border: 1px solid {border};
+  border-radius: 5px;
+}}
+QLabel#tradeupHistoryMetricValue {{
+  color: {text};
+  background: transparent;
+  border: 0;
+  font-size: 21px;
+  font-weight: 850;
+}}
+QFrame#tradeupHistoryMetricTile[outcome="profit"] QLabel#tradeupHistoryMetricValue {{
+  color: #10b981;
+}}
+QFrame#tradeupHistoryMetricTile[outcome="loss"] QLabel#tradeupHistoryMetricValue {{
+  color: #ef4444;
+}}
+QLabel#tradeupHistoryMetricCaption {{
+  color: {muted};
+  background: transparent;
+  border: 0;
+  font-size: 13px;
+}}
+QPushButton#tradeupHistoryTrendButton {{
+  min-width: 96px;
+  min-height: 34px;
+  color: {muted};
+  background: {input};
+  border-color: {border};
+}}
+QPushButton#tradeupHistoryTrendButton:hover,
+QPushButton#tradeupHistoryTrendButton:checked {{
+  color: {cyan};
+  background: {surface};
+  border-color: {cyan};
+}}
+QWidget#tradeupHistoryTrendChart {{
+  background: transparent;
+  border: 0;
+}}
+QFrame#tradeupHistoryDayHeader {{
+  background: {surface_alt};
+  border: 0;
+  border-radius: 4px;
+}}
+QLabel#tradeupHistoryDayLabel,
+QLabel#tradeupHistoryDayProfit {{
+  background: transparent;
+  border: 0;
+  font-size: 14px;
+  font-weight: 750;
+}}
+QLabel#tradeupHistoryDayLabel {{
+  color: {muted};
+}}
+QFrame#tradeupHistoryCompactRow {{
+  background: {surface};
+  border: 0;
+  border-bottom: 1px solid {border};
+}}
+QLabel#tradeupHistoryRecordMeta {{
+  color: {muted};
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+}}
+QLabel#tradeupHistoryMoneyLabel {{
+  color: {text};
+  background: transparent;
+  border: 0;
+  font-size: 14px;
+  font-weight: 700;
+}}
+QLabel#tradeupHistoryRecipeProfit {{
+  background: transparent;
+  border: 0;
+  font-size: 17px;
+  font-weight: 850;
+}}
+QWidget#tradeupHistoryMaterialGrid {{
+  background: transparent;
+  border: 0;
+}}
+QLabel#tradeupHistoryArrow {{
+  color: {cyan};
+  background: transparent;
+  border: 0;
+  font-size: 28px;
+  font-weight: 850;
+}}
+QFrame#tradeupHistoryItemCard {{
+  background: {surface_alt};
+  border: 0;
+  border-bottom: 3px solid {cyan};
+  border-radius: 3px;
+}}
+QFrame#tradeupHistoryProductCard,
+QFrame#tradeupHistoryProductPending {{
+  background: {cyan_dim};
+  border: 1px solid {border};
+  border-radius: 5px;
+}}
+QLabel#tradeupHistoryItemImage,
+QLabel#tradeupHistoryItemName,
+QLabel#tradeupHistoryItemPrice {{
+  background: transparent;
+  border: 0;
+}}
+QLabel#tradeupHistoryItemImage {{
+  color: {muted};
+}}
+QLabel#tradeupHistoryItemName {{
+  color: {text};
+  font-size: 11px;
+  font-weight: 650;
+}}
+QLabel#tradeupHistoryItemPrice {{
+  font-size: 11px;
+  font-weight: 750;
 }}
 QWidget#recipeManageBody, QWidget#recipeBatchPrimarySlot,
 QWidget#alchemyGroupsContainer, QWidget#alchemySimulationScrollInner,

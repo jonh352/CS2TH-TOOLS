@@ -222,6 +222,9 @@ class SkinInstance:
     normalized_value: float = None
     platform: str = "buff"
     purchase_link: str | None = None
+    steam_assetid: str | None = None
+    steam_profile_id: str | None = None
+    steam_id: str | None = None
     value: float = field(init=False, default=0.0)
     name: str = field(init=False, default="")
     uuid: int = field(init=False, default=-1)

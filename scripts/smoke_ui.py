@@ -22,6 +22,7 @@ for key in (
     "alchemy",
     "simulation",
     "recipes",
+    "purchases",
     "special",
     "inventory",
     "platforms",

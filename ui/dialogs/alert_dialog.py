@@ -79,7 +79,17 @@ class AlertDialog(QDialog):
 class ConfirmDialog(QDialog):
     """确认弹窗 - 与 AlertDialog / 登录弹窗同壳：标题 + 说明 + 取消 / 确定。"""
 
-    def __init__(self, title: str, message: str, parent=None):
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        parent=None,
+        *,
+        box_width: int = MODAL_WIDTH_SM,
+        warning_text: str = "",
+        acknowledgement_text: str = "",
+        ok_text: str = "确定",
+    ):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -92,16 +102,43 @@ class ConfirmDialog(QDialog):
             self,
             title,
             message,
+            box_width=box_width,
             message_object_name="alertDialogMessage",
         )
         main_layout.addWidget(overlay)
         close_btn.clicked.connect(self.reject)
 
-        add_modal_footer_buttons(
+        if warning_text:
+            warning = QLabel(warning_text)
+            warning.setObjectName("confirmationRiskNotice")
+            warning.setWordWrap(True)
+            warning.setTextFormat(Qt.TextFormat.RichText)
+            warning.setOpenExternalLinks(True)
+            warning.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextBrowserInteraction
+            )
+            layout.addWidget(warning)
+
+        self._acknowledgement_checkbox: QCheckBox | None = None
+        if acknowledgement_text:
+            self._acknowledgement_checkbox = QCheckBox(acknowledgement_text)
+            self._acknowledgement_checkbox.setObjectName(
+                "confirmationRiskAcknowledgement"
+            )
+            self._acknowledgement_checkbox.setCursor(Qt.PointingHandCursor)
+            layout.addWidget(self._acknowledgement_checkbox)
+
+        _cancel_btn, self._ok_btn = add_modal_footer_buttons(
             layout,
+            ok_text=ok_text,
             on_cancel=self.reject,
             on_ok=self.accept,
         )
+        if self._acknowledgement_checkbox is not None:
+            self._ok_btn.setEnabled(False)
+            self._acknowledgement_checkbox.toggled.connect(
+                self._ok_btn.setEnabled
+            )
 
         _wire_overlay_dismiss(overlay, box, self, accept=False)
         install_dialog_topmost_follow_parent(self)

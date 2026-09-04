@@ -678,11 +678,16 @@ class InventoryPage(QWidget):
             return
         matched = int(reconciliation.get("matched") or 0)
         waiting = int(reconciliation.get("waiting") or 0)
+        missing_review = int(reconciliation.get("missing_review") or 0)
         save_failures = int(reconciliation.get("save_failures") or 0)
         if matched:
             self._render_completion_status += f"；配方采购新入库 {matched} 件"
         if waiting:
             self._render_completion_status += f"，仍待入库 {waiting} 件"
+        if missing_review:
+            self._render_completion_status += (
+                f"；发现 {missing_review} 件已入库材料离开库存，请在采购管理中确认原因"
+            )
         if save_failures:
             self._render_completion_status += f"；{save_failures} 个配方状态保存失败"
         self.status_label.setText(self._render_completion_status)
@@ -865,6 +870,11 @@ class InventoryPage(QWidget):
         if not mapped:
             self.status_label.setText("所选物品缺少可识别的皮肤信息或磨损值，无法导入")
             return
+        profile_id = self._active_profile_id()
+        steam_id = str(load_steam_account_config_dict(profile_id).get("steam_id") or "")
+        for row in mapped:
+            row["steam_profile_id"] = profile_id
+            row["steam_id"] = steam_id
         self.import_to_alchemy_requested.emit(mapped, mode)
 
     def _load_price_map_once(self) -> dict | None:
@@ -909,6 +919,7 @@ class InventoryPage(QWidget):
             "goods_name": goods_name,
             "platform": "inventory",
             "price": float(price or 0.0),
+            "steam_assetid": str(item.get("assetid") or ""),
         }
 
     def _emit_import_to_simulation(self) -> None:

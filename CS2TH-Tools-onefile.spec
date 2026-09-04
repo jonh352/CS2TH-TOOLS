@@ -94,7 +94,13 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=playwright_binaries,
-    datas=[("assets", "assets"), ("meta", "meta"), ("weapon_images", "weapon_images")]
+    datas=[
+        ("assets", "assets"),
+        ("meta", "meta"),
+        ("weapon_images", "weapon_images"),
+        ("steam_gc_bridge", "steam_gc_bridge"),
+        ("node_modules", "node_modules"),
+    ]
     + playwright_datas,
     hiddenimports=list(playwright_hidden)
     + ["multiprocessing", "numpy", "qrcode", "PIL", "PySide6.QtSvg", "PySide6.QtNetwork"],

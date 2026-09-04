@@ -1,0 +1,19 @@
+{
+  "name": "cs2th-steam-gc-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local Steam authentication and CS2 Game Coordinator bridge for CS2TH Tools",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "globaloffensive": "3.3.0",
+    "steam-session": "1.9.4",
+    "steam-user": "5.3.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "protobufjs": "7.6.6",
+    "steam-appticket": "2.0.1"
+  }
+}

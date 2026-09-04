@@ -88,7 +88,7 @@ class PurchaseTrackingUiTests(unittest.TestCase):
             patch.object(page, "_reload_accounts"),
             patch(
                 "ui.pages.inventory.reconcile_all_purchase_records_for_profile",
-                return_value={"matched": 1, "waiting": 2},
+                return_value={"matched": 1, "waiting": 2, "missing_review": 3},
             ) as reconcile,
         ):
             page._fetch_finished("six-profile", items, None, "", "库存更新完成")
@@ -96,6 +96,7 @@ class PurchaseTrackingUiTests(unittest.TestCase):
         reconcile.assert_called_once_with("six-profile", items)
         self.assertIn("新入库 1 件", page.status_label.text())
         self.assertIn("仍待入库 2 件", page.status_label.text())
+        self.assertIn("3 件已入库材料离开库存", page.status_label.text())
 
 
 if __name__ == "__main__":

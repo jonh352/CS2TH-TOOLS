@@ -46,6 +46,7 @@ PAGE_DEFINITIONS = (
     ("alchemy", "炼金计算"),
     ("collection_presets", "采集预设"),
     ("recipes", "配方管理"),
+    ("purchases", "采购管理"),
     ("simulation", "炼金模拟"),
     ("special", "特殊磨损"),
     ("platforms", "材料采集"),
@@ -102,7 +103,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APP_NAME} · v{APP_VERSION}")
         if APP_ICON.is_file():
             self.setWindowIcon(QIcon(str(APP_ICON)))
-        self.resize(1150, 860)
+        # The standalone purchase-management entry adds another top-level tab.
+        # Keep the original height and make the default width exactly 1.05x.
+        self.resize(1208, 860)
         self.setMinimumSize(960, 680)
 
         root_widget = QWidget()
@@ -156,7 +159,7 @@ class MainWindow(QMainWindow):
             show_login=self.auth_session is None,
         )
         QTimer.singleShot(0, self._start_auth_validation)
-        QTimer.singleShot(0, lambda: self._activate("alchemy"))
+        QTimer.singleShot(0, lambda: self._activate("inventory"))
         QTimer.singleShot(0, self._position_navigation_history_overlay)
         self._sync_account_button()
 
@@ -293,7 +296,11 @@ class MainWindow(QMainWindow):
         if key == "alchemy":
             from ui.pages.alchemy import AlchemyPage
 
-            return AlchemyPage(self.stack)
+            page = AlchemyPage(self.stack)
+            page.simulate_tradeup_requested.connect(
+                self._on_inventory_recipe_tradeup_simulation
+            )
+            return page
         if key == "collection_presets":
             from ui.pages.collection_presets import CollectionPresetPage
 
@@ -318,6 +325,14 @@ class MainWindow(QMainWindow):
             )
             page.import_json_to_alchemy_requested.connect(
                 self._on_saved_json_import_to_alchemy
+            )
+            return page
+        if key == "purchases":
+            from ui.pages.purchase_manage import PurchaseManagePage
+
+            page = PurchaseManagePage(self.stack)
+            page.simulate_tradeup_requested.connect(
+                self._on_verified_tradeup_simulation
             )
             return page
         if key == "special":
@@ -406,7 +421,7 @@ class MainWindow(QMainWindow):
             self._startup_placeholder.deleteLater()
             self._startup_placeholder = None
         self._active_page_key = key
-        if key == "recipes" and hasattr(page, "refresh_from_disk"):
+        if key in {"recipes", "purchases"} and hasattr(page, "refresh_from_disk"):
             page.refresh_from_disk()
         if key != "about":
             apply_page_interaction_lock(page, not self._access_allowed)
@@ -534,6 +549,38 @@ class MainWindow(QMainWindow):
             return
         self.toast.show_toast("已导入配方底物", style="success")
         self._activate("simulation")
+
+    def _on_inventory_recipe_tradeup_simulation(self, recipe: object) -> None:
+        if not isinstance(recipe, dict):
+            return
+        from core.steam_tradeup import (
+            SteamTradeupError,
+            build_inventory_recipe_tradeup_plan,
+        )
+
+        try:
+            plan = build_inventory_recipe_tradeup_plan(recipe)
+        except SteamTradeupError as exc:
+            self.toast.show_toast(str(exc), style="warning")
+            return
+        self._on_verified_tradeup_simulation(plan)
+
+    def _on_verified_tradeup_simulation(self, plan: object) -> None:
+        if not self._access_allowed:
+            self._warn_feature_locked()
+            return
+        if not isinstance(plan, dict):
+            return
+        simulation = self._ensure_page("simulation")
+        error = simulation.import_verified_tradeup_plan(plan)
+        if error:
+            self.toast.show_toast(str(error), style="warning")
+            return
+        self._activate("simulation")
+        self.toast.show_toast(
+            "已载入真实库存材料，正在模拟产物",
+            style="success",
+        )
 
     def _on_recipe_import_to_collection(self, recipe: object) -> None:
         if not self._access_allowed:

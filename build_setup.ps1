@@ -30,6 +30,13 @@ Write-Host "==> Installing build dependencies..."
 .\.venv\Scripts\python.exe -m pip install -U pip
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  throw "Node.js/npm is required to build the local Steam trade-up component"
+}
+Write-Host "==> Installing local Steam trade-up component..."
+npm ci --cache .\.npm-cache --ignore-scripts
+if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+
 $dist = Join-Path $PSScriptRoot "dist"
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 

@@ -14,8 +14,24 @@ def show_alert(parent: QWidget | None, title: str, message: str) -> None:
     dlg.exec()
 
 
-def ask_confirmation(parent: QWidget | None, title: str, message: str) -> bool:
-    dlg = ConfirmDialog(title, message, parent.window() if parent else None)
+def ask_confirmation(
+    parent: QWidget | None,
+    title: str,
+    message: str,
+    *,
+    box_width: int | None = None,
+    warning_text: str = "",
+    acknowledgement_text: str = "",
+    ok_text: str = "确定",
+) -> bool:
+    kwargs: dict = {"ok_text": ok_text}
+    if box_width is not None:
+        kwargs["box_width"] = box_width
+    if warning_text:
+        kwargs["warning_text"] = warning_text
+    if acknowledgement_text:
+        kwargs["acknowledgement_text"] = acknowledgement_text
+    dlg = ConfirmDialog(title, message, parent.window() if parent else None, **kwargs)
     return dlg.exec() == ConfirmDialog.Accepted
 
 
