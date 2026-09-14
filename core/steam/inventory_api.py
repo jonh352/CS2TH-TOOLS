@@ -38,6 +38,7 @@ def request_steam_inventory_context(
 
     if resp.status_code in (401, 403):
         raise SteamSessionExpiredError()
+    resp.raise_for_status()
 
     raw = resp.text or ""
     try:
@@ -46,12 +47,17 @@ def request_steam_inventory_context(
         head = raw[:4000].lower()
         if "<html" in head or "login" in head or "sign in" in head:
             raise SteamSessionExpiredError()
-        print("❌ 返回不是 JSON：", raw[:200])
-        return None
+        raise RuntimeError("Steam 库存响应无效，本次不更新库存或判断离库")
 
     if isinstance(data, dict):
         success = data.get("success")
         if success is False or success == 0:
             raise SteamSessionExpiredError()
 
+    if not isinstance(data, dict) or data.get("success") not in (True, 1):
+        raise RuntimeError("Steam 库存未完整返回，本次不更新库存或判断离库")
+    assets = data.get("assets") or []
+    expected = data.get("total_inventory_count")
+    if data.get("more_items") or (expected is not None and len(assets) < int(expected)):
+        raise RuntimeError("Steam 库存仅返回部分物品，本次不更新库存或判断离库，请稍后重试")
     return data

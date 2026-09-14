@@ -278,6 +278,13 @@ def commit_pending_steam_profile(
         shutil.copy2(src, steam_account_storage_state_path(dst_root))
         save_steam_account_config_dict(keep, cfg_payload)
         update_profile_display_name(keep, display)
+        from core.purchase_batches import rebind_purchase_data_for_steam_account
+
+        rebind_purchase_data_for_steam_account(
+            steam_id=sid,
+            profile_id=keep,
+            account_name=display,
+        )
         discard_pending_add_account_root()
         for mid in matches:
             if mid != keep:
@@ -295,6 +302,13 @@ def commit_pending_steam_profile(
     dst_root = profile_session_root(pid)
     shutil.copy2(src, steam_account_storage_state_path(dst_root))
     save_steam_account_config_dict(pid, cfg_payload)
+    from core.purchase_batches import rebind_purchase_data_for_steam_account
+
+    rebind_purchase_data_for_steam_account(
+        steam_id=sid,
+        profile_id=pid,
+        account_name=display,
+    )
     discard_pending_add_account_root()
     set_active_profile(pid)
     return pid

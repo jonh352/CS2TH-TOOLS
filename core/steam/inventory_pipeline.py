@@ -344,6 +344,7 @@ def process_inventory(
     marketable: int,
     *,
     steam_inventory_context_id: int | None = None,
+    include_hidden: bool = False,
 ) -> list[dict]:
     if not inventory:
         return []
@@ -390,6 +391,8 @@ def process_inventory(
         if steam_inventory_context_id is not None:
             row["steam_inventory_context_id"] = steam_inventory_context_id
         results.append(row)
+    if include_hidden:
+        return results
     excl = load_inventory_hide_name_set()
     return [r for r in results if inventory_item_visible_on_page(r, exclude_names=excl)]
 
@@ -432,12 +435,12 @@ def fetch_inventory(
     _status("正在请求冷却中物品…")
     cooldown = request_steam_inventory_context(cookie, 16, steam_id=sid)
     cooldown_results = process_inventory(
-        cooldown, 0, steam_inventory_context_id=16
+        cooldown, 0, steam_inventory_context_id=16, include_hidden=True
     )
     _raise_if_inventory_fetch_cancelled(cancel_check)
     _status("正在请求可出售物品…")
     sellable = request_steam_inventory_context(cookie, 2, steam_id=sid)
     sellable_results = process_inventory(
-        sellable, 1, steam_inventory_context_id=2
+        sellable, 1, steam_inventory_context_id=2, include_hidden=True
     )
     return cooldown_results + sellable_results, profile

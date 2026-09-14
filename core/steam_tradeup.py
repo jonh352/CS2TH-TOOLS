@@ -26,6 +26,7 @@ from core.purchase_tracking import (
 from core.alchemy_quality import get_template_from_goods_name
 from core.data_utils import tradeup_display_quality
 from core.purchase_batches import inventory_item_tradeup_cd_readiness
+from core.steam.proxy import resolve_system_http_proxy_for_steam
 
 
 class SteamTradeupError(RuntimeError):
@@ -160,6 +161,7 @@ def build_inventory_recipe_tradeup_plan(
             "asset_id": str(row.get("steam_assetid") or ""),
             "name": str(row.get("name") or "未知材料"),
             "float_value": float(row.get("float_value") or 0),
+            "price": row.get("price"),
         }
         for row in substrates
     ]
@@ -235,6 +237,16 @@ def clear_tradeup_session(profile_id: str) -> None:
         _session_file(profile_id).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _steam_proxy_request_fields() -> dict[str, str]:
+    """Translate the current system proxy into steam-session/steam-user options."""
+    proxy = resolve_system_http_proxy_for_steam()
+    if not proxy:
+        return {}
+    if proxy.lower().startswith(("socks4://", "socks5://")):
+        return {"socksProxy": proxy}
+    return {"httpProxy": proxy}
 
 
 class SteamTradeupBridge:
@@ -320,6 +332,7 @@ class SteamTradeupBridge:
             "profileDataDir": str(profile_session_root(profile_id) / "steam_gc_data"),
             "expectedSteamId": expected_steam_id,
             "assetIds": asset_ids,
+            **_steam_proxy_request_fields(),
         }
         assert process.stdin is not None
         process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
@@ -372,7 +385,12 @@ class SteamTradeupBridge:
         if cancelled and not self._irreversible:
             raise SteamTradeupCancelledError("已取消一键汰换")
         if result is None or exit_code != 0:
-            if error_code in {"ACCOUNT_MISMATCH", "STEAM_AUTH"}:
+            if error_code in {
+                "ACCOUNT_MISMATCH",
+                "AUTH_TIMEOUT",
+                "STEAM_AUTH",
+                "STEAM_LOGIN_TIMEOUT",
+            }:
                 clear_tradeup_session(profile_id)
             raise SteamTradeupError(error_message, error_code)
         return result

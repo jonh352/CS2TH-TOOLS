@@ -30,6 +30,14 @@ from ui.modal_shell import (
 from ui.widgets.purchase_qr_label import _qr_base_pixmap
 from ui.workers.steam_tradeup import SteamTradeupWorker
 
+_REAUTH_ERROR_CODES = {
+    "ACCOUNT_MISMATCH",
+    "AUTH_TIMEOUT",
+    "STEAM_AUTH",
+    "STEAM_LOGIN_TIMEOUT",
+}
+_NETWORK_RETRY_ERROR_CODES = {"STEAM_NETWORK"}
+
 
 class SteamTradeupDialog(QDialog):
     def __init__(self, parent: QWidget | None, plan: dict[str, Any]) -> None:
@@ -44,6 +52,7 @@ class SteamTradeupDialog(QDialog):
         self._success = False
         self._message = ""
         self._result_payload: dict[str, Any] = {}
+        self._retry_saved_session = False
         self._plan = dict(plan)
         self._worker: SteamTradeupWorker | None = None
 
@@ -186,6 +195,10 @@ class SteamTradeupDialog(QDialog):
     def _start_authorization(self) -> None:
         if self._worker is not None:
             return
+        if self._retry_saved_session:
+            self._retry_saved_session = False
+            self._start_worker({"mode": "saved"})
+            return
         if self._credentials_mode_btn.isChecked():
             account_name = self._account_edit.text().strip()
             password = self._password_edit.text()
@@ -255,22 +268,60 @@ class SteamTradeupDialog(QDialog):
         displayed = message
         if error_code:
             displayed = f"{message}\n错误代码：{error_code}"
+        if error_code in _NETWORK_RETRY_ERROR_CODES:
+            displayed = (
+                f"Steam 网络连接失败：{message}\n"
+                "本次未执行汰换，请检查代理/加速器后直接重试。\n"
+                f"错误代码：{error_code}"
+            )
         self._status.setText(displayed)
 
     def _on_worker_finished(self) -> None:
-        self._running = False
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
         if self._success:
+            self._running = False
             self._progress_btn.setText("已完成")
             QTimer.singleShot(120, self.accept)
-        else:
+            return
+
+        error_code = str(self._result_payload.get("error_code") or "").strip()
+        if error_code in _NETWORK_RETRY_ERROR_CODES:
+            self._running = True
+            self._irreversible = False
+            self._cancel_requested = False
+            self._retry_saved_session = True
+            self._login_controls.hide()
+            self._qr.hide()
             self._cancel_btn.setEnabled(True)
             self._cancel_btn.setText("关闭")
-            self._progress_btn.setText(
-                "请核对库存"
-                if self._result_payload.get("craft_succeeded")
-                or self._result_payload.get("uncertain")
-                else "未执行"
-            )
+            self._progress_btn.setEnabled(True)
+            self._progress_btn.setText("重试连接")
+            return
+        if error_code in _REAUTH_ERROR_CODES:
+            self._running = True
+            self._irreversible = False
+            self._cancel_requested = False
+            self._retry_saved_session = False
+            self._login_controls.show()
+            self._qr.hide()
+            self._cancel_btn.setEnabled(True)
+            self._cancel_btn.setText("关闭")
+            self._progress_btn.setEnabled(True)
+            self._progress_btn.setText("重新登录")
+            return
+
+        self._running = False
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setText("关闭")
+        self._progress_btn.setText(
+            "请核对库存"
+            if self._result_payload.get("craft_succeeded")
+            or self._result_payload.get("uncertain")
+            else "未执行"
+        )
 
     def result_payload(self) -> dict[str, Any]:
         return dict(self._result_payload)

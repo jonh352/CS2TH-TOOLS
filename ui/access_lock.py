@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 _PREV_PROP = "cs2thPrevEnabled"
+_LOCKED_PROP = "cs2thInteractionLocked"
 _INTERACTIVE_TYPES = (
     QAbstractButton,
     QLineEdit,
@@ -46,6 +47,7 @@ def apply_page_interaction_lock(root: QWidget | None, locked: bool) -> None:
     """Disable/restore interactive children so locked users can still look around."""
     if root is None:
         return
+    root.setProperty(_LOCKED_PROP, bool(locked))
     for widget in root.findChildren(QWidget):
         if not isinstance(widget, _INTERACTIVE_TYPES):
             continue
@@ -65,3 +67,22 @@ def apply_page_interaction_lock(root: QWidget | None, locked: bool) -> None:
         style = widget.style()
         style.unpolish(widget)
         style.polish(widget)
+
+
+def set_page_control_enabled(
+    root: QWidget,
+    widget: QWidget,
+    enabled: bool,
+) -> None:
+    """Update a control's desired state without bypassing the page access lock.
+
+    Some pages finish loading local state after the access gate has locked
+    their controls. In that case, remember the newly calculated state for the
+    later unlock while keeping the live control disabled in the meantime.
+    """
+    desired = bool(enabled)
+    if bool(root.property(_LOCKED_PROP)):
+        widget.setProperty(_PREV_PROP, desired)
+        widget.setEnabled(False)
+        return
+    widget.setEnabled(desired)

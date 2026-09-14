@@ -2129,7 +2129,7 @@ class PlatformPage(QWidget):
         self.recipe_edit.clear()
         self._current_recipe_url = ""
         self._set_mode(_MODE_RECIPE)
-        if self.include_alternatives.isChecked():
+        if self.include_alternatives.isChecked() and not isinstance(payload.get("_alternatives_by_input"), dict):
             self._last_recipe_payload = payload
             self.recipe_summary_title.setText(display_title)
             self.recipe_summary_meta.setText("来自配方管理 · 正在拉取备选材料…")

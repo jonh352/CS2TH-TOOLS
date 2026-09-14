@@ -8,7 +8,10 @@ const {LoginSession, EAuthTokenPlatformType} = require('steam-session');
 const APP_ID = 730;
 const GC_CONNECT_TIMEOUT_MS = 75_000;
 const CRAFT_TIMEOUT_MS = 60_000;
-const LOGIN_TIMEOUT_MS = 180_000;
+// Saved Steam Client authorization should succeed quickly or be treated as
+// stale. Human QR/Guard confirmation keeps a separate, longer timeout.
+const STEAM_CLIENT_LOGIN_TIMEOUT_MS = 15_000;
+const AUTHORIZATION_TIMEOUT_MS = 180_000;
 
 function emit(event, payload = {}) {
   process.stdout.write(`${JSON.stringify({event, ...payload})}\n`);
@@ -16,6 +19,29 @@ function emit(event, payload = {}) {
 
 function safeMessage(error) {
   return String(error && error.message ? error.message : error || '未知错误');
+}
+
+function proxyOptions(input) {
+  const httpProxy = String(input && input.httpProxy || '').trim();
+  const socksProxy = String(input && input.socksProxy || '').trim();
+  if (socksProxy) return {socksProxy};
+  if (httpProxy) return {httpProxy};
+  return {};
+}
+
+function isTransientNetworkError(error) {
+  const code = String(error && error.code || '').toUpperCase();
+  const message = safeMessage(error).toUpperCase();
+  return [
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+    'ENETDOWN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'SOCKET HANG UP',
+  ].some((marker) => code === marker || message.includes(marker));
 }
 
 function itemId(item) {
@@ -105,12 +131,13 @@ function validateCraftItems(inventory, requestedIds) {
   };
 }
 
-function authenticateWithQr() {
+function authenticateWithQr(input) {
   return new Promise(async (resolve, reject) => {
     const session = new LoginSession(EAuthTokenPlatformType.SteamClient, {
       machineFriendlyName: 'CS2TH 本地一键汰换',
+      ...proxyOptions(input),
     });
-    session.loginTimeout = LOGIN_TIMEOUT_MS;
+    session.loginTimeout = AUTHORIZATION_TIMEOUT_MS;
     let finished = false;
     const fail = (error) => {
       if (finished) return;
@@ -129,7 +156,11 @@ function authenticateWithQr() {
     session.on('remoteInteraction', () => {
       emit('status', {message: '已扫码，请在 Steam 手机 App 中确认登录'});
     });
-    session.on('timeout', () => fail(new Error('Steam 扫码登录已超时')));
+    session.on('timeout', () => {
+      const error = new Error('Steam 扫码登录已超时，请重新登录');
+      error.code = 'AUTH_TIMEOUT';
+      fail(error);
+    });
     session.on('error', fail);
     try {
       const start = await session.startWithQR();
@@ -145,8 +176,9 @@ function authenticateWithCredentials(input) {
   return new Promise(async (resolve, reject) => {
     const session = new LoginSession(EAuthTokenPlatformType.SteamClient, {
       machineFriendlyName: 'CS2TH 本地一键汰换',
+      ...proxyOptions(input),
     });
-    session.loginTimeout = LOGIN_TIMEOUT_MS;
+    session.loginTimeout = AUTHORIZATION_TIMEOUT_MS;
     let finished = false;
     const fail = (error) => {
       if (finished) return;
@@ -165,7 +197,11 @@ function authenticateWithCredentials(input) {
     session.on('remoteInteraction', () => {
       emit('status', {message: '请在 Steam 手机 App 中确认本次登录'});
     });
-    session.on('timeout', () => fail(new Error('Steam 账密登录已超时')));
+    session.on('timeout', () => {
+      const error = new Error('Steam 账密登录已超时，请重新登录');
+      error.code = 'AUTH_TIMEOUT';
+      fail(error);
+    });
     session.on('error', fail);
     try {
       emit('status', {message: '正在使用账号、密码和 Steam Guard 令牌登录…'});
@@ -187,7 +223,7 @@ async function authenticate(input) {
   if (String(input.authMode || '').toLowerCase() === 'credentials') {
     return authenticateWithCredentials(input);
   }
-  return authenticateWithQr();
+  return authenticateWithQr(input);
 }
 
 function craftWithToken(input, refreshToken) {
@@ -196,15 +232,19 @@ function craftWithToken(input, refreshToken) {
       autoRelogin: false,
       renewRefreshTokens: true,
       dataDirectory: input.profileDataDir,
+      webCompatibilityMode: true,
+      ...proxyOptions(input),
     });
     const cs2 = new GlobalOffensive(client);
     let finished = false;
     let loggedOn = false;
     let craftStarted = false;
+    let loginTimer = null;
     let gcTimer = null;
     let craftTimer = null;
 
     const cleanup = () => {
+      if (loginTimer) clearTimeout(loginTimer);
       if (gcTimer) clearTimeout(gcTimer);
       if (craftTimer) clearTimeout(craftTimer);
       try {
@@ -233,10 +273,19 @@ function craftWithToken(input, refreshToken) {
       if (token) emit('token', {refreshToken: token});
     });
     client.on('error', (error) => {
-      fail(error, loggedOn ? 'STEAM_RUNTIME' : 'STEAM_AUTH');
+      fail(
+        error,
+        isTransientNetworkError(error)
+          ? 'STEAM_NETWORK'
+          : (loggedOn ? 'STEAM_RUNTIME' : 'STEAM_AUTH'),
+      );
     });
     client.on('loggedOn', () => {
       loggedOn = true;
+      if (loginTimer) {
+        clearTimeout(loginTimer);
+        loginTimer = null;
+      }
       const steamId = String(client.steamID ? client.steamID.getSteamID64() : '');
       if (input.expectedSteamId && steamId !== String(input.expectedSteamId)) {
         fail(
@@ -306,7 +355,18 @@ function craftWithToken(input, refreshToken) {
       });
     });
 
-    emit('status', {message: '正在登录 Steam…'});
+    emit('status', {
+      message: Object.keys(proxyOptions(input)).length
+        ? '正在通过系统代理登录 Steam…'
+        : '正在登录 Steam…',
+    });
+    loginTimer = setTimeout(
+      () => fail(
+        new Error('Steam 登录超过 15 秒，已停止等待，请重新登录'),
+        'STEAM_LOGIN_TIMEOUT',
+      ),
+      STEAM_CLIENT_LOGIN_TIMEOUT_MS,
+    );
     try {
       client.logOn({refreshToken});
     } catch (error) {
@@ -325,6 +385,17 @@ async function readInput() {
 
 async function main() {
   if (process.argv.includes('--self-test')) {
+    if (proxyOptions({httpProxy: 'http://127.0.0.1:7890'}).httpProxy
+        !== 'http://127.0.0.1:7890') {
+      throw new Error('HTTP 代理传递未生效');
+    }
+    if (proxyOptions({socksProxy: 'socks5://127.0.0.1:7891'}).socksProxy
+        !== 'socks5://127.0.0.1:7891') {
+      throw new Error('SOCKS 代理传递未生效');
+    }
+    if (!isTransientNetworkError(Object.assign(new Error('socket hang up'), {code: 'ECONNRESET'}))) {
+      throw new Error('网络瞬断识别未生效');
+    }
     const normal = validateCraftItems(
       Array.from({length: 10}, (_, index) => ({id: String(index + 1), rarity: 3, quality: 4})),
       Array.from({length: 10}, (_, index) => String(index + 1)),
@@ -383,7 +454,11 @@ async function main() {
   try {
     result = await craftWithToken(input, refreshToken);
   } catch (error) {
-    if (error && error.code === 'STEAM_AUTH' && input.refreshToken) {
+    if (
+      error
+      && ['STEAM_AUTH', 'STEAM_LOGIN_TIMEOUT'].includes(error.code)
+      && input.refreshToken
+    ) {
       emit('status', {message: 'Steam 游戏授权已失效，需要重新登录'});
       const auth = await authenticate(input);
       refreshToken = auth.refreshToken;
@@ -399,6 +474,11 @@ async function main() {
 main()
   .then(() => process.exit(0))
   .catch((error) => {
-    emit('error', {message: safeMessage(error), code: String(error && error.code || '')});
+    emit('error', {
+      message: safeMessage(error),
+      code: isTransientNetworkError(error)
+        ? 'STEAM_NETWORK'
+        : String(error && error.code || ''),
+    });
     process.exit(1);
   });

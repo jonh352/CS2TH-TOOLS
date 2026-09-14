@@ -60,10 +60,12 @@ from core.inventory_steam_accounts import (
 from core.platform_links import MARKETPLACES, links_for_template
 from core.purchase_batches import reconcile_all_purchase_records_for_profile
 from config import CONTENT_PAGE_LAYOUT_MARGINS
+from ui.access_lock import set_page_control_enabled
 from ui.components import PageHeader, panel
 from ui.feedback import ask_confirmation
 from ui.weapon_card_image_area import line_and_tint_for_quality_cn
 from ui.widgets.float_line_edit import format_float_shortest
+from ui.widgets.eliding_label import ElidingLabel
 
 # 与本地 weapon_images（约 220×140）及炼金模拟枪图槽比例一致
 _INV_WEAPON_ICON_W = 176
@@ -466,7 +468,7 @@ class InventoryPage(QWidget):
         filter_row.addWidget(self.import_sim_button)
         controls.addLayout(filter_row)
 
-        self.status_label = QLabel("本地无数据，请先登录 Steam")
+        self.status_label = ElidingLabel("本地无数据，请先登录 Steam")
         self.status_label.setObjectName("statusLabel")
         self.inventory_total_value_label = QLabel("库存总价值：￥0.00")
         self.inventory_total_value_label.setObjectName("inventoryTotalValue")
@@ -532,10 +534,11 @@ class InventoryPage(QWidget):
         return str(self.account_combo.currentData() or "")
 
     def _set_busy(self, busy: bool) -> None:
-        self.account_combo.setEnabled(not busy)
-        self.add_button.setEnabled(not busy)
-        self.fetch_button.setEnabled(not busy and bool(self._active_profile_id()))
-        self.remove_button.setEnabled(not busy and bool(self._active_profile_id()))
+        set_page_control_enabled(self, self.account_combo, not busy)
+        set_page_control_enabled(self, self.add_button, not busy)
+        has_profile = bool(self._active_profile_id())
+        set_page_control_enabled(self, self.fetch_button, not busy and has_profile)
+        set_page_control_enabled(self, self.remove_button, not busy and has_profile)
 
     def _reload_accounts(self, preferred: str = "") -> None:
         active = preferred or get_active_profile_id()
@@ -551,8 +554,8 @@ class InventoryPage(QWidget):
             self.account_combo.setCurrentIndex(selected)
         self.account_combo.blockSignals(False)
         has_account = self.account_combo.count() > 0
-        self.fetch_button.setEnabled(has_account)
-        self.remove_button.setEnabled(has_account)
+        set_page_control_enabled(self, self.fetch_button, has_account)
+        set_page_control_enabled(self, self.remove_button, has_account)
         self._load_cached_inventory()
 
     def _account_changed(self) -> None:
@@ -686,7 +689,7 @@ class InventoryPage(QWidget):
             self._render_completion_status += f"，仍待入库 {waiting} 件"
         if missing_review:
             self._render_completion_status += (
-                f"；发现 {missing_review} 件已入库材料离开库存，请在采购管理中确认原因"
+                f"；待核对离库 {missing_review} 件（不代表卖家撤回）"
             )
         if save_failures:
             self._render_completion_status += f"；{save_failures} 个配方状态保存失败"
@@ -855,9 +858,9 @@ class InventoryPage(QWidget):
         selected_count = len(self.inventory_list.selectedItems())
         total = self.inventory_list.count()
         enabled = selected_count > 0
-        self.import_calc_button.setEnabled(enabled)
-        self.import_sim_button.setEnabled(enabled)
-        self.select_all_button.setEnabled(total > 0)
+        set_page_control_enabled(self, self.import_calc_button, enabled)
+        set_page_control_enabled(self, self.import_sim_button, enabled)
+        set_page_control_enabled(self, self.select_all_button, total > 0)
         self.select_all_button.setText(
             "取消全选" if total > 0 and selected_count == total else "全选"
         )

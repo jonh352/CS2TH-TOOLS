@@ -1284,6 +1284,15 @@ class AlchemySimulationPage(QWidget):
                 str(value)
                 for value in payload.get("outputAssetIds") or []
             ]
+            from core.purchase_batches import list_tradeup_records
+
+            profit = None
+            if outputs:
+                records = list_tradeup_records(str(plan.get("profile_id") or ""))
+                for record in records:
+                    if set(record.get("output_asset_ids") or []) == set(outputs):
+                        profit = record.get("profit")
+                        break
             result_dialog = SteamTradeupResultDialog(
                 self.window(),
                 [
@@ -1292,6 +1301,7 @@ class AlchemySimulationPage(QWidget):
                     if isinstance(value, dict)
                 ],
                 output_asset_ids=outputs,
+                profit=profit,
             )
             result_dialog.exec()
             suffix = f"，产物资产 ID：{', '.join(outputs)}" if outputs else ""

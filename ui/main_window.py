@@ -533,7 +533,7 @@ class MainWindow(QMainWindow):
         if self.auth_session is None:
             message = "请先登录 CS2TH 账号后再使用功能"
         else:
-            message = "当前账号无汰换会员权益，暂不可使用功能"
+            message = self._access_banner_label.text()
         self.toast.show_toast(message, style="warning")
 
     def _on_recipe_import_to_simulation(self, recipe: object) -> None:
@@ -616,6 +616,10 @@ class MainWindow(QMainWindow):
             self.toast.show_toast(str(exc), style="warning")
             return
         self._pending_recipe_reference = reference
+        if not self._access_allowed and self.auth_session is not None:
+            self.toast.show_toast("正在验证会员权益，通过后将自动导入配方", style="info")
+            self._start_auth_validation()
+            return
         self._apply_pending_recipe_import()
 
     def _apply_pending_recipe_import(self) -> None:

@@ -1,0 +1,1222 @@
+{
+  "猎杀者收藏品": {
+    "name": "猎杀者收藏品",
+    "icon": "econ_4c618fc589f6a6e6.png"
+  },
+  "猎杀者武器箱": {
+    "name": "猎杀者收藏品",
+    "icon": "econ_4c618fc589f6a6e6.png"
+  },
+  "军火交易收藏品": {
+    "name": "军火交易收藏品",
+    "icon": "econ_f4a04106c12b93f3.png"
+  },
+  "反恐精英武器箱": {
+    "name": "军火交易收藏品",
+    "icon": "econ_f4a04106c12b93f3.png"
+  },
+  "电竞 2013 收藏品": {
+    "name": "电竞 2013 收藏品",
+    "icon": "econ_5e48f00fcf95978d.png"
+  },
+  "电竞 2013 武器箱": {
+    "name": "电竞 2013 收藏品",
+    "icon": "econ_5e48f00fcf95978d.png"
+  },
+  "英勇收藏品": {
+    "name": "英勇收藏品",
+    "icon": "econ_f2a32e3e9866f202.png"
+  },
+  "“英勇大行动”武器箱": {
+    "name": "英勇收藏品",
+    "icon": "econ_f2a32e3e9866f202.png"
+  },
+  "军火交易 2 号收藏品": {
+    "name": "军火交易 2 号收藏品",
+    "icon": "econ_b0df528f298edc7a.png"
+  },
+  "反恐精英 2 号武器箱": {
+    "name": "军火交易 2 号收藏品",
+    "icon": "econ_b0df528f298edc7a.png"
+  },
+  "电竞 2013 冬季收藏品": {
+    "name": "电竞 2013 冬季收藏品",
+    "icon": "econ_aae9f8fa7dc35ac1.png"
+  },
+  "电竞 2013 冬季武器箱": {
+    "name": "电竞 2013 冬季收藏品",
+    "icon": "econ_aae9f8fa7dc35ac1.png"
+  },
+  "冬季攻势收藏品": {
+    "name": "冬季攻势收藏品",
+    "icon": "econ_33fff9ede7e7a5d6.png"
+  },
+  "冬季攻势武器箱": {
+    "name": "冬季攻势收藏品",
+    "icon": "econ_33fff9ede7e7a5d6.png"
+  },
+  "军火交易 3 号收藏品": {
+    "name": "军火交易 3 号收藏品",
+    "icon": "econ_fbb15b377f9a944d.png"
+  },
+  "反恐精英 3 号武器箱": {
+    "name": "军火交易 3 号收藏品",
+    "icon": "econ_fbb15b377f9a944d.png"
+  },
+  "凤凰收藏品": {
+    "name": "凤凰收藏品",
+    "icon": "econ_a46e968b36f42db6.png"
+  },
+  "“凤凰大行动”武器箱": {
+    "name": "凤凰收藏品",
+    "icon": "econ_a46e968b36f42db6.png"
+  },
+  "突围收藏品": {
+    "name": "突围收藏品",
+    "icon": "econ_0e5adad2cae723d2.png"
+  },
+  "“突围大行动”武器箱": {
+    "name": "突围收藏品",
+    "icon": "econ_0e5adad2cae723d2.png"
+  },
+  "电竞 2014 夏季收藏品": {
+    "name": "电竞 2014 夏季收藏品",
+    "icon": "econ_2ee1787acfe9664a.png"
+  },
+  "电竞 2014 夏季武器箱": {
+    "name": "电竞 2014 夏季收藏品",
+    "icon": "econ_2ee1787acfe9664a.png"
+  },
+  "先锋收藏品": {
+    "name": "先锋收藏品",
+    "icon": "econ_1b2bbd5e1dbce903.png"
+  },
+  "“先锋大行动”武器箱": {
+    "name": "先锋收藏品",
+    "icon": "econ_1b2bbd5e1dbce903.png"
+  },
+  "幻彩收藏品": {
+    "name": "幻彩收藏品",
+    "icon": "econ_db32a41699a035ed.png"
+  },
+  "幻彩武器箱": {
+    "name": "幻彩收藏品",
+    "icon": "econ_db32a41699a035ed.png"
+  },
+  "幻彩 2 号收藏品": {
+    "name": "幻彩 2 号收藏品",
+    "icon": "econ_9b4519f45540bd36.png"
+  },
+  "幻彩 2 号武器箱": {
+    "name": "幻彩 2 号收藏品",
+    "icon": "econ_9b4519f45540bd36.png"
+  },
+  "炙热沙城收藏品": {
+    "name": "炙热沙城收藏品",
+    "icon": "set_dust_png.png"
+  },
+  "雨林遗迹收藏品": {
+    "name": "雨林遗迹收藏品",
+    "icon": "set_aztec_png.png"
+  },
+  "殒命大厦收藏品": {
+    "name": "殒命大厦收藏品",
+    "icon": "set_vertigo_png.png"
+  },
+  "2019年柏林锦标赛殒命大厦纪念包": {
+    "name": "殒命大厦收藏品",
+    "icon": "set_vertigo_png.png"
+  },
+  "炼狱小镇收藏品": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2014年 ESL One 科隆锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2014年 DreamHack 锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2015年 ESL One 科隆锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2016年 MLG 哥伦布锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2017年克拉科夫锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "2018年波士顿锦标赛炼狱小镇纪念包": {
+    "name": "炼狱小镇收藏品",
+    "icon": "set_inferno_png.png"
+  },
+  "佣兵训练营收藏品": {
+    "name": "佣兵训练营收藏品",
+    "icon": "set_militia_png.png"
+  },
+  "核子危机收藏品": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2014年 ESL One 科隆锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2014年 DreamHack 锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2016年 MLG 哥伦布锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2016年科隆锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2017年亚特兰大锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2017年克拉科夫锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "2018年波士顿锦标赛核子危机纪念包": {
+    "name": "核子危机收藏品",
+    "icon": "set_nuke_png.png"
+  },
+  "办公室收藏品": {
+    "name": "办公室收藏品",
+    "icon": "set_office_png.png"
+  },
+  "仓库突击收藏品": {
+    "name": "仓库突击收藏品",
+    "icon": "set_assault_png.png"
+  },
+  "无畏收藏品": {
+    "name": "无畏收藏品",
+    "icon": "set_bravo_ii_png.png"
+  },
+  "炙热沙城 II 收藏品": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2013年 DreamHack 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2014年 EMS One 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2014年 ESL One 科隆锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2014年 DreamHack 锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2015年 ESL One 科隆锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2016年 MLG 哥伦布锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2016年科隆锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2017年亚特兰大锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2018年伦敦锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "卡托维兹 2019 炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "2019年柏林锦标赛炙热沙城 II 纪念包": {
+    "name": "炙热沙城 II 收藏品",
+    "icon": "set_dust_2_png.png"
+  },
+  "列车停放站收藏品": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2015年 ESL One 科隆锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2016年 MLG 哥伦布锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2016年科隆锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2017年亚特兰大锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2017年克拉科夫锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2018年波士顿锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2018年伦敦锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "卡托维兹 2019 列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "2019年柏林锦标赛列车停放站纪念包": {
+    "name": "列车停放站收藏品",
+    "icon": "set_train_png.png"
+  },
+  "荒漠迷城收藏品": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2014年 ESL One 科隆锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2014年 DreamHack 锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2015年 ESL One 科隆锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2016年 MLG 哥伦布锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2016年科隆锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2017年亚特兰大锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2017年克拉科夫锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2018年波士顿锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2018年伦敦锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "卡托维兹 2019 荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "2019年柏林锦标赛荒漠迷城纪念包": {
+    "name": "荒漠迷城收藏品",
+    "icon": "set_mirage_png.png"
+  },
+  "意大利小镇收藏品": {
+    "name": "意大利小镇收藏品",
+    "icon": "set_italy_png.png"
+  },
+  "湖畔激战收藏品": {
+    "name": "湖畔激战收藏品",
+    "icon": "set_lake_png.png"
+  },
+  "安全处所收藏品": {
+    "name": "安全处所收藏品",
+    "icon": "set_safehouse_png.png"
+  },
+  "金库危机收藏品": {
+    "name": "金库危机收藏品",
+    "icon": "set_bank_png.png"
+  },
+  "死亡游乐园收藏品": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2014年 ESL One 科隆锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2014年 DreamHack 锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2015年 ESL One 科隆锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2016年 MLG 哥伦布锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2016年科隆锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2017年亚特兰大锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2017年克拉科夫锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2018年波士顿锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2018年伦敦锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "卡托维兹 2019 死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2019年柏林锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2021年斯德哥尔摩锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2022年安特卫普锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2022年里约热内卢锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2023年巴黎锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "2024年哥本哈根锦标赛死亡游乐园纪念包": {
+    "name": "死亡游乐园收藏品",
+    "icon": "set_overpass.3b85a46ee2d4424367831a3f5994bf59f19f08bd.png"
+  },
+  "古堡激战收藏品": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2014年 ESL One 科隆锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2014年 DreamHack 锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2015年 ESL One 科隆锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2016年 MLG 哥伦布锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2016年科隆锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2017年亚特兰大锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2017年克拉科夫锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "2018年波士顿锦标赛古堡激战纪念包": {
+    "name": "古堡激战收藏品",
+    "icon": "set_cobblestone.7f470f4ad76920182d29cafc4a7fcbbb5de0e3ec.png"
+  },
+  "行李仓库收藏品": {
+    "name": "行李仓库收藏品",
+    "icon": "set_baggage_png.png"
+  },
+  "死城之谜收藏品": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2014年 ESL One 科隆锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2014年 DreamHack 锦标赛死城之迷纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2015年 ESL One 卡托维兹锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2015年 ESL One 科隆锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2015年 DreamHack 克卢日-纳波卡锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2016年 MLG 哥伦布锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2016年科隆锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2017年亚特兰大锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2017年克拉科夫锦标赛死城之迷纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2018年波士顿锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "2018年伦敦锦标赛死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "卡托维兹 2019 死城之谜纪念包": {
+    "name": "死城之谜收藏品",
+    "icon": "set_cache.1bdc24f9fbd7532a2eb3e26d6ac33e52fc4a0efc.png"
+  },
+  "神魔收藏品": {
+    "name": "神魔收藏品",
+    "icon": "set_gods_and_monsters.c66f30b18e90e05e6a727c5cda23912ffe49ffaf.png"
+  },
+  "解体厂收藏品": {
+    "name": "解体厂收藏品",
+    "icon": "set_chopshop.b6ed206d7164f48594212559a70312123a12f9b5.png"
+  },
+  "旭日收藏品": {
+    "name": "旭日收藏品",
+    "icon": "set_kimono.eec9d131eed8efec7910f137cf0cadb710e576c8.png"
+  },
+  "弯曲猎手收藏品": {
+    "name": "弯曲猎手收藏品",
+    "icon": "econ_3e6f10e3898eb63f.png"
+  },
+  "弯曲猎手武器箱": {
+    "name": "弯曲猎手收藏品",
+    "icon": "econ_3e6f10e3898eb63f.png"
+  },
+  "暗影收藏品": {
+    "name": "暗影收藏品",
+    "icon": "econ_a6eddfcf7ad35648.png"
+  },
+  "暗影武器箱": {
+    "name": "暗影收藏品",
+    "icon": "econ_a6eddfcf7ad35648.png"
+  },
+  "左轮武器箱收藏品": {
+    "name": "左轮武器箱收藏品",
+    "icon": "econ_baa7da4fe9d60924.png"
+  },
+  "左轮武器箱": {
+    "name": "左轮武器箱收藏品",
+    "icon": "econ_baa7da4fe9d60924.png"
+  },
+  "野火收藏品": {
+    "name": "野火收藏品",
+    "icon": "econ_ae357257aa3e2f55.png"
+  },
+  "“野火大行动”武器箱": {
+    "name": "野火收藏品",
+    "icon": "econ_ae357257aa3e2f55.png"
+  },
+  "2018 核子危机收藏品": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2018年伦敦锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "卡托维兹 2019 核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2019年柏林锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2021年斯德哥尔摩锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2022年安特卫普锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2022年里约热内卢锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2023年巴黎锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2024年哥本哈根锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2024年上海锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2025年奥斯汀锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2025年布达佩斯锦标赛核子危机纪念包": {
+    "name": "2018 核子危机收藏品",
+    "icon": "set_nuke_2_png.png"
+  },
+  "2018 炼狱小镇收藏品": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2018年伦敦锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "卡托维兹 2019 炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2019年柏林锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2021年斯德哥尔摩锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2022年安特卫普锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2022年里约热内卢锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2023年巴黎锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2024年哥本哈根锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2024年上海锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2025年奥斯汀锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "2025年布达佩斯锦标赛炼狱小镇纪念包": {
+    "name": "2018 炼狱小镇收藏品",
+    "icon": "set_inferno_2_png.png"
+  },
+  "X 射线收藏品": {
+    "name": "X 射线收藏品",
+    "icon": "set_xraymachine_png.png"
+  },
+  "幻彩 3 号收藏品": {
+    "name": "幻彩 3 号收藏品",
+    "icon": "econ_d3453f9d69f3aaea.png"
+  },
+  "幻彩 3 号武器箱": {
+    "name": "幻彩 3 号收藏品",
+    "icon": "econ_d3453f9d69f3aaea.png"
+  },
+  "伽玛收藏品": {
+    "name": "伽玛收藏品",
+    "icon": "econ_b34016c82ea289c6.png"
+  },
+  "伽玛武器箱": {
+    "name": "伽玛收藏品",
+    "icon": "econ_b34016c82ea289c6.png"
+  },
+  "伽玛 2 号收藏品": {
+    "name": "伽玛 2 号收藏品",
+    "icon": "econ_950d06c184dbf63e.png"
+  },
+  "伽玛 2 号武器箱": {
+    "name": "伽玛 2 号收藏品",
+    "icon": "econ_950d06c184dbf63e.png"
+  },
+  "手套收藏品": {
+    "name": "手套收藏品",
+    "icon": "econ_79e3180946f7d1dd.png"
+  },
+  "手套武器箱": {
+    "name": "手套收藏品",
+    "icon": "econ_79e3180946f7d1dd.png"
+  },
+  "光谱收藏品": {
+    "name": "光谱收藏品",
+    "icon": "econ_a0e7537afe36525d.png"
+  },
+  "光谱武器箱": {
+    "name": "光谱收藏品",
+    "icon": "econ_a0e7537afe36525d.png"
+  },
+  "“九头蛇大行动”收藏品": {
+    "name": "“九头蛇大行动”收藏品",
+    "icon": "econ_21c27668b9b7d144.png"
+  },
+  "“九头蛇大行动”武器箱": {
+    "name": "“九头蛇大行动”收藏品",
+    "icon": "econ_21c27668b9b7d144.png"
+  },
+  "光谱 2 号收藏品": {
+    "name": "光谱 2 号收藏品",
+    "icon": "econ_db8f5fdefad599fc.png"
+  },
+  "光谱 2 号武器箱": {
+    "name": "光谱 2 号收藏品",
+    "icon": "econ_db8f5fdefad599fc.png"
+  },
+  "神秘小镇收藏品": {
+    "name": "神秘小镇收藏品",
+    "icon": "set_blacksite_png.png"
+  },
+  "命悬一线收藏品": {
+    "name": "命悬一线收藏品",
+    "icon": "econ_55ed4c7aa8d5fa10.png"
+  },
+  "命悬一线武器箱": {
+    "name": "命悬一线收藏品",
+    "icon": "econ_55ed4c7aa8d5fa10.png"
+  },
+  "地平线收藏品": {
+    "name": "地平线收藏品",
+    "icon": "econ_023f30639a2f7dd3.png"
+  },
+  "地平线武器箱": {
+    "name": "地平线收藏品",
+    "icon": "econ_023f30639a2f7dd3.png"
+  },
+  "圣马克镇收藏品": {
+    "name": "圣马克镇收藏品",
+    "icon": "set_stmarc.00c570e3e140452c95e68bfa4868c9ce1c5dc1c4.png"
+  },
+  "运河水城收藏品": {
+    "name": "运河水城收藏品",
+    "icon": "set_canals.56ae4549ece13ec63d017e7fa24dc0283572670f.png"
+  },
+  "挪威人收藏品": {
+    "name": "挪威人收藏品",
+    "icon": "set_norse.d91172d71b95efb4e334d194cf6b0a5ab9621e8c.png"
+  },
+  "“裂网大行动”探员": {
+    "name": "“裂网大行动”探员",
+    "icon": "set_op9_characters_png.png"
+  },
+  "“狂牙大行动”探员": {
+    "name": "“狂牙大行动”探员",
+    "icon": "set_op10_characters_png.png"
+  },
+  "“激流大行动”探员": {
+    "name": "“激流大行动”探员",
+    "icon": "set_op11_characters_png.png"
+  },
+  "头号特训收藏品": {
+    "name": "头号特训收藏品",
+    "icon": "econ_8fd89a07bae0f606.png"
+  },
+  "“头号特训”武器箱": {
+    "name": "头号特训收藏品",
+    "icon": "econ_8fd89a07bae0f606.png"
+  },
+  "棱彩收藏品": {
+    "name": "棱彩收藏品",
+    "icon": "econ_64e639ec338a770a.png"
+  },
+  "棱彩武器箱": {
+    "name": "棱彩收藏品",
+    "icon": "econ_64e639ec338a770a.png"
+  },
+  "“裂网大行动”收藏品": {
+    "name": "“裂网大行动”收藏品",
+    "icon": "econ_bbf73ab4c2ba2424.png"
+  },
+  "“裂网大行动”武器箱": {
+    "name": "“裂网大行动”收藏品",
+    "icon": "econ_bbf73ab4c2ba2424.png"
+  },
+  "反恐精英20周年收藏品": {
+    "name": "反恐精英20周年收藏品",
+    "icon": "econ_2e1dc33d8ba41ec0.png"
+  },
+  "反恐精英20周年武器箱": {
+    "name": "反恐精英20周年收藏品",
+    "icon": "econ_2e1dc33d8ba41ec0.png"
+  },
+  "2021 炙热沙城 II 收藏品": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2021年斯德哥尔摩锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2022年安特卫普锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2022年里约热内卢锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2024年上海锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2025年奥斯汀锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2025年布达佩斯锦标赛炙热沙城 II 纪念包": {
+    "name": "2021 炙热沙城 II 收藏品",
+    "icon": "set_dust_2_2021.318944ebb9e3dae51cd87d38b5d3584a2fa9425f.png"
+  },
+  "2021 荒漠迷城收藏品": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2021年斯德哥尔摩锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2022年安特卫普锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2022年里约热内卢锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2023年巴黎锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2024年哥本哈根锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2024年上海锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2025年奥斯汀锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "2025年布达佩斯锦标赛荒漠迷城纪念包": {
+    "name": "2021 荒漠迷城收藏品",
+    "icon": "set_mirage_2021.f1c9b5169b9fb9d6e0933baba0514dd34d6c9e19.png"
+  },
+  "棱彩2号收藏品": {
+    "name": "棱彩2号收藏品",
+    "icon": "econ_fab0b70c08e94613.png"
+  },
+  "棱彩2号武器箱": {
+    "name": "棱彩2号收藏品",
+    "icon": "econ_fab0b70c08e94613.png"
+  },
+  "裂空武器箱收藏品": {
+    "name": "裂空武器箱收藏品",
+    "icon": "econ_069985e600d65806.png"
+  },
+  "裂空武器箱": {
+    "name": "裂空武器箱收藏品",
+    "icon": "econ_069985e600d65806.png"
+  },
+  "“狂牙大行动”收藏品": {
+    "name": "“狂牙大行动”收藏品",
+    "icon": "econ_bf72884fda9b48a5.png"
+  },
+  "“狂牙大行动”武器箱": {
+    "name": "“狂牙大行动”收藏品",
+    "icon": "econ_bf72884fda9b48a5.png"
+  },
+  "控制收藏品": {
+    "name": "控制收藏品",
+    "icon": "set_op10_ct.aaf2dd57a339a610de6f4514a76eb1e846647cc0.png"
+  },
+  "浩劫收藏品": {
+    "name": "浩劫收藏品",
+    "icon": "set_op10_t.18b6dd49906d15a5f44f1477ca6139c7ab491197.png"
+  },
+  "远古收藏品": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2021年斯德哥尔摩锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2022年安特卫普锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2022年里约热内卢锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2023年巴黎锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2024年哥本哈根锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2024年上海锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2025年奥斯汀锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "2025年布达佩斯锦标赛远古遗迹纪念包": {
+    "name": "远古收藏品",
+    "icon": "set_op10_ancient.e90a2018381216be882d96c9e6c314d99f5097fa.png"
+  },
+  "蛇噬收藏品": {
+    "name": "蛇噬收藏品",
+    "icon": "econ_2fc55191a555d389.png"
+  },
+  "蛇噬武器箱": {
+    "name": "蛇噬收藏品",
+    "icon": "econ_2fc55191a555d389.png"
+  },
+  "2021 列车停放站收藏品": {
+    "name": "2021 列车停放站收藏品",
+    "icon": "set_train_2021.a000b6d4ae1978aeced8ec31aa8ef5a0014dae29.png"
+  },
+  "2021 殒命大厦收藏品": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2021年斯德哥尔摩锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2022年安特卫普锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2022年里约热内卢锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2023年巴黎锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2024年哥本哈根锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "2024年上海锦标赛殒命大厦纪念包": {
+    "name": "2021 殒命大厦收藏品",
+    "icon": "set_vertigo_2021.611413bf4d18e0c888054707dff98c612049f097.png"
+  },
+  "阿努比斯收藏品": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "阿努比斯收藏包": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "2023年巴黎锦标赛阿努比斯纪念包": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "2024年哥本哈根锦标赛阿努比斯纪念包": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "2024年上海锦标赛阿努比斯纪念包": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "2025年奥斯汀锦标赛阿努比斯纪念包": {
+    "name": "阿努比斯收藏品",
+    "icon": "set_anubis_png.png"
+  },
+  "“激流大行动”收藏品": {
+    "name": "“激流大行动”收藏品",
+    "icon": "econ_b889f2a4dd6afb50.png"
+  },
+  "“激流大行动”武器箱": {
+    "name": "“激流大行动”收藏品",
+    "icon": "econ_b889f2a4dd6afb50.png"
+  },
+  "梦魇收藏品": {
+    "name": "梦魇收藏品",
+    "icon": "econ_dbd829241a67443d.png"
+  },
+  "梦魇武器箱": {
+    "name": "梦魇收藏品",
+    "icon": "econ_dbd829241a67443d.png"
+  },
+  "反冲收藏品": {
+    "name": "反冲收藏品",
+    "icon": "econ_6de70f464059c3f3.png"
+  },
+  "反冲武器箱": {
+    "name": "反冲收藏品",
+    "icon": "econ_6de70f464059c3f3.png"
+  },
+  "变革收藏品": {
+    "name": "变革收藏品",
+    "icon": "econ_b3ee2352b7470b3c.png"
+  },
+  "变革武器箱": {
+    "name": "变革收藏品",
+    "icon": "econ_b3ee2352b7470b3c.png"
+  },
+  "千瓦收藏品": {
+    "name": "千瓦收藏品",
+    "icon": "econ_789000008e462ce2.png"
+  },
+  "千瓦武器箱": {
+    "name": "千瓦收藏品",
+    "icon": "econ_789000008e462ce2.png"
+  },
+  "画廊收藏品": {
+    "name": "画廊收藏品",
+    "icon": "econ_df2112757d7102b6.png"
+  },
+  "画廊武器箱": {
+    "name": "画廊收藏品",
+    "icon": "econ_df2112757d7102b6.png"
+  },
+  "热潮收藏品": {
+    "name": "热潮收藏品",
+    "icon": "econ_b8257e9dde3039d6.png"
+  },
+  "热潮武器箱": {
+    "name": "热潮收藏品",
+    "icon": "econ_b8257e9dde3039d6.png"
+  },
+  "蔓藤纹收藏品": {
+    "name": "蔓藤纹收藏品",
+    "icon": "set_arabesque.3d2ee80f107ddabe862843e7b8097b1fdc98a917.png"
+  },
+  "创世纪收藏品": {
+    "name": "创世纪收藏品",
+    "icon": "set_community_36.svg"
+  },
+  "封装的创世终端机": {
+    "name": "创世纪收藏品",
+    "icon": "set_community_36.svg"
+  },
+  "毁灭之手终端机": {
+    "name": "毁灭之手终端机",
+    "icon": "econ_799243e5bf1970c2.png"
+  },
+  "封装的毁灭之手终端机": {
+    "name": "毁灭之手终端机",
+    "icon": "econ_799243e5bf1970c2.png"
+  },
+  "平面设计收藏品": {
+    "name": "平面设计收藏品",
+    "icon": "set_graphic_design.svg"
+  },
+  "2024 死亡游乐园收藏品": {
+    "name": "2024 死亡游乐园收藏品",
+    "icon": "set_overpass_2024.svg"
+  },
+  "2025年布达佩斯锦标赛死亡游乐园纪念包": {
+    "name": "2024 死亡游乐园收藏品",
+    "icon": "set_overpass_2024.svg"
+  },
+  "狩猎运动收藏品": {
+    "name": "狩猎运动收藏品",
+    "icon": "set_realism_camo.svg"
+  },
+  "谍影收藏品": {
+    "name": "谍影收藏品",
+    "icon": "set_spy_tech.441f3fa962400c425c38ece97953d4322afe1706.png"
+  },
+  "墨彩收藏品": {
+    "name": "墨彩收藏品",
+    "icon": "set_timed_drops_achroma.svg"
+  },
+  "攀升收藏品": {
+    "name": "攀升收藏品",
+    "icon": "set_timed_drops_cool.svg"
+  },
+  "哈乐昆收藏品": {
+    "name": "哈乐昆收藏品",
+    "icon": "set_timed_drops_exuberant.svg"
+  },
+  "寒带收藏品": {
+    "name": "寒带收藏品",
+    "icon": "set_timed_drops_neutral.svg"
+  },
+  "热辐射收藏品": {
+    "name": "热辐射收藏品",
+    "icon": "set_timed_drops_warm.svg"
+  },
+  "2025 列车停放站收藏品": {
+    "name": "2025 列车停放站收藏品",
+    "icon": "set_train_2025.svg"
+  },
+  "2025年奥斯汀锦标赛列车停放站纪念包": {
+    "name": "2025 列车停放站收藏品",
+    "icon": "set_train_2025.svg"
+  },
+  "2025年布达佩斯锦标赛列车停放站纪念包": {
+    "name": "2025 列车停放站收藏品",
+    "icon": "set_train_2025.svg"
+  },
+  "限定物品": {
+    "name": "限定物品",
+    "icon": "set_xpshop_wpn_01.svg"
+  },
+  "极速印花收藏品": {
+    "name": "极速印花收藏品",
+    "icon": "set_auto_racing.2bb35a9a9c95a4757596a2ebd2085c73529f184b.png"
+  },
+  "2025社区印花收藏品": {
+    "name": "2025社区印花收藏品",
+    "icon": "set_community_2025.280d945244b90804541bf84784796793fd3bad00.png"
+  },
+  "果蔬印花收藏品": {
+    "name": "果蔬印花收藏品",
+    "icon": "set_fruits_veggies.1b09ff5e40587c321b46d3d2c8298ea58c480b08.png"
+  },
+  "爆炸博士挂件收藏品": {
+    "name": "爆炸博士挂件收藏品",
+    "icon": "set_kc_drboom_png.png"
+  },
+  "迷链挂件收藏品": {
+    "name": "迷链挂件收藏品",
+    "icon": "set_kc_missinglink_png.png"
+  },
+  "迷链社区挂件收藏品": {
+    "name": "迷链社区挂件收藏品",
+    "icon": "set_kc_ml_community_01.6575c6767ec10b0720cc8833c67a2bb98698422c.png"
+  },
+  "袖珍武器挂件收藏品": {
+    "name": "袖珍武器挂件收藏品",
+    "icon": "set_kc_weapon_01_png.png"
+  },
+  "元素手作印花包": {
+    "name": "元素手作印花包",
+    "icon": "set_stkr_craft_01_png.png"
+  },
+  "角色手作印花包": {
+    "name": "角色手作印花包",
+    "icon": "set_stkr_craft_02_png.png"
+  },
+  "糖果脸谱 2 号印花收藏品": {
+    "name": "糖果脸谱 2 号印花收藏品",
+    "icon": "set_sugarface2.2cb2d789be9fd3a0784335cf2453438a3c0f5ee7.png"
+  },
+  "Hello压枪系列涂鸦收藏品": {
+    "name": "Hello压枪系列涂鸦收藏品",
+    "icon": "crate_spray_std3_png.png"
+  },
+  "僵尸涂鸦收藏品": {
+    "name": "僵尸涂鸦收藏品",
+    "icon": "crate_spray_std2.c55a072f05762521cc1bdcf2fb0441f4846ae961.png"
+  },
+  "CS:GO 涂鸦 #2 收藏品": {
+    "name": "CS:GO 涂鸦 #2 收藏品",
+    "icon": "crate_spray_std2.c55a072f05762521cc1bdcf2fb0441f4846ae961.png"
+  }
+}

@@ -1343,7 +1343,7 @@ class RecipeManagePage(QWidget):
         token = session.access_token if session is not None else ""
         self.import_cs2th_btn.setEnabled(False)
         self.import_cs2th_btn.setText("导入中…")
-        thread = RecipeLoadThread(reference.strip(), token, self)
+        thread = RecipeLoadThread(reference.strip(), token, self, include_alternatives=True)
         thread.completed.connect(self._on_cs2th_recipe_loaded)
         thread.finished.connect(thread.deleteLater)
         self._recipe_import_thread = thread

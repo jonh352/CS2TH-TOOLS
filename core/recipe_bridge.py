@@ -208,6 +208,17 @@ def saved_recipe_to_bridge_payload(recipe: dict, *, title: str = "") -> dict:
 
     Enables the same material-card / alternatives UI used by link-loaded recipes.
     """
+    import copy
+    cached = recipe.get("cs2th_collection_payload")
+    if (isinstance(cached, dict)
+            and cached.get("_saved_substrates") == recipe.get("substrates_display")
+            and isinstance(cached.get("inputs"), list)):
+        restored = copy.deepcopy(cached)
+        restored.pop("_saved_substrates", None)
+        if title.strip():
+            restored["collection_name"] = title.strip()
+        return restored
+
     from core.alchemy_quality import (
         get_name_map,
         normalize_name,
@@ -301,6 +312,7 @@ def saved_recipe_to_bridge_payload(recipe: dict, *, title: str = "") -> dict:
 
 def cs2th_detail_to_saved_recipe(payload: dict) -> dict:
     """Convert the public CS2TH detail response to the local recipe schema."""
+    import copy
     inputs = [item for item in payload.get("inputs", []) if isinstance(item, dict)]
     outcomes = [
         item for item in payload.get("outcomes", []) if isinstance(item, dict)
@@ -347,4 +359,11 @@ def cs2th_detail_to_saved_recipe(payload: dict) -> dict:
         "simulation_slot_count": len(substrates),
         "cs2th_recipe_id": str(payload.get("_recipe_id") or payload.get("id") or ""),
         "cs2th_market": str(payload.get("_market") or "spot"),
+        "cs2th_collection_payload": {
+            **{key: copy.deepcopy(payload[key]) for key in (
+                "inputs", "input_rarity", "collection_name", "input_cost", "roi",
+                "_market", "_recipe_id", "_alternatives_by_input"
+            ) if key in payload},
+            "_saved_substrates": copy.deepcopy(substrates),
+        },
     }

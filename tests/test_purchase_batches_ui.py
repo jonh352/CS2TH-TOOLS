@@ -144,6 +144,59 @@ class PurchaseBatchUiTests(unittest.TestCase):
         dialog._running = False
         dialog.close()
 
+    def test_tradeup_login_timeout_returns_to_login_controls(self) -> None:
+        with patch(
+            "ui.dialogs.steam_tradeup_dialog.has_saved_tradeup_session",
+            return_value=False,
+        ):
+            dialog = SteamTradeupDialog(
+                None,
+                {"profile_id": "profile", "steam_id": "76561198000000001"},
+            )
+        dialog._login_controls.hide()
+        dialog._progress_btn.setEnabled(False)
+
+        dialog._on_completed(
+            False,
+            "Steam 登录超过 15 秒，请重新登录",
+            {"error_code": "STEAM_LOGIN_TIMEOUT"},
+        )
+        dialog._on_worker_finished()
+
+        self.assertFalse(dialog._login_controls.isHidden())
+        self.assertTrue(dialog._progress_btn.isEnabled())
+        self.assertEqual(dialog._progress_btn.text(), "重新登录")
+        self.assertTrue(dialog._running)
+        dialog._running = False
+        dialog.close()
+
+    def test_tradeup_network_failure_can_retry_without_new_login(self) -> None:
+        with patch(
+            "ui.dialogs.steam_tradeup_dialog.has_saved_tradeup_session",
+            return_value=False,
+        ):
+            dialog = SteamTradeupDialog(
+                None,
+                {"profile_id": "profile", "steam_id": "76561198000000001"},
+            )
+
+        dialog._on_completed(
+            False,
+            "socket hang up",
+            {"error_code": "STEAM_NETWORK"},
+        )
+        dialog._on_worker_finished()
+
+        self.assertEqual(dialog._progress_btn.text(), "重试连接")
+        self.assertTrue(dialog._progress_btn.isEnabled())
+        self.assertTrue(dialog._retry_saved_session)
+        self.assertIn("本次未执行汰换", dialog._status.text())
+        with patch.object(dialog, "_start_worker") as start_worker:
+            dialog._start_authorization()
+        start_worker.assert_called_once_with({"mode": "saved"})
+        dialog._running = False
+        dialog.close()
+
     def test_tradeup_success_dialog_shows_product_image_and_details(self) -> None:
         _material, product = _template_pair()
         dialog = SteamTradeupResultDialog(
@@ -159,17 +212,13 @@ class PurchaseBatchUiTests(unittest.TestCase):
             ],
         )
 
-        image = dialog.findChild(QLabel, "steamTradeupResultImage")
-        self.assertIsNotNone(image)
-        self.assertIsNotNone(image.pixmap())
-        self.assertFalse(image.pixmap().isNull())
-        self.assertIn(
-            _name(product),
-            dialog.findChild(QLabel, "steamTradeupResultName").text(),
-        )
-        meta = dialog.findChild(QLabel, "steamTradeupResultMeta").text()
-        self.assertIn("0.1234567890", meta)
-        self.assertIn("¥88.80", meta)
+        self.assertFalse(dialog._pixmap.isNull())
+        self.assertEqual(dialog.product["name"], _name(product))
+        self.assertEqual(dialog.product["float_value"], 0.123456789)
+        dialog._finish_reveal()
+        self.assertFalse(dialog.grab().isNull())
+        self.assertEqual(dialog._continue.text(), "继续")
+        dialog.close()
 
     def test_entering_ready_section_refreshes_automatically(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(

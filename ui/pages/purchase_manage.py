@@ -26,7 +26,8 @@ from core.inventory_icons import resolve_inventory_item_icon_path, weapon_image_
 from core.purchase_batches import (
     create_purchase_batch, delete_tradeup_completed_batches, list_purchase_batches,
     list_ready_purchase_batch_recipes, list_tradeup_records, purchase_batch_section,
-    purchase_batch_summary, update_purchase_batch_account,
+    purchase_batch_summary, repair_purchase_account_links,
+    update_purchase_batch_account,
 )
 from core.purchase_tracking import load_profile_inventory_items
 from ui.dialogs.wide_text_input_dialog import get_wide_text_input
@@ -62,6 +63,28 @@ def _money(value: object) -> str:
         return f"¥{float(value):.2f}"
     except (TypeError, ValueError):
         return "价格待刷新"
+
+
+class _HistoryProductCard(QFrame):
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("查看汰换产物详情")
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _ProfitTrendChart(QWidget):
@@ -328,6 +351,11 @@ class PurchaseManagePage(QWidget):
         *,
         preferred_profile_id: str | None = None,
     ) -> None:
+        try:
+            repair_purchase_account_links()
+        except (OSError, ValueError):
+            # Keep the page usable if a cache file is temporarily locked.
+            pass
         current = (
             preferred_profile_id
             if preferred_profile_id is not None
@@ -602,9 +630,11 @@ class PurchaseManagePage(QWidget):
         result_row.addWidget(arrow)
         products = [row for row in record.get("products") or [] if isinstance(row, dict)]
         if products:
-            result_row.addWidget(
-                self._build_history_item_thumb(products[0], color, product=True)
+            product_card = self._build_history_item_thumb(products[0], color, product=True)
+            product_card.clicked.connect(
+                lambda: self._show_history_product(products[0], profit)
             )
+            result_row.addWidget(product_card)
         else:
             pending = QFrame(card)
             pending.setObjectName("tradeupHistoryProductPending")
@@ -617,6 +647,14 @@ class PurchaseManagePage(QWidget):
             result_row.addWidget(pending)
         layout.addLayout(result_row)
         return card
+
+    def _show_history_product(self, product: dict, profit) -> None:
+        from ui.dialogs.steam_tradeup_result_dialog import SteamTradeupResultDialog
+
+        SteamTradeupResultDialog(
+            self, [product], profit=profit, history_preview=True,
+            image_path=self._history_item_image_path(product)
+        ).exec()
 
     def _build_history_dashboard(
         self,
@@ -737,7 +775,7 @@ class PurchaseManagePage(QWidget):
         *,
         product: bool,
     ) -> QFrame:
-        card = QFrame(self._purchase_batch_container)
+        card = (_HistoryProductCard if product else QFrame)(self._purchase_batch_container)
         card.setObjectName(
             "tradeupHistoryProductCard" if product else "tradeupHistoryItemCard"
         )

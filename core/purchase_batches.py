@@ -15,6 +15,7 @@ import numpy as np
 
 from config import PURCHASE_BATCHES_DIR
 from core.alchemy_calc import (
+    lookup_inventory_item_price_value,
     lookup_template_price_value,
     tradeup_average_normalized_float32,
     tradeup_product_wear_float32,
@@ -34,7 +35,9 @@ from core.data_utils import (
 )
 from core.inventory_steam_accounts import (
     combo_display_name_for_profile,
+    get_active_profile_id,
     list_profile_entries,
+    load_steam_account_config_dict,
 )
 from core.purchase_tracking import (
     STATUS_CANCELLED,
@@ -48,6 +51,7 @@ from core.purchase_tracking import (
     inventory_wear_matches_planned,
     load_profile_inventory_items,
     received_asset_ids_for_saved_recipes,
+    rebind_saved_recipe_tracking_for_steam_account,
     reconcile_saved_recipes_for_profile,
     recipe_substrate_template_key,
 )
@@ -235,7 +239,10 @@ def purchase_batch_section(batch: dict[str, Any]) -> str:
     """Stable UI section for a batch: purchasing, received, or completed."""
     if purchase_batch_is_tradeup_completed(batch):
         return "tradeup_completed"
-    if purchase_batch_is_fully_received(batch):
+    # Departure review does not undo receipt or create a new purchase obligation.
+    # Keep live-inventory checks in readiness validation, not archive placement.
+    summary = purchase_batch_summary(batch)
+    if summary["total"] > 0 and summary[STATUS_RECEIVED] == summary["total"]:
         return "purchase_completed"
     return "purchasing"
 
@@ -653,6 +660,7 @@ def list_tradeup_records(profile_id: str = "") -> list[dict[str, Any]]:
                         else ""
                     ),
                     "profile_id": batch_profile,
+                    "steam_id": str(batch.get("steam_id") or ""),
                     "account_name": str(batch.get("account_name") or "Steam"),
                     "completed_at": str(
                         execution.get("completed_at")
@@ -662,6 +670,7 @@ def list_tradeup_records(profile_id: str = "") -> list[dict[str, Any]]:
                     ),
                     "materials": materials,
                     "products": products,
+                    "output_asset_ids": output_ids,
                     "product_candidates": copy.deepcopy(
                         [
                             row
@@ -680,6 +689,7 @@ def list_tradeup_records(profile_id: str = "") -> list[dict[str, Any]]:
             )
     # Archived records keep asset ids.  Re-resolve them on every view so a
     # later Steam inventory refresh can fill the actual product name/price.
+    local_price_map = try_build_product_price_map_from_disk()
     for record in records:
         record_profile = str(record.get("profile_id") or "")
         if record_profile not in inventory_cache:
@@ -699,13 +709,37 @@ def list_tradeup_records(profile_id: str = "") -> list[dict[str, Any]]:
                 item.get("market_name") or item.get("name")
                 or item.get("market_hash_name") or product.get("name") or "未知产物"
             )
-            product["float_value"] = item.get("float", item.get("float_value"))
+            inventory_wear = item.get("float", item.get("float_value"))
+            if inventory_wear is not None:
+                product["float_value"] = inventory_wear
             try:
                 price = float(item.get("buff_price", item.get("price")))
-                product["price"] = price if math.isfinite(price) and price > 0 else None
+                if math.isfinite(price) and price > 0:
+                    product["price"] = price
             except (TypeError, ValueError):
-                product["price"] = None
+                pass
         product_rows = [row for row in record.get("products") or [] if isinstance(row, dict)]
+        def fill_local_price(row):
+            try:
+                value = float(row.get("price"))
+                if math.isfinite(value) and value > 0:
+                    return
+            except (TypeError, ValueError):
+                pass
+            price = lookup_inventory_item_price_value(
+                {**row, "float": row.get("float_value")}, local_price_map
+            )
+            if price is not None:
+                row["price"] = price
+
+        for product in product_rows:
+            fill_local_price(product)
+        if record.get("material_cost") is None:
+            materials = [row for row in record.get("materials") or [] if isinstance(row, dict)]
+            for material in materials:
+                fill_local_price(material)
+            if materials and all(row.get("price") is not None for row in materials):
+                record["material_cost"] = sum(float(row["price"]) for row in materials)
         prices = [row.get("price") for row in product_rows]
         output_value = (
             sum(float(value) for value in prices)
@@ -944,6 +978,135 @@ def delete_tradeup_completed_batches(profile_id: str = "") -> int:
 def _tradeup_history_path() -> Path:
     """Keep history beside the batch directory so patched/test stores stay isolated."""
     return PURCHASE_BATCHES_DIR.parent / "tradeup_history.json"
+
+
+def rebind_purchase_data_for_steam_account(
+    *,
+    steam_id: str,
+    profile_id: str,
+    account_name: str = "",
+) -> dict[str, int]:
+    """Reattach existing purchase data after the same SteamID64 logs in again.
+
+    ``profile_id`` is only a random local storage slot and can change when a
+    login is removed. SteamID64 is the durable account identity, so exact ID
+    matches move to the current slot without resetting any purchase state.
+    """
+    sid = str(steam_id or "").strip()
+    target_profile = str(profile_id or "").strip()
+    if not sid or not target_profile:
+        return {"batches": 0, "saved_recipes": 0, "history": 0}
+    display_name = str(account_name or "").strip()
+    old_profile_ids: set[str] = set()
+    matching_batches: list[tuple[Path, dict[str, Any]]] = []
+    for path, batch in list_purchase_batches():
+        if str(batch.get("steam_id") or "").strip() != sid:
+            continue
+        old_profile = str(batch.get("profile_id") or "").strip()
+        if old_profile and old_profile != target_profile:
+            old_profile_ids.add(old_profile)
+        matching_batches.append((path, batch))
+
+    history_path = _tradeup_history_path()
+    try:
+        archived = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        archived = []
+    if not isinstance(archived, list):
+        archived = []
+    for row in archived:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("steam_id") or "").strip() == sid:
+            old_profile = str(row.get("profile_id") or "").strip()
+            if old_profile and old_profile != target_profile:
+                old_profile_ids.add(old_profile)
+
+    batch_changes = 0
+    for path, batch in matching_batches:
+        dirty = str(batch.get("profile_id") or "").strip() != target_profile
+        if dirty:
+            batch["profile_id"] = target_profile
+        if display_name and str(batch.get("account_name") or "") != display_name:
+            batch["account_name"] = display_name
+            dirty = True
+        if dirty:
+            # Identity repair must not make an old batch look newly edited.
+            _write_batch(path, batch)
+            batch_changes += 1
+
+    saved_changes = rebind_saved_recipe_tracking_for_steam_account(
+        steam_id=sid,
+        profile_id=target_profile,
+        account_name=display_name,
+        legacy_profile_ids=old_profile_ids,
+    )
+
+    history_changes = 0
+    for row in archived:
+        if not isinstance(row, dict):
+            continue
+        row_sid = str(row.get("steam_id") or "").strip()
+        row_profile = str(row.get("profile_id") or "").strip()
+        if row_sid != sid and row_profile not in old_profile_ids:
+            continue
+        dirty = row_profile != target_profile or row_sid != sid
+        if dirty:
+            row["profile_id"] = target_profile
+            row["steam_id"] = sid
+        if display_name and str(row.get("account_name") or "") != display_name:
+            row["account_name"] = display_name
+            dirty = True
+        if dirty:
+            history_changes += 1
+    if history_changes:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = history_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(archived, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(history_path)
+
+    return {
+        "batches": batch_changes,
+        "saved_recipes": saved_changes,
+        "history": history_changes,
+    }
+
+
+def repair_purchase_account_links() -> dict[str, int]:
+    """Repair stale local-slot links for every currently known Steam account."""
+    active_profile = get_active_profile_id()
+    accounts_by_sid: dict[str, list[tuple[str, str]]] = {}
+    for entry in list_profile_entries():
+        profile_id = str(entry.get("id") or "").strip()
+        if not profile_id:
+            continue
+        cfg = load_steam_account_config_dict(profile_id)
+        sid = str(cfg.get("steam_id") or "").strip()
+        if not sid:
+            continue
+        display_name = (
+            str(cfg.get("steam_personaname") or "").strip()
+            or combo_display_name_for_profile(entry)
+        )
+        accounts_by_sid.setdefault(sid, []).append((profile_id, display_name))
+
+    totals = {"batches": 0, "saved_recipes": 0, "history": 0}
+    for sid, accounts in accounts_by_sid.items():
+        target = next(
+            (account for account in accounts if account[0] == active_profile),
+            accounts[0],
+        )
+        result = rebind_purchase_data_for_steam_account(
+            steam_id=sid,
+            profile_id=target[0],
+            account_name=target[1],
+        )
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+    return totals
 
 
 def build_purchase_batch_recipe_tradeup_plan(

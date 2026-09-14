@@ -229,6 +229,50 @@ def start_purchase_batch(
     return tracking
 
 
+def rebind_saved_recipe_tracking_for_steam_account(
+    *,
+    steam_id: str,
+    profile_id: str,
+    account_name: str = "",
+    legacy_profile_ids: set[str] | None = None,
+) -> int:
+    """Move legacy saved-recipe tracking to the current slot for one SteamID64."""
+    sid = str(steam_id or "").strip()
+    target_profile = str(profile_id or "").strip()
+    if not sid or not target_profile:
+        return 0
+    legacy_ids = {
+        str(value or "").strip()
+        for value in (legacy_profile_ids or set())
+        if str(value or "").strip()
+    }
+    changed = 0
+    for path, payload in list_saved_recipes():
+        source_recipe = payload.get("recipe")
+        if not isinstance(source_recipe, dict):
+            continue
+        recipe = copy.deepcopy(source_recipe)
+        tracking = purchase_tracking(recipe)
+        if tracking is None:
+            continue
+        tracking_sid = str(tracking.get("steam_id") or "").strip()
+        tracking_profile = str(tracking.get("profile_id") or "").strip()
+        if tracking_sid != sid and tracking_profile not in legacy_ids:
+            continue
+        dirty = tracking_profile != target_profile or tracking_sid != sid
+        if dirty:
+            tracking["profile_id"] = target_profile
+            tracking["steam_id"] = sid
+        display_name = str(account_name or "").strip()
+        if display_name and str(tracking.get("account_name") or "") != display_name:
+            tracking["account_name"] = display_name
+            dirty = True
+        if dirty:
+            update_recipe_recipe_dict(path, recipe)
+            changed += 1
+    return changed
+
+
 def _tracking_materials(recipe: dict[str, Any]) -> list[dict[str, Any]]:
     tracking = purchase_tracking(recipe)
     if tracking is None:

@@ -81,7 +81,7 @@ class InventoryFetchWorker(QThread):
                     build_price_map(raw),
                     str(raw.get("fetch_time") or ""),
                 )
-                price_status = f"价格已同步，匹配 {matched}/{len(items)} 件"
+                price_status = f"库存 {len(items)} 件 · 价格已匹配 {matched} 件"
             except Exception as exc:
                 # Steam inventory is still useful when the price service is
                 # temporarily unavailable, so do not turn this into a fetch

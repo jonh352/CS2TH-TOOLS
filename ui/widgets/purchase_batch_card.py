@@ -382,6 +382,13 @@ class PurchaseBatchCard(QFrame):
         self._filter.setToolTip("按采购和入库状态筛选；选择后会自动展开材料明细")
         self._filter.currentTextChanged.connect(self._on_filter_changed)
         actions.addWidget(self._filter)
+        self._review_departure_button = QPushButton(self)
+        self._review_departure_button.setObjectName("purchaseDepartureReviewButton")
+        self._review_departure_button.setToolTip(
+            "展开对应配方和材料；库存未找到不等于卖家撤回，请核实后逐件确认。"
+        )
+        self._review_departure_button.clicked.connect(self._show_departure_review)
+        actions.addWidget(self._review_departure_button)
         self._mark_all_button = QPushButton(self)
         self._mark_all_button.clicked.connect(self._toggle_all_ordered)
         actions.addWidget(self._mark_all_button)
@@ -424,6 +431,8 @@ class PurchaseBatchCard(QFrame):
 
     def _refresh_header(self) -> None:
         summary = purchase_batch_summary(self._payload)
+        self._review_departure_button.setVisible(bool(summary["missing_review"]))
+        self._review_departure_button.setText(f"查看待确认离库（{summary['missing_review']}）")
         batch_name = str(self._payload.get("name") or "未命名采购批次")
         alchemy_text = purchase_batch_alchemy_status_text(self._payload)
         if alchemy_text:
@@ -508,6 +517,22 @@ class PurchaseBatchCard(QFrame):
             return
         self._rebuild_table()
 
+    def _show_departure_review(self) -> None:
+        self._expanded_recipe_ids.update(
+            str(entry.get("id") or "")
+            for entry in self._payload.get("recipes") or []
+            if isinstance(entry, dict) and not entry.get("tradeup_completed")
+            and any(
+                isinstance(row, dict) and row.get("status") == STATUS_RECEIVED
+                and row.get("inventory_missing_since")
+                for row in entry.get("materials") or []
+            )
+        )
+        self._filter.blockSignals(True)
+        self._filter.setCurrentText("待确认离库")
+        self._filter.blockSignals(False)
+        self._set_expanded(True)
+
     def _recipe_groups(self) -> list[tuple[str, dict, list[tuple[dict, dict]]]]:
         wanted = _FILTER_TO_STATUS.get(self._filter.currentText(), "")
         groups: list[tuple[str, dict, list[tuple[dict, dict]]]] = []
@@ -534,6 +559,10 @@ class PurchaseBatchCard(QFrame):
                     continue
                 if wanted == "missing_review" and not material.get(
                     "inventory_missing_since"
+                ):
+                    continue
+                if wanted == "missing_review" and (
+                    entry.get("tradeup_completed") or status != STATUS_RECEIVED
                 ):
                     continue
                 if (
@@ -826,6 +855,12 @@ class PurchaseBatchCard(QFrame):
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                if material.get("inventory_missing_since"):
+                    item.setToolTip(
+                        f"Steam 资产 ID：{material.get('matched_assetid') or '未知'}\n"
+                        f"首次未找到：{material.get('inventory_missing_since')}\n"
+                        "库存中未找到不代表卖家撤回，请核实交易或汰换记录后确认原因。"
+                    )
                 item.setTextAlignment(align)
                 if column == 4:
                     item.setForeground(

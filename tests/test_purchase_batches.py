@@ -36,6 +36,7 @@ from core.purchase_batches import (
     purchase_batch_section,
     purchase_batch_replacement_options,
     purchase_batch_summary,
+    rebind_purchase_data_for_steam_account,
     reconcile_purchase_batches_for_profile,
     record_inventory_recipe_tradeup_result,
     refresh_purchase_batch_alchemy_ready_at,
@@ -55,6 +56,7 @@ from core.purchase_tracking import (
     STATUS_RECEIVED,
 )
 from core.steam_tradeup import (
+    _steam_proxy_request_fields,
     build_inventory_recipe_tradeup_plan,
     inventory_recipe_tradeup_readiness,
     tradeup_plan_cached_readiness,
@@ -123,6 +125,99 @@ def _inventory(assetid: str, wear: float | None = None) -> dict:
 
 
 class PurchaseBatchTests(unittest.TestCase):
+    def test_history_uses_local_prices_and_keeps_snapshot_when_inventory_price_missing(self):
+        import json
+        record = {
+            "profile_id": "test", "products": [{"asset_id": "out", "name": "Output", "price": 100,
+                                                   "float_value": 0.1}],
+            "materials": [{"name": "Input", "float_value": 0.2, "price": None}],
+            "material_cost": None,
+        }
+        with TemporaryDirectory() as temp_dir:
+            history = Path(temp_dir) / "history.json"
+            history.write_text(json.dumps([record]), encoding="utf-8")
+            with (
+                patch("core.purchase_batches._tradeup_history_path", return_value=history),
+                patch("core.purchase_batches.list_purchase_batches", return_value=[]),
+                patch("core.purchase_batches.load_profile_inventory_items", return_value=[
+                    {"assetid": "out", "buff_price": None}]),
+                patch("core.purchase_batches.try_build_product_price_map_from_disk", return_value={"local": True}),
+                patch("core.purchase_batches.lookup_inventory_item_price_value", return_value=30) as lookup,
+            ):
+                result = list_tradeup_records("test")[0]
+                self.assertEqual(result["profit"], 70)
+                self.assertEqual(result["products"][0]["price"], 100)
+                self.assertEqual(result["products"][0]["float_value"], 0.1)
+                self.assertEqual(lookup.call_count, 1)
+                record["products"][0]["price"] = None
+                record["material_cost"] = 10
+                history.write_text(json.dumps([record]), encoding="utf-8")
+                self.assertEqual(list_tradeup_records("test")[0]["profit"], 20)
+
+    def test_tradeup_bridge_uses_current_system_proxy(self) -> None:
+        with patch(
+            "core.steam_tradeup.resolve_system_http_proxy_for_steam",
+            return_value="http://127.0.0.1:7890",
+        ):
+            self.assertEqual(
+                _steam_proxy_request_fields(),
+                {"httpProxy": "http://127.0.0.1:7890"},
+            )
+        with patch(
+            "core.steam_tradeup.resolve_system_http_proxy_for_steam",
+            return_value="socks5://127.0.0.1:7891",
+        ):
+            self.assertEqual(
+                _steam_proxy_request_fields(),
+                {"socksProxy": "socks5://127.0.0.1:7891"},
+            )
+
+    def test_same_steam_account_rebinds_existing_purchase_data_to_new_slot(self) -> None:
+        steam_id = "76561198000000010"
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch("core.purchase_batches.PURCHASE_BATCHES_DIR", Path(temp_dir) / "batches"),
+            patch(
+                "core.purchase_batches.rebind_saved_recipe_tracking_for_steam_account",
+                return_value=0,
+            ),
+        ):
+            path = create_purchase_batch(
+                "Ten 的采购数据",
+                profile_id="removed-local-slot",
+                steam_id=steam_id,
+                account_name="Ten",
+                inventory_items=[],
+            )
+            other_path = create_purchase_batch(
+                "同名但不同 Steam 账号",
+                profile_id="other-local-slot",
+                steam_id="76561198000000999",
+                account_name="Ten",
+                inventory_items=[],
+            )
+            entry_id = add_recipe_to_purchase_batch(path, _special_recipe())
+            mark_all_purchase_batch_materials_ordered(path)
+            before = load_purchase_batch(path)
+
+            result = rebind_purchase_data_for_steam_account(
+                steam_id=steam_id,
+                profile_id="new-local-slot",
+                account_name="Ten",
+            )
+            after = load_purchase_batch(path)
+            other_after = load_purchase_batch(other_path)
+
+        self.assertEqual(result["batches"], 1)
+        self.assertEqual(after["profile_id"], "new-local-slot")
+        self.assertEqual(after["steam_id"], steam_id)
+        self.assertEqual(after["updated_at"], before["updated_at"])
+        self.assertEqual(after["recipes"][0]["id"], entry_id)
+        self.assertEqual(other_after["profile_id"], "other-local-slot")
+        self.assertTrue(
+            all(row["status"] == STATUS_ORDERED for row in after["recipes"][0]["materials"])
+        )
+
     def test_gc_output_is_resolved_for_immediate_success_display(self) -> None:
         _material, product = _template_pair()
         wear = wear_as_float32(
@@ -225,6 +320,10 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(record["recipe_index"], 1)
         self.assertEqual(record["products"][0]["name"], _name(product))
         self.assertEqual(record["products"][0]["price"], 88.8)
+        # The result popup matches history by output asset IDs before reading
+        # profit. A correctly calculated value is useless if this key is lost.
+        self.assertEqual(record["output_asset_ids"], ["output"])
+        self.assertIsNotNone(record["profit"])
         self.assertEqual(record["products"][0]["steam_icon_url"], "icon/path")
 
     def test_steam_history_recovers_manually_completed_legacy_record(self) -> None:
@@ -280,6 +379,7 @@ class PurchaseBatchTests(unittest.TestCase):
             {
                 "name": name, "float_value": wear, "steam_assetid": f"five-{index}",
                 "steam_profile_id": profile_id, "steam_id": steam_id,
+                "price": 12.5,
             }
             for index in range(5)
         ]
@@ -293,6 +393,7 @@ class PurchaseBatchTests(unittest.TestCase):
         ):
             plan = build_inventory_recipe_tradeup_plan({"substrates_display": substrates})
         self.assertEqual(len(plan["asset_ids"]), 5)
+        self.assertEqual(sum(row["price"] for row in plan["materials"]), 62.5)
 
     def test_inventory_recipe_tradeup_is_written_to_history(self) -> None:
         template = next(
@@ -628,6 +729,7 @@ class PurchaseBatchTests(unittest.TestCase):
             self.assertEqual(result["missing_review"], 1)
             self.assertEqual(row["status"], STATUS_RECEIVED)
             self.assertTrue(row["inventory_missing_since"])
+            self.assertEqual(purchase_batch_section(batch), "purchase_completed")
 
             self.assertTrue(
                 resolve_purchase_batch_inventory_departure(
@@ -647,6 +749,7 @@ class PurchaseBatchTests(unittest.TestCase):
             row["normal_departure_assetid"], "received-then-missing"
         )
         self.assertEqual(batch["alchemy_ready_at"], original_ready)
+        self.assertEqual(purchase_batch_section(batch), "purchase_completed")
 
     def test_seller_reversal_becomes_repurchase_and_restores_recipe(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(
@@ -677,6 +780,7 @@ class PurchaseBatchTests(unittest.TestCase):
 
             reconcile_purchase_batches_for_profile("ten-profile", [])
             missing = load_purchase_batch(path)
+            self.assertEqual(purchase_batch_section(missing), "purchase_completed")
             row = missing["recipes"][0]["materials"][0]
             self.assertTrue(
                 resolve_purchase_batch_inventory_departure(
@@ -691,6 +795,7 @@ class PurchaseBatchTests(unittest.TestCase):
             substrate = batch["recipes"][0]["recipe"]["substrates_display"][0]
 
         self.assertEqual(row["status"], STATUS_CANCELLED)
+        self.assertEqual(purchase_batch_section(batch), "purchasing")
         self.assertNotIn("matched_assetid", row)
         self.assertNotIn("matched_float", row)
         self.assertNotIn("alchemy_ready_at", batch)

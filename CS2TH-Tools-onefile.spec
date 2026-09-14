@@ -51,6 +51,11 @@ def _norm(path: str) -> str:
 def _keep_binary(item) -> bool:
     name = _norm(item[0] if isinstance(item, (tuple, list)) else str(item))
     base = os.path.basename(name)
+    if base.startswith("_avif."):
+        return False
+    # Use Windows ICU/API sets, never incompatible copies found on build PATH.
+    if base in ("icuuc.dll", "icuin.dll", "icudt.dll") or base.startswith("api-ms-win-core-"):
+        return False
     if any(tok in base for tok in _QT_DLL_DENY):
         return False
     if "/plugins/" in name and any(
