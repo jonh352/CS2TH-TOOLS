@@ -480,7 +480,9 @@ class InventoryPage(QWidget):
             self.status_label,
             0,
             0,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            # ElidingLabel has a zero width hint. Horizontal alignment would
+            # shrink it to zero instead of letting it fill the status column.
+            Qt.AlignmentFlag.AlignVCenter,
         )
         summary_row.addWidget(
             self.inventory_total_value_label,

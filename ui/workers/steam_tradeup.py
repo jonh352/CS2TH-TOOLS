@@ -111,7 +111,7 @@ class SteamTradeupWorker(QThread):
                 False,
                 str(exc),
                 {
-                    "uncertain": exc.code == "CRAFT_TIMEOUT",
+                    "uncertain": exc.code in {"CRAFT_TIMEOUT", "CRAFT_SEND"},
                     "error_code": exc.code,
                 },
             )

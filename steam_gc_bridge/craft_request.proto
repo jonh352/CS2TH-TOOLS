@@ -1,0 +1,8 @@
+syntax = "proto2";
+
+// CS2 protocol introduced 2026-10-08 UTC:
+// SteamTracking/GameTracking-CS2, commit f68ba6aa2473367589e7cb249fc38814c9b90ff0.
+message CMsgCraftItemsRequest {
+  optional uint32 recipe_def = 1;
+  repeated uint64 craft_items = 2;
+}

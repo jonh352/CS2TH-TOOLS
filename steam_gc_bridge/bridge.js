@@ -4,6 +4,7 @@ const readline = require('readline');
 const SteamUser = require('steam-user');
 const GlobalOffensive = require('globaloffensive');
 const {LoginSession, EAuthTokenPlatformType} = require('steam-session');
+const {CRAFT_MESSAGE_ID, encodeCraftRequest} = require('./craft_protocol');
 
 const APP_ID = 730;
 const GC_CONNECT_TIMEOUT_MS = 75_000;
@@ -239,6 +240,7 @@ function craftWithToken(input, refreshToken) {
     let finished = false;
     let loggedOn = false;
     let craftStarted = false;
+    let checked = null;
     let loginTimer = null;
     let gcTimer = null;
     let craftTimer = null;
@@ -306,9 +308,10 @@ function craftWithToken(input, refreshToken) {
     cs2.on('connectedToGC', () => {
       if (craftStarted || finished) return;
       if (gcTimer) clearTimeout(gcTimer);
-      let checked;
+      let craftRequest;
       try {
         checked = validateCraftItems(cs2.inventory, input.assetIds);
+        craftRequest = encodeCraftRequest(input.assetIds.map(String), checked.recipe);
       } catch (error) {
         fail(error, 'VALIDATION');
         return;
@@ -322,7 +325,14 @@ function craftWithToken(input, refreshToken) {
         () => fail(new Error('汰换结果等待超时，请先刷新库存确认结果'), 'CRAFT_TIMEOUT'),
         CRAFT_TIMEOUT_MS,
       );
-      cs2.craft(input.assetIds.map(String), checked.recipe);
+      try {
+        // The message ID stayed 1002, but CS2 now expects CMsgCraftItemsRequest.
+        // A non-null header tells steam-user to set the Protobuf flag and header.
+        // Do not fall back to the legacy request or retry an uncertain craft.
+        client.sendToGC(APP_ID, CRAFT_MESSAGE_ID, {}, craftRequest);
+      } catch (error) {
+        fail(error, 'CRAFT_SEND');
+      }
     });
     cs2.on('craftingComplete', (recipe, itemsGained) => {
       if (!craftStarted || finished) return;
@@ -471,14 +481,18 @@ async function main() {
   emit('success', result);
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    emit('error', {
-      message: safeMessage(error),
-      code: isTransientNetworkError(error)
-        ? 'STEAM_NETWORK'
-        : String(error && error.code || ''),
+module.exports = {craftWithToken, validateCraftItems};
+
+if (require.main === module) {
+  main()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      emit('error', {
+        message: safeMessage(error),
+        code: isTransientNetworkError(error)
+          ? 'STEAM_NETWORK'
+          : String(error && error.code || ''),
+      });
+      process.exit(1);
     });
-    process.exit(1);
-  });
+}
