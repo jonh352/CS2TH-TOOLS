@@ -87,7 +87,7 @@ class PurchaseTrackingTests(unittest.TestCase):
 
         self.assertNotEqual(first_key, second_key)
 
-    def test_baseline_inventory_is_not_counted_as_new_delivery(self) -> None:
+    def test_baseline_inventory_can_be_used_for_delivery(self) -> None:
         recipe = _recipe(2)
         start_purchase_batch(
             recipe,
@@ -110,7 +110,6 @@ class PurchaseTrackingTests(unittest.TestCase):
                 [
                     _inventory("old-asset"),
                     _inventory("new-asset-1"),
-                    _inventory("new-asset-2"),
                 ],
             )
 
@@ -123,7 +122,7 @@ class PurchaseTrackingTests(unittest.TestCase):
         self.assertEqual({row["status"] for row in rows}, {STATUS_RECEIVED})
         self.assertEqual(
             {row["matched_assetid"] for row in rows},
-            {"new-asset-1", "new-asset-2"},
+            {"old-asset", "new-asset-1"},
         )
         save.assert_called_once()
 

@@ -2151,6 +2151,7 @@ class PlatformPage(QWidget):
         items: object,
         *,
         title: str = "",
+        source: str = "",
     ) -> str | None:
         """Load a user collection preset into 自定义采集 mode."""
         if not isinstance(items, list):
@@ -2197,8 +2198,15 @@ class PlatformPage(QWidget):
         self._special_results_status_text = ""
         self.special_source_title.setText(f"{display_title} · 自定义采集")
         self.special_source_meta.setText(
-            f"来自采集预设 · {len(materials)} 种材料；"
-            "磨损区间以预设为准，可在「采集预设」中修改后再导入。"
+            (
+                f"来自采购补买 · {len(materials)} 个材料磨损窗口；"
+                "按其余材料反推推荐范围。补买方案变更后，请返回采购管理重新反推。"
+            )
+            if source == "purchase_replacement"
+            else (
+                f"来自采集预设 · {len(materials)} 种材料；"
+                "磨损区间以预设为准，可在「采集预设」中修改后再导入。"
+            )
         )
         self.special_collection_status.setText(
             "勾选已登录且支持精确磨损的候选源后点「开始采集」；"
@@ -2240,8 +2248,8 @@ class PlatformPage(QWidget):
         layout.addWidget(title)
 
         wear_value = float(material.get("wear_value") or 0)
-        min_wear = float(material.get("min_wear") or wear_value)
-        max_wear = float(material.get("max_wear") or wear_value)
+        min_wear = float(material.get("min_wear", wear_value))
+        max_wear = float(material.get("max_wear", wear_value))
         wear_label = f"{min_wear:g} ～ {max_wear:g}"
         details = QHBoxLayout()
         range_label = QLabel(f"可采购磨损区间  {wear_label}")

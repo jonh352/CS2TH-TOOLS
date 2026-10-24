@@ -535,6 +535,14 @@ def update_recipe_recipe_dict(path: Path, recipe: dict[str, Any]) -> None:
     invalidate_saved_recipes_cache()
 
 
+def set_saved_recipe_favorite(path: Path, favorite: bool) -> None:
+    """收藏状态独立保存在配方文件，保留原文件夹及配方内容。"""
+    rp, payload = _load_recipe_payload(path, require_recipe_dict=True)
+    payload["favorite"] = bool(favorite)
+    _write_recipe_payload(rp, payload)
+    invalidate_saved_recipes_cache()
+
+
 def rename_saved_recipe_title(path: Path, title: str) -> str:
     """Update the display ``title`` of a saved recipe file. Returns the stored title."""
     rp, data = _load_recipe_payload(path)

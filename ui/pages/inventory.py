@@ -62,6 +62,7 @@ from core.purchase_batches import reconcile_all_purchase_records_for_profile
 from config import CONTENT_PAGE_LAYOUT_MARGINS
 from ui.access_lock import set_page_control_enabled
 from ui.components import PageHeader, panel
+from ui.dialogs.steam_login_help_dialog import SteamLoginHelpDialog
 from ui.feedback import ask_confirmation
 from ui.weapon_card_image_area import line_and_tint_for_quality_cn
 from ui.widgets.float_line_edit import format_float_shortest
@@ -260,6 +261,24 @@ def _blend_color(base: QColor, accent: QColor, ratio: float) -> QColor:
     )
 
 
+class _LoginHelpButton(QPushButton):
+    """登录排错入口，右上角显示帮助标记。"""
+
+    def __init__(self, parent=None):
+        super().__init__("登录报错", parent)
+        self.setMinimumWidth(104)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("查看 UU 开启路由模式流程")
+        self._help_mark = QLabel("❓", self)
+        self._help_mark.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._help_mark.setStyleSheet("font-size: 10px; background: transparent; border: none; padding: 0;")
+        self._help_mark.setFixedSize(16, 16)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._help_mark.move(self.width() - 18, 1)
+
+
 class InventoryCardDelegate(QStyledItemDelegate):
     """Paint inventory cards without allocating a QWidget tree per asset."""
 
@@ -428,6 +447,9 @@ class InventoryPage(QWidget):
         account_row.addWidget(self.add_button)
         account_row.addWidget(self.fetch_button)
         account_row.addWidget(self.remove_button)
+        self.login_help_button = _LoginHelpButton()
+        self.login_help_button.clicked.connect(self._show_login_help)
+        account_row.addWidget(self.login_help_button)
         account_row.addStretch(1)
         controls.addLayout(account_row)
 
@@ -642,6 +664,10 @@ class InventoryPage(QWidget):
             )
         )
         self._fetch_worker.start()
+
+    def _show_login_help(self) -> None:
+        dialog = SteamLoginHelpDialog(self)
+        dialog.exec()
 
     def _fetch_finished(
         self,

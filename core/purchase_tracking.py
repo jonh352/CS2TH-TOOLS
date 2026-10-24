@@ -361,7 +361,7 @@ def reconcile_saved_recipes_for_profile(
     *,
     excluded_asset_ids: set[str] | None = None,
 ) -> dict[str, int]:
-    """One-to-one match newly arrived assets to ordered materials across recipes."""
+    """One-to-one match all available inventory assets to ordered materials."""
     profile_id = str(profile_id or "").strip()
     if not profile_id:
         return {
@@ -412,13 +412,11 @@ def reconcile_saved_recipes_for_profile(
     for path, _recipe, tracking, row in tasks:
         key = str(row.get("match_key") or "")
         candidates = available_by_key.get(key) or []
-        baseline = {str(value) for value in tracking.get("baseline_asset_ids", [])}
         chosen_index = next(
             (
                 index
                 for index, item in enumerate(candidates)
-                if str(item.get("assetid") or "") not in baseline
-                and str(item.get("assetid") or "") not in used_asset_ids
+                if str(item.get("assetid") or "") not in used_asset_ids
             ),
             None,
         )

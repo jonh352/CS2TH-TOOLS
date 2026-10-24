@@ -68,6 +68,7 @@ def _template_pair():
         template
         for template in get_name_map().values()
         if template.upper_skins and template.max_float > template.min_float
+        and template.quality != "隐秘"
     )
     product = get_pid_map()[str(material.upper_skins[0])]
     return material, product
@@ -802,7 +803,7 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(substrate["platform"], "buff")
         self.assertNotIn("steam_assetid", substrate)
 
-    def test_normal_alchemy_recipe_gets_safe_not_higher_replacements(self) -> None:
+    def test_normal_replacement_recommends_all_product_bucket_ceilings(self) -> None:
         recipe = _special_recipe()
         recipe.pop("special_wear_target", None)
         recipe.pop("special_wear_output_float", None)
@@ -848,21 +849,6 @@ class PurchaseBatchTests(unittest.TestCase):
                 if option["safe"] and not option["original"]
             )
             original_option = next(option for option in options if option["original"])
-            original_wear = float(recipe["substrates_display"][0]["float_value"])
-            original_template = get_template_from_goods_name(
-                str(recipe["substrates_display"][0]["name"])
-            )
-            safe_template = get_template_from_goods_name(str(safe["name"]))
-            original_normalized = SkinTemplate.float_to_normalized(
-                original_wear,
-                original_template.min_float,
-                original_template.max_float,
-            )
-            safe_high_normalized = SkinTemplate.float_to_normalized(
-                float(safe["max_wear"]),
-                safe_template.min_float,
-                safe_template.max_float,
-            )
             safe = dict(safe)
             candidate_midpoint = (
                 float(safe["min_wear"]) + float(safe["max_wear"])
@@ -903,9 +889,14 @@ class PurchaseBatchTests(unittest.TestCase):
             updated_recipe = batch["recipes"][0]["recipe"]
             updated_row = batch["recipes"][0]["materials"][0]
 
-        self.assertIn("产物归一化磨损不高于原配方", target_text)
-        self.assertLessEqual(float(original_option["max_wear"]), original_wear)
-        self.assertLessEqual(safe_high_normalized, original_normalized + 1e-6)
+        self.assertIn("所有产物", target_text)
+        from core.purchase_batches import _product_repurchase_ceiling, _simulate_purchase_recipe
+        original_products, _ = _simulate_purchase_recipe(recipe)
+        candidate_recipe = dict(recipe, substrates_display=[dict(source) for source in recipe["substrates_display"]])
+        candidate_recipe["substrates_display"][0]["float_value"] = original_option["max_wear"]
+        candidate_products, _ = _simulate_purchase_recipe(candidate_recipe)
+        for original_product, candidate_product in zip(original_products, candidate_products):
+            self.assertLessEqual(candidate_product["float_value"], _product_repurchase_ceiling(original_product["float_value"]))
         self.assertEqual(updated_row["status"], STATUS_RECEIVED)
         self.assertEqual(
             updated_row["replacement"]["manual_wear_match_mode"],
@@ -1081,7 +1072,7 @@ class PurchaseBatchTests(unittest.TestCase):
 
             result = reconcile_purchase_batches_for_profile(
                 "six-profile",
-                [_inventory("old"), *[_inventory(f"new-{i}") for i in range(20)]],
+                [_inventory("old"), *[_inventory(f"new-{i}") for i in range(19)]],
             )
             batch = load_purchase_batch(path)
 
@@ -1204,7 +1195,7 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(row["matched_assetid"], "replacement")
         self.assertEqual(result["matched"], 1)
 
-    def test_second_replacement_is_revalidated_after_first_actual_wear(self) -> None:
+    def test_confirmed_replacements_match_inventory_even_above_old_target(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(
             "core.purchase_batches.PURCHASE_BATCHES_DIR",
             Path(temp_dir),
@@ -1238,6 +1229,11 @@ class PurchaseBatchTests(unittest.TestCase):
                 option["purchase_price"] = 8.76
                 option["manual_wear"] = prefix
                 option["manual_wear_decimals"] = 6
+                option["outcome_preview_confirmed"] = True
+                from core.purchase_batches import preview_purchase_batch_replacement
+                option["outcome_preview_fingerprint"] = preview_purchase_batch_replacement(
+                    load_purchase_batch(path), entry_id, str(row["row_id"]), option
+                )["fingerprint"]
                 apply_purchase_batch_replacement(
                     path, entry_id, str(row["row_id"]), option
                 )
@@ -1252,8 +1248,8 @@ class PurchaseBatchTests(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(result["matched"], 1)
-        self.assertEqual(result["waiting"], 1)
+        self.assertEqual(result["matched"], 2)
+        self.assertEqual(result["waiting"], 0)
 
     def test_reconcile_matches_inventory_by_six_decimal_wear_prefix(self) -> None:
         from core.purchase_tracking import inventory_wear_matches_planned
@@ -1364,7 +1360,7 @@ class PurchaseBatchTests(unittest.TestCase):
                 account_name="replacement-retry",
                 inventory_items=[],
             )
-            entry_id = add_recipe_to_purchase_batch(path, _special_recipe(1))
+            entry_id = add_recipe_to_purchase_batch(path, _special_recipe())
             row = load_purchase_batch(path)["recipes"][0]["materials"][0]
             row_id = str(row["row_id"])
             actual_wear = float(row["float_value"])

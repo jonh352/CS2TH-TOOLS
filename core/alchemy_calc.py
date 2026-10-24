@@ -1682,7 +1682,7 @@ def _finalize_recipes_from_rate_results(
     min_break_even_rate: float = 0.0,
     max_break_even_rate: float = 1.0,
 ) -> list[dict]:
-    """将 dinkelbach 产出的多条结果去重、按展示收益率取 top N，并组装 UI 用 recipe 字典。
+    """将 dinkelbach 产出的多条结果去重并组装 UI 用 recipe 字典；展示排序与数量由界面统一处理。
 
     期望/收益率/保本率均从 ``_product_prob_map_for_recipe_ui`` 重算，与产物表及特殊磨损模式一致；
     Dinkelbach 仅用于筛选底物组合；最终仅保留保本率落在给定闭区间内的配方。
@@ -1717,7 +1717,7 @@ def _finalize_recipes_from_rate_results(
         min_break_even_rate,
         max_break_even_rate,
     )
-    return recipes[:ALCHEMY_RESULT_DISPLAY_TOP_N]
+    return recipes
 
 
 def prepare_scan_parallel_inputs(
@@ -1933,3 +1933,20 @@ def compute_recipes(
         max_break_even_rate=max_break_even_rate,
     )
     return recipes, None
+
+
+def select_recipe_display_results(
+    recipes: list[dict], limit: int = ALCHEMY_RESULT_DISPLAY_TOP_N, sort_mode: str = "rate"
+) -> list[dict]:
+    """按品级降序，再按所选指标排序，最后限制总展示数量。"""
+    quality_rank = {quality: rank for rank, quality in enumerate(QUALITY_MAP)}
+    metric = "break_even_rate" if sort_mode == "break_even_rate" else "rate"
+    secondary = "rate" if metric == "break_even_rate" else "break_even_rate"
+    return sorted(
+        recipes,
+        key=lambda recipe: (
+            -quality_rank.get(recipe.get("substrate_quality"), -1),
+            -float(recipe.get(metric) or 0.0),
+            -float(recipe.get(secondary) or 0.0),
+        ),
+    )[:max(1, int(limit))]

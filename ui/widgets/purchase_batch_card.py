@@ -40,8 +40,10 @@ from core.purchase_batches import (
     delete_purchase_batch,
     load_purchase_batch,
     purchase_batch_alchemy_status_text,
+    purchase_batch_recipe_alchemy_status_text,
     purchase_batch_recipe_tradeup_readiness,
     purchase_batch_replacement_options,
+    preview_purchase_batch_replacement,
     purchase_batch_summary,
     reconcile_all_purchase_records_for_profile,
     refresh_purchase_batch_alchemy_ready_at,
@@ -291,6 +293,7 @@ class PurchaseBatchCard(QFrame):
     deleted = Signal()
     change_account_requested = Signal(object)
     simulate_tradeup_requested = Signal(object)
+    import_to_collection_requested = Signal(object)
 
     def __init__(
         self,
@@ -669,6 +672,12 @@ class PurchaseBatchCard(QFrame):
         )
         summary.setObjectName("alchemyStep1Hint")
         header_layout.addWidget(summary, 1, Qt.AlignmentFlag.AlignVCenter)
+        alchemy_text = purchase_batch_recipe_alchemy_status_text(entry)
+        if alchemy_text:
+            alchemy_label = QLabel(alchemy_text, header)
+            alchemy_label.setObjectName("purchaseRecipeAlchemyTime")
+            alchemy_label.setStyleSheet("color: #f59e0b;")
+            header_layout.addWidget(alchemy_label, 0, Qt.AlignmentFlag.AlignVCenter)
         tradeup_completed = bool(entry.get("tradeup_completed"))
         ready, readiness_reason = purchase_batch_recipe_tradeup_readiness(entry)
         one_click_button = QPushButton("模拟并汰换", header)
@@ -1022,7 +1031,11 @@ class PurchaseBatchCard(QFrame):
             self,
             options=options,
             target_text=target_text,
+            preview_builder=lambda option: preview_purchase_batch_replacement(
+                load_purchase_batch(self._path), entry_id, row_id, option
+            ),
         )
+        dialog.collect_requested.connect(self.import_to_collection_requested.emit)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         option = dialog.chosen_option()
@@ -1033,7 +1046,7 @@ class PurchaseBatchCard(QFrame):
         except (OSError, ValueError) as exc:
             show_toast(self, f"替代方案保存失败：{exc}", style="warning")
             return
-        show_toast(self, "已采用安全替代范围；购买成功后请标记已买", style="success")
+        show_toast(self, "已确认整组结果并采用替代；购买成功后请标记已买", style="success")
         self._reload()
 
     def _resolve_departure(

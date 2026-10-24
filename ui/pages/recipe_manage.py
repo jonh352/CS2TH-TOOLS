@@ -68,6 +68,7 @@ from core.saved_recipes import (
     format_recipe_summary_line,
     get_recipe_folder_stats,
     list_saved_recipes,
+    set_saved_recipe_favorite,
     load_recipe_folders,
     move_recipes_to_folder,
     rename_recipe_folder,
@@ -746,6 +747,12 @@ class _SavedRecipeRow(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.addWidget(self._title_label, 1)
         self._title_row = title_row
+        self._favorite_btn = QPushButton("★" if payload.get("favorite") else "☆", self)
+        self._favorite_btn.setObjectName("recipeSimImportBtn")
+        self._favorite_btn.setToolTip("取消收藏" if payload.get("favorite") else "收藏配方")
+        self._favorite_btn.setCursor(Qt.PointingHandCursor)
+        self._favorite_btn.clicked.connect(self._toggle_favorite)
+        title_row.addWidget(self._favorite_btn, 0, Qt.AlignTop)
         self._rename_btn = QPushButton("重命名", self)
         self._rename_btn.setObjectName("recipeSimImportBtn")
         self._rename_btn.setCursor(Qt.PointingHandCursor)
@@ -851,6 +858,20 @@ class _SavedRecipeRow(QWidget):
         if self._batch_mode or self._group is not None:
             return
         self._instantiate_recipe_group()
+
+    def _toggle_favorite(self) -> None:
+        favorite = not bool(self._payload.get("favorite"))
+        try:
+            set_saved_recipe_favorite(self._path, favorite)
+        except (OSError, ValueError) as exc:
+            show_toast(self, f"收藏更新失败：{exc}", style="warning")
+            return
+        self._payload["favorite"] = favorite
+        self._favorite_btn.setText("★" if favorite else "☆")
+        self._favorite_btn.setToolTip("取消收藏" if favorite else "收藏配方")
+        page = self._recipe_manage_page()
+        if page is not None and page._view_mode == "favorites":
+            QTimer.singleShot(0, page._rebuild_recipe_rows)
 
     def _instantiate_recipe_group(self) -> None:
         if self._group is not None:
@@ -1109,9 +1130,11 @@ class RecipeManagePage(QWidget):
         view_group = QButtonGroup(self)
         view_group.setExclusive(True)
         self._recipes_view_btn = QPushButton("已保存配方")
+        self._favorites_view_btn = QPushButton("收藏配方")
         self._json_view_btn = QPushButton("已保存 JSON")
         for mode, button in (
             ("recipes", self._recipes_view_btn),
+            ("favorites", self._favorites_view_btn),
             ("json", self._json_view_btn),
         ):
             button.setObjectName("platformModeButton")
@@ -1424,6 +1447,7 @@ class RecipeManagePage(QWidget):
     def navigation_route_label(self) -> str:
         labels = {
             "recipes": "配方管理 · 已保存配方",
+            "favorites": "配方管理 · 收藏配方",
             "json": "配方管理 · 已保存 JSON",
         }
         return labels.get(self._view_mode, "配方管理")
@@ -1432,15 +1456,20 @@ class RecipeManagePage(QWidget):
         self._switch_saved_view(mode, emit_navigation=False)
 
     def _switch_saved_view(self, mode: str, *, emit_navigation: bool = True) -> None:
-        if mode not in {"recipes", "json"}:
+        if mode not in {"recipes", "favorites", "json"}:
             mode = "recipes"
         previous_mode = self._view_mode
         if mode != "recipes" and self._batch_mode:
             self._on_batch_done()
         self._view_mode = mode
-        showing_recipes = mode == "recipes"
+        showing_recipes = mode in {"recipes", "favorites"}
         self._body_stack.setCurrentIndex(0 if showing_recipes else 1)
-        self._recipes_view_btn.setChecked(showing_recipes)
+        self._folder_card.setVisible(mode == "recipes")
+        self._search_edit.setPlaceholderText(
+            "在收藏配方中搜索…" if mode == "favorites" else "在当前文件夹搜索…"
+        )
+        self._recipes_view_btn.setChecked(mode == "recipes")
+        self._favorites_view_btn.setChecked(mode == "favorites")
         self._json_view_btn.setChecked(mode == "json")
         self._batch_primary_slot.setVisible(showing_recipes)
         self.import_cs2th_btn.setVisible(showing_recipes and not self._batch_mode)
@@ -1586,7 +1615,9 @@ class RecipeManagePage(QWidget):
         return f"当前文件夹：{loc}"
 
     def _update_location_label(self) -> None:
-        self._location_label.setText(self._location_display_text())
+        self._location_label.setText(
+            "全部收藏配方" if self._view_mode == "favorites" else self._location_display_text()
+        )
 
     def _on_search_changed(self, _text: str) -> None:
         self._rebuild_recipe_rows()
@@ -2427,7 +2458,9 @@ class RecipeManagePage(QWidget):
         # 勿在此 processEvents：部分显卡/远程桌面下会强制处理绘制与内部浮层，表现为成片小弹窗闪烁。
 
         filt = _folder_filter_from_key(self._folder_list_selected_key)
-        items = list_saved_recipes(folder_filter=filt)
+        items = list_saved_recipes(folder_filter=None if self._view_mode == "favorites" else filt)
+        if self._view_mode == "favorites":
+            items = [(path, payload) for path, payload in items if payload.get("favorite")]
         q = self._search_edit.text().strip().lower()
         if q:
             items = [
@@ -2442,9 +2475,14 @@ class RecipeManagePage(QWidget):
         if self._view_mode == "recipes":
             self._title_count_label.setText(f"共{total_all}条配方")
 
+        if self._view_mode == "favorites":
+            self._title_count_label.setText(f"共{len(items)}条收藏配方")
+
         if len(items) == 0:
             self.empty_label.setVisible(True)
-            if total_all == 0:
+            if self._view_mode == "favorites":
+                self.empty_label.setText("暂无收藏配方。点击已保存配方中的 ☆ 即可收藏。")
+            elif total_all == 0:
                 self.empty_label.setText(
                     "暂无已保存配方。在炼金计算结果中点击「保存配方」即可保存到此。"
                 )

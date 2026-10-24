@@ -334,6 +334,7 @@ class MainWindow(QMainWindow):
             page.simulate_tradeup_requested.connect(
                 self._on_verified_tradeup_simulation
             )
+            page.import_to_collection_requested.connect(self._on_collection_preset_import)
             return page
         if key == "special":
             from ui.pages.special_wear import SpecialWearPage
@@ -644,11 +645,18 @@ class MainWindow(QMainWindow):
         items = payload.get("items")
         title = str(payload.get("title") or "").strip()
         collection = self._ensure_page("platforms")
-        error = collection.show_collection_preset_materials(items, title=title)
+        error = collection.show_collection_preset_materials(
+            items, title=title, source=str(payload.get("source") or "")
+        )
         if error:
             self.toast.show_toast(str(error), style="warning")
             return
-        self.toast.show_toast("采集预设已导入采集页", style="success")
+        self.toast.show_toast(
+            "补买材料及反推磨损范围已导入采集页"
+            if payload.get("source") == "purchase_replacement"
+            else "采集预设已导入采集页",
+            style="success",
+        )
         self._activate("platforms")
 
     def _on_inventory_import_to_alchemy(

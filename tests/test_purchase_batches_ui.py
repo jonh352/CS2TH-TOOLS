@@ -1174,7 +1174,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
         dialog.manual_wear_edit.setText(f"{prefix:.6f}")
         self.assertTrue(dialog.adopt_button.isEnabled())
 
-    def test_special_replacement_intersects_strict_interval_with_six_digit_prefix(self) -> None:
+    def test_replacement_prefix_is_not_clipped_to_recommended_interval(self) -> None:
         option = {
             "name": "测试材料",
             "safe": True,
@@ -1197,7 +1197,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
         self.assertFalse(dialog.manual_wear_container.isHidden())
         self.assertEqual(chosen["manual_wear"], 0.123456)
         self.assertGreaterEqual(chosen["min_wear"], option["min_wear"])
-        self.assertLessEqual(chosen["max_wear"], option["max_wear"])
+        self.assertGreater(chosen["max_wear"], option["max_wear"])
         self.assertLess(chosen["max_wear"], 0.123457)
         self.assertEqual(chosen["purchase_price"], 8.88)
         wear_text = "0.000000000000000000 ～ 0.123456789000000000"
@@ -1235,6 +1235,62 @@ class PurchaseBatchUiTests(unittest.TestCase):
         self.assertGreaterEqual(match_high, 0.164959999)
         self.assertLess(match_high, 0.164960)
         self.assertTrue(dialog.adopt_button.isEnabled())
+
+    def test_above_recommended_wear_requires_accepting_the_whole_recipe_preview(self) -> None:
+        option = dict(name="测试材料", safe=True, min_wear=0.0, max_wear=0.1)
+        previews = []
+
+        def build_preview(chosen):
+            previews.append(dict(chosen))
+            return {"fingerprint": "reviewed"}
+
+        dialog = PurchaseReplacementDialog(None, options=[option], target_text="补买", preview_builder=build_preview)
+        dialog.purchase_price_edit.setText("6.66")
+        dialog.manual_wear_edit.setText("0.200000")
+        self.assertTrue(dialog.adopt_button.isEnabled())
+        with patch.object(dialog, "_confirm_preview", return_value=False):
+            dialog._accept_selected()
+        self.assertIsNone(dialog.chosen_option())
+        with patch.object(dialog, "_confirm_preview", return_value=True):
+            dialog._accept_selected()
+        chosen = dialog.chosen_option()
+        self.assertEqual(len(previews), 2)
+        self.assertGreater(chosen["min_wear"], option["max_wear"])
+        self.assertTrue(chosen["outcome_preview_confirmed"])
+        self.assertEqual(chosen["outcome_preview_fingerprint"], "reviewed")
+
+    def test_repurchase_collection_exports_narrow_windows_and_splits_appearance_boundaries(self) -> None:
+        options = [
+            dict(name="测试材料A", safe=True, min_wear=0.0, max_wear=0.155),
+            dict(name="测试材料B", safe=True, min_wear=0.0, max_wear=0.3),
+            dict(name="无推荐", safe=True, min_wear=0.0, max_wear=1.0, recommended_available=False),
+        ]
+        dialog = PurchaseReplacementDialog(None, options=options, target_text="补买")
+        dialog.collection_width.setValue(0.01)
+        emitted = []
+        dialog.collect_requested.connect(emitted.append)
+        dialog._collect_options(selected_only=False)
+        self.assertEqual(len(emitted), 1)
+        items = emitted[0]["items"]
+        self.assertEqual([item["name"] for item in items], ["测试材料A", "测试材料A", "测试材料B"])
+        self.assertAlmostEqual(items[0]["min_wear"], 0.145)
+        self.assertLess(items[0]["max_wear"], 0.15)
+        self.assertEqual(items[1]["min_wear"], 0.15)
+        self.assertEqual(items[1]["max_wear"], 0.155)
+        self.assertAlmostEqual(items[2]["min_wear"], 0.29)
+
+    def test_repurchase_collection_import_preserves_zero_lower_bound_and_source(self) -> None:
+        template, _ = _template_pair()
+        page = PlatformPage()
+        error = page.show_collection_preset_materials(
+            [dict(name=_name(template), min_wear=0.0, max_wear=0.01)],
+            title="采购补买", source="purchase_replacement",
+        )
+        self.assertIsNone(error)
+        self.assertIn("采购补买", page.special_source_meta.text())
+        labels = page.findChildren(QLabel)
+        self.assertTrue(any("可采购磨损区间  0 ～ 0.01" == label.text() for label in labels))
+        self.assertEqual(page._materials_for_scraping()[0]["min_wear"], 0.0)
 
     def test_purchase_batch_displays_item_prices_and_recipe_cost(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(

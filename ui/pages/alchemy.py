@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, QFrame,
     QScrollArea, QLabel, QSizePolicy, QLayout,
     QStackedWidget, QButtonGroup, QToolTip, QProgressBar, QDialog,
-    QSpinBox, QCheckBox, QInputDialog,
+    QSpinBox, QCheckBox, QInputDialog, QComboBox,
 )
 from PySide6.QtCore import Qt, QEvent, QTimer, QObject, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QCursor, QPalette, QShowEvent
@@ -83,6 +83,7 @@ from core.inventory_steam_accounts import (
     load_steam_account_config_dict,
     profile_inventory_data_path,
 )
+from core.alchemy_calc import select_recipe_display_results
 from core.purchase_tracking import load_profile_inventory_items
 from core.purchase_batches import (
     add_recipe_to_purchase_batch,
@@ -601,6 +602,21 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_calc_btn.clicked.connect(self._on_step3_calc_action_clicked)
         step3_top.addWidget(self.step3_calc_btn, 0, Qt.AlignVCenter)
         step3_layout.addLayout(step3_top)
+        result_options = QHBoxLayout()
+        result_options.setSpacing(8)
+        result_options.addWidget(QLabel("展示配方数"))
+        self.step3_result_limit_spin = QSpinBox()
+        self.step3_result_limit_spin.setRange(1, 10000)
+        self.step3_result_limit_spin.setValue(20)
+        self.step3_result_limit_spin.setToolTip("最多展示指定条数；不足时展示全部结果")
+        result_options.addWidget(self.step3_result_limit_spin)
+        result_options.addWidget(QLabel("计算排序"))
+        self.step3_result_sort_combo = QComboBox()
+        self.step3_result_sort_combo.addItem("配方品级 + 收益率", "rate")
+        self.step3_result_sort_combo.addItem("配方品级 + 保本率", "break_even_rate")
+        result_options.addWidget(self.step3_result_sort_combo)
+        result_options.addStretch(1)
+        step3_layout.addLayout(result_options)
 
         self.step3_progress_container = QWidget()
         self.step3_progress_container.setVisible(False)
@@ -744,6 +760,8 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 "norm_target": nt,
                 "special_rounds": sr,
                 "non_overlapping_recipes": self.step3_no_overlap_check.isChecked(),
+                "result_display_limit": self.step3_result_limit_spin.value(),
+                "result_sort_mode": self.step3_result_sort_combo.currentData(),
             }
         )
 
@@ -751,6 +769,13 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         d = load_alchemy_step2_wear_ui()
         if not isinstance(d, dict):
             return
+        try:
+            limit = int(d.get("result_display_limit", 20))
+        except (TypeError, ValueError):
+            limit = 20
+        self.step3_result_limit_spin.setValue(max(1, min(10000, limit)))
+        sort_index = self.step3_result_sort_combo.findData(d.get("result_sort_mode", "rate"))
+        self.step3_result_sort_combo.setCurrentIndex(max(0, sort_index))
         mode = str(d.get("mode") or "").strip()
         if mode not in ("scan", "target", "special_wear"):
             mode = "scan"
@@ -1170,7 +1195,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             self._special_wear_stats_conn = None
 
     def _on_calc_finished(self, recipes: list, error_msg: str | None):
-        """计算完成 - 展示 top10 配方"""
+        """计算完成后按所选指标排序并限制展示数量。"""
         if error_msg == "__cancelled__":
             self._step3_reset_after_calc_interrupted()
             return
@@ -1226,6 +1251,12 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             show_alert(self, "计算完成", f"{msg}\n\n{elapsed_str}")
             return
 
+        total_recipes = len(recipes)
+        recipes = select_recipe_display_results(
+            recipes,
+            self.step3_result_limit_spin.value(),
+            self.step3_result_sort_combo.currentData(),
+        )
         for rank, recipe in enumerate(recipes, 1):
             group = RecipeResultGroup(
                 rank,
@@ -1261,7 +1292,11 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self._step3_save_location_switch.sync_mode_slider(animate=False)
         self._sync_step3_save_button_labels()
 
-        show_toast(self, f"计算完成，共 {len(recipes)} 个配方，{elapsed_str}", style="success")
+        show_toast(
+            self,
+            f"计算完成，共 {total_recipes} 个配方，展示 {len(recipes)} 条，{elapsed_str}",
+            style="success",
+        )
 
     def _on_step3_save_location_changed(self) -> None:
         self._step3_save_location_switch.sync_mode_slider(animate=True)

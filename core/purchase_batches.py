@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import uuid
 from collections import Counter
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ import numpy as np
 
 from config import PURCHASE_BATCHES_DIR
 from core.alchemy_calc import (
+    compute_tradeup_simulation_products,
     lookup_inventory_item_price_value,
     lookup_template_price_value,
     tradeup_average_normalized_float32,
@@ -30,6 +33,7 @@ from core.alchemy_quality import (
 from core.data_utils import (
     SkinInstance,
     SkinTemplate,
+    get_interval_value,
     tradeup_display_quality,
     wear_as_float32,
 )
@@ -74,6 +78,7 @@ def _validated_batch_path(path: Path) -> Path:
 
 def _write_batch(path: Path, payload: dict[str, Any]) -> None:
     target = _validated_batch_path(path)
+    _refresh_purchase_recipe_alchemy_times(payload)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(".json.tmp")
     temp.write_text(
@@ -301,6 +306,43 @@ def purchase_batch_alchemy_status_text(
     return f"炼金时间:{format_alchemy_ready_at(ready)}"
 
 
+def _refresh_purchase_recipe_alchemy_time(entry: dict[str, Any]) -> bool:
+    """Keep each recipe's receipt clock independent of its batch's clock."""
+    rows = [row for row in entry.get("materials") or [] if isinstance(row, dict)]
+    if not rows or any(row.get("status") != STATUS_RECEIVED for row in rows):
+        return entry.pop("alchemy_ready_at", None) is not None
+    if entry.get("alchemy_ready_at") or any(row.get("inventory_missing_since") for row in rows):
+        return False
+    # Historical batches already store receipt timestamps. Use the final
+    # receipt so opening an older recipe does not restart its seven-day wait.
+    received_times = [
+        received for row in rows
+        if (received := _parse_alchemy_ready_at(row.get("received_at"))) is not None
+    ]
+    verified_at = max(received_times) if received_times else None
+    entry["alchemy_ready_at"] = compute_alchemy_ready_at(verified_at).isoformat()
+    return True
+
+
+def _refresh_purchase_recipe_alchemy_times(batch: dict[str, Any]) -> bool:
+    changed = False
+    for entry in batch.get("recipes") or []:
+        if isinstance(entry, dict) and _refresh_purchase_recipe_alchemy_time(entry):
+            changed = True
+    return changed
+
+
+def purchase_batch_recipe_alchemy_status_text(
+    entry: dict[str, Any], *, now: datetime | None = None
+) -> str:
+    snapshot = copy.deepcopy(entry)
+    _refresh_purchase_recipe_alchemy_time(snapshot)
+    return purchase_batch_alchemy_status_text(
+        {"recipes": [snapshot], "alchemy_ready_at": snapshot.get("alchemy_ready_at")},
+        now=now,
+    )
+
+
 def refresh_purchase_batch_alchemy_ready_at(
     path: Path,
     *,
@@ -308,24 +350,25 @@ def refresh_purchase_batch_alchemy_ready_at(
 ) -> str | None:
     """Record alchemy_ready_at once when a batch first becomes fully received."""
     batch = load_purchase_batch(path)
+    changed = _refresh_purchase_recipe_alchemy_times(batch)
     summary = purchase_batch_summary(batch)
-    if summary["missing_review"]:
-        existing = str(batch.get("alchemy_ready_at") or "").strip()
-        return existing or None
-    if purchase_batch_is_fully_received(batch):
-        existing = str(batch.get("alchemy_ready_at") or "").strip()
-        if existing:
-            return existing
-        ready = compute_alchemy_ready_at(verified_at)
-        batch["alchemy_ready_at"] = ready.isoformat()
+    existing = str(batch.get("alchemy_ready_at") or "").strip()
+    result = existing or None
+    if not summary["missing_review"]:
+        if purchase_batch_is_fully_received(batch):
+            if not existing:
+                batch["alchemy_ready_at"] = compute_alchemy_ready_at(verified_at).isoformat()
+                changed = True
+            result = str(batch["alchemy_ready_at"])
+        else:
+            if "alchemy_ready_at" in batch:
+                batch.pop("alchemy_ready_at", None)
+                changed = True
+            result = None
+    if changed:
         batch["updated_at"] = _utc_now()
         _write_batch(path, batch)
-        return str(batch["alchemy_ready_at"])
-    if "alchemy_ready_at" in batch:
-        batch.pop("alchemy_ready_at", None)
-        batch["updated_at"] = _utc_now()
-        _write_batch(path, batch)
-    return None
+    return result
 
 
 def _find_material(
@@ -1598,26 +1641,31 @@ def apply_purchase_batch_replacement(
         raise ValueError("替代材料实际磨损前6位无效") from None
     if manual_decimals != 6 or not math.isfinite(manual_wear):
         raise ValueError("替代材料实际磨损必须严格填写小数点后前6位")
-    allowed_min = float(option.get("allowed_min_wear", option.get("min_wear")))
-    allowed_max = float(option.get("allowed_max_wear", option.get("max_wear")))
-    prefix_min = manual_wear
-    prefix_max = (
-        1.0
-        if manual_wear == 1.0
-        else math.nextafter(manual_wear + 0.000001, -math.inf)
-    )
-    matched_min = max(allowed_min, prefix_min)
-    matched_max = min(allowed_max, prefix_max)
-    if matched_min > matched_max:
-        raise ValueError("填写的磨损前6位不在所选材料允许购买区间内")
     batch = load_purchase_batch(path)
     found = _find_material(batch, recipe_entry_id, row_id)
     if found is None:
         raise ValueError("未找到要替代的材料槽位")
-    _entry, row = found
+    entry, row = found
+    template = get_template_from_goods_name(str(option.get("name") or ""))
+    original = get_template_from_goods_name(str(row.get("name") or ""))
+    if (
+        template is None
+        or original is None
+        or template.quality != original.quality
+        or bool(template.stat_trak) != bool(original.stat_trak)
+        or _outcome_signature(template) != _outcome_signature(original)
+    ):
+        raise ValueError("替代材料必须与原材料品质、暗金状态和产物池一致")
+    matched_min, matched_max = _purchase_prefix_interval(template, manual_wear)
+    confirmed = bool(option.get("outcome_preview_confirmed"))
+    if confirmed:
+        # Recompute from the latest batch rather than trusting dialog results.
+        preview = preview_purchase_batch_replacement(batch, recipe_entry_id, row_id, option)
+        if preview["fingerprint"] != option.get("outcome_preview_fingerprint"):
+            raise ValueError("材料状态已变化，请重新预览整组结果后采用")
     row["replacement"] = {
         "name": str(option.get("name") or ""),
-        "template_key": str(option.get("template_key") or ""),
+        "template_key": recipe_substrate_template_key({"name": option["name"]}),
         "min_wear": matched_min,
         "max_wear": matched_max,
         "relation": str(option.get("relation") or "安全替代"),
@@ -1628,8 +1676,13 @@ def apply_purchase_batch_replacement(
     row["replacement"]["manual_wear"] = manual_wear
     row["replacement"]["manual_wear_decimals"] = 6
     row["replacement"]["manual_wear_match_mode"] = "decimal_prefix_6"
-    row["replacement"]["allowed_min_wear"] = allowed_min
-    row["replacement"]["allowed_max_wear"] = allowed_max
+    row["replacement"]["allowed_min_wear"] = option.get(
+        "allowed_min_wear", option.get("min_wear")
+    )
+    row["replacement"]["allowed_max_wear"] = option.get(
+        "allowed_max_wear", option.get("max_wear")
+    )
+    row["replacement"]["outcome_preview_confirmed"] = confirmed
     row["status"] = STATUS_PENDING
     # Choosing a replacement starts a fresh purchase attempt.  A matching
     # Steam asset may legitimately be the same asset that was undone earlier.
@@ -1640,6 +1693,160 @@ def apply_purchase_batch_replacement(
     row.pop("received_at", None)
     batch["updated_at"] = _utc_now()
     _write_batch(path, batch)
+
+
+def _purchase_prefix_interval(template: SkinTemplate, wear: float) -> tuple[float, float]:
+    value = Decimal(str(wear))
+    if (
+        not math.isfinite(wear)
+        or not 0 <= wear <= 1
+        or value != value.quantize(Decimal("0.000001"))
+    ):
+        raise ValueError("磨损必须为0至1之间的小数点后前6位")
+    high = (
+        1.0 if wear == 1.0
+        else math.nextafter(float(value + Decimal("0.000001")), -math.inf)
+    )
+    low, high = max(float(template.min_float), wear), min(float(template.max_float), high)
+    if low > high:
+        raise ValueError("填写的磨损不在该饰品自身磨损范围内")
+    return low, high
+
+
+def purchase_entry_effective_recipe(
+    entry: dict[str, Any], *, bound: str = "min", original: bool = False
+) -> dict:
+    """Use received floats first, then pending replacement prefixes, then planned floats."""
+    recipe = copy.deepcopy(entry.get("recipe") or {})
+    substrates = recipe.get("substrates_display") or []
+    for row in entry.get("materials") or []:
+        index = int(row["substrate_index"])
+        source = substrates[index]
+        if original:
+            source.update(name=row["name"], float_value=row["float_value"])
+            continue
+        replacement = row.get("replacement") or {}
+        received = row.get("status") == STATUS_RECEIVED and row.get("matched_float") is not None
+        if replacement.get("name"):
+            source["name"] = replacement["name"]
+        if received:
+            source["float_value"] = row["matched_float"]
+        elif replacement:
+            source["float_value"] = replacement.get(
+                f"{bound}_wear", replacement.get("manual_wear", source["float_value"])
+            )
+    return recipe
+
+
+def _simulate_purchase_recipe(recipe: dict) -> tuple[list[dict], float]:
+    pairs = []
+    pid_map = get_pid_map()
+    for source in recipe.get("substrates_display") or []:
+        template = get_template_from_goods_name(str(source.get("name") or ""))
+        if template is None:
+            raise ValueError("无法识别材料，不能模拟整组产物")
+        if not template.upper_skins or any(str(pid) not in pid_map for pid in template.upper_skins):
+            raise ValueError("材料产物池数据不完整，不能模拟整组产物")
+        pairs.append((template, float(source["float_value"])))
+    error, products, average = compute_tradeup_simulation_products(pairs)
+    if error or not products:
+        raise ValueError(error or "无法解析产物池")
+    return products, float(average)
+
+
+def _purchase_product_wear_interval(wear: float) -> tuple[float, float]:
+    # Reuse the collection/optimizer MID anchors. At an exact anchor, start
+    # the next interval: [lower, upper), with 1.0 in the final interval.
+    return get_interval_value(math.nextafter(wear, math.inf))
+
+
+def _product_repurchase_ceiling(wear: float) -> float:
+    boundary = _purchase_product_wear_interval(wear)[1]
+    if wear == 1.0:
+        return 1.0
+    rounded = np.float32(boundary)
+    return float(
+        rounded if float(rounded) < boundary
+        else np.nextafter(rounded, np.float32(-math.inf))
+    )
+
+
+def preview_purchase_batch_replacement(
+    batch: dict, entry_id: str, row_id: str, option: dict
+) -> dict:
+    found = _find_material(batch, entry_id, row_id)
+    if found is None:
+        raise ValueError("未找到缺口材料")
+    entry, row = found
+    template = get_template_from_goods_name(str(option.get("name") or ""))
+    if template is None:
+        raise ValueError("无法识别替代材料")
+    low, high = _purchase_prefix_interval(template, float(option["manual_wear"]))
+    baseline = purchase_entry_effective_recipe(entry, original=True)
+    before = purchase_entry_effective_recipe(entry)
+    after_low = copy.deepcopy(before)
+    after_high = purchase_entry_effective_recipe(entry, bound="max")
+    index = int(row["substrate_index"])
+    for recipe, wear in ((after_low, low), (after_high, high)):
+        recipe["substrates_display"][index].update(name=option["name"], float_value=wear)
+    original_products, original_avg = _simulate_purchase_recipe(baseline)
+    _before_products, before_avg = _simulate_purchase_recipe(before)
+    products, low_avg = _simulate_purchase_recipe(after_low)
+    _high_products, high_avg = _simulate_purchase_recipe(after_high)
+    originals = {str(product["skin_template"].paint_index): product for product in original_products}
+    rows = []
+    for product in products:
+        output = product["skin_template"]
+        original_wear = float(originals[str(output.paint_index)]["float_value"])
+        low_wear = float(product["float_value"])
+        high_wear = tradeup_product_wear_float32(high_avg, output)
+        changes = []
+        if any(
+            SkinInstance.get_appearance(original_wear) != SkinInstance.get_appearance(value)
+            for value in (low_wear, high_wear)
+        ):
+            changes.append("外观品级变化")
+        if any(
+            _purchase_product_wear_interval(original_wear) != _purchase_product_wear_interval(value)
+            for value in (low_wear, high_wear)
+        ):
+            changes.append("磨损区间变化")
+        rows.append({
+            "name": product["name"],
+            "prob": product["prob"],
+            "original_wear": original_wear,
+            "before_wear": tradeup_product_wear_float32(before_avg, output),
+            "min_wear": low_wear,
+            "max_wear": high_wear,
+            "changes": "、".join(changes) or "区间未变化",
+        })
+    target = _parse_special_target(baseline)
+    target_met = True
+    if target:
+        output = get_pid_map().get(str(target[0]))
+        target_met = (
+            output is not None
+            and target[1] <= tradeup_product_wear_float32(low_avg, output)
+            <= tradeup_product_wear_float32(high_avg, output) <= target[2]
+        )
+    preview = {
+        "products": rows,
+        "count": len(after_low["substrates_display"]),
+        "original_average": original_avg,
+        "min_average": low_avg,
+        "max_average": high_avg,
+        "special_target_met": target_met,
+        "estimated_count": sum(
+            1 for material in entry.get("materials") or []
+            if material.get("row_id") != row_id and material.get("status") != STATUS_RECEIVED
+        ),
+    }
+    snapshot = json.dumps(
+        [before, after_low, after_high, option.get("purchase_price")],
+        sort_keys=True, ensure_ascii=False,
+    )
+    preview["fingerprint"] = hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+    return preview
 
 
 def _parse_special_target(recipe: dict[str, Any]) -> tuple[str, float, float] | None:
@@ -1760,84 +1967,6 @@ def _replacement_wear_interval(
     return low, high
 
 
-def _replacement_not_higher_interval(
-    recipe: dict[str, Any],
-    substrate_index: int,
-    candidate: SkinTemplate,
-    target_average: float,
-) -> tuple[float, float] | None:
-    """Candidate range whose normalized contribution does not exceed the missing item."""
-    substrates = recipe.get("substrates_display")
-    if not isinstance(substrates, list) or not (0 <= substrate_index < len(substrates)):
-        return None
-    original_source = substrates[substrate_index]
-    if not isinstance(original_source, dict):
-        return None
-    original_template = get_template_from_goods_name(
-        str(original_source.get("name") or "")
-    )
-    if original_template is None:
-        return None
-    try:
-        original_wear = wear_as_float32(float(original_source.get("float_value")))
-    except (TypeError, ValueError):
-        return None
-    original_normalized = SkinTemplate.float_to_normalized(
-        original_wear,
-        float(original_template.min_float),
-        float(original_template.max_float),
-    )
-    corresponding_maximum = wear_as_float32(
-        SkinTemplate.normalized_to_float(
-            original_normalized,
-            float(candidate.min_float),
-            float(candidate.max_float),
-        )
-    )
-
-    resolved: list[tuple[SkinTemplate, float]] = []
-    for index, source in enumerate(substrates):
-        if not isinstance(source, dict):
-            return None
-        template = candidate if index == substrate_index else get_template_from_goods_name(
-            str(source.get("name") or "")
-        )
-        if template is None:
-            return None
-        try:
-            wear = float(source.get("float_value"))
-        except (TypeError, ValueError):
-            return None
-        resolved.append((template, wear))
-
-    target = wear_as_float32(target_average)
-
-    def average_at(wear: float) -> float:
-        values = [
-            (template, wear if index == substrate_index else original_wear)
-            for index, (template, original_wear) in enumerate(resolved)
-        ]
-        return tradeup_average_normalized_float32(values)
-
-    minimum = float(candidate.min_float)
-    maximum = min(float(candidate.max_float), float(corresponding_maximum))
-    if maximum < minimum or average_at(minimum) > target:
-        return None
-    low = float(candidate.min_float)
-    high = wear_as_float32(maximum)
-    negative = np.float32(-math.inf)
-    for _ in range(8):
-        if average_at(high) > target:
-            high = float(np.nextafter(np.float32(high), negative))
-        else:
-            break
-    low = max(minimum, float(low))
-    high = min(maximum, float(high))
-    if low > high or average_at(low) > target or average_at(high) > target:
-        return None
-    return low, high
-
-
 def _recipe_average_float32(recipe: dict[str, Any]) -> float | None:
     pairs: list[tuple[SkinTemplate, float]] = []
     for source in recipe.get("substrates_display") or []:
@@ -1864,9 +1993,15 @@ def purchase_batch_replacement_options(
     if found is None:
         return [], "未找到缺口材料"
     entry, row = found
-    recipe = entry.get("recipe")
-    if not isinstance(recipe, dict):
+    if not isinstance(entry.get("recipe"), dict):
         return [], "配方数据无效"
+    recipe = purchase_entry_effective_recipe(entry, bound="max")
+    recipe_low = purchase_entry_effective_recipe(entry)
+    baseline = purchase_entry_effective_recipe(entry, original=True)
+    try:
+        original_products, _original_average = _simulate_purchase_recipe(baseline)
+    except (TypeError, ValueError) as exc:
+        return [], str(exc)
     target = _parse_special_target(recipe)
     output_template = None
     target_average = None
@@ -1874,12 +2009,12 @@ def purchase_batch_replacement_options(
         target_pid, target_low, target_high = target
         output_template = get_pid_map().get(str(target_pid))
     else:
-        target_average = _recipe_average_float32(recipe)
+        target_average = _recipe_average_float32(baseline)
         if target_average is None:
             return [], "无法计算该配方的原始归一化磨损"
     try:
         substrate_index = int(row.get("substrate_index"))
-        original = recipe["substrates_display"][substrate_index]
+        original = baseline["substrates_display"][substrate_index]
     except (KeyError, IndexError, TypeError, ValueError):
         return [], "缺口材料索引无效"
     original_template = get_template_from_goods_name(str(original.get("name") or ""))
@@ -1891,6 +2026,12 @@ def purchase_batch_replacement_options(
         key = (str(template.paint_index), bool(template.stat_trak))
         unique.setdefault(key, template)
 
+    constraints = [
+        (product["skin_template"], 0.0, _product_repurchase_ceiling(float(product["float_value"])))
+        for product in original_products
+    ]
+    if target is not None:
+        constraints.append((output_template, target_low, target_high))
     options: list[dict[str, Any]] = []
     for template in unique.values():
         if template.quality != original_template.quality:
@@ -1907,24 +2048,26 @@ def purchase_batch_replacement_options(
         # them even as reference rows in either normal or special-wear mode.
         if not (same_template or same_outcomes):
             continue
-        if target is not None:
-            interval = _replacement_wear_interval(
-                recipe,
-                substrate_index,
-                template,
-                output_template,
-                target_low,
-                target_high,
+        interval = (float(template.min_float), float(template.max_float))
+        for output, low, high in constraints:
+            feasible = _replacement_wear_interval(
+                recipe, substrate_index, template, output, low, high
             )
-        else:
-            interval = _replacement_not_higher_interval(
-                recipe,
-                substrate_index,
-                template,
-                target_average,
-            )
-        if interval is None:
-            continue
+            if target is not None and feasible is not None:
+                lower_feasible = _replacement_wear_interval(
+                    recipe_low, substrate_index, template, output, low, high
+                )
+                feasible = (
+                    (max(feasible[0], lower_feasible[0]), feasible[1])
+                    if lower_feasible else None
+                )
+            if feasible is None:
+                interval = None
+                break
+            interval = max(interval[0], feasible[0]), min(interval[1], feasible[1])
+            if interval[0] > interval[1]:
+                interval = None
+                break
         relation = (
             "原材料"
             if same_template
@@ -1935,24 +2078,27 @@ def purchase_batch_replacement_options(
             if template.skin_name
             else template.weapon_name
         )
-        substrate = {"name": name, "float_value": sum(interval) / 2.0}
+        substrate = {"name": name}
         options.append(
             {
                 "name": name,
                 "paint_index": str(template.paint_index),
                 "template_key": recipe_substrate_template_key(substrate),
-                "min_wear": interval[0],
-                "max_wear": interval[1],
+                "min_wear": interval[0] if interval else float(template.min_float),
+                "max_wear": interval[1] if interval else float(template.max_float),
+                "recommended_available": interval is not None,
+                "template_min_wear": float(template.min_float),
+                "template_max_wear": float(template.max_float),
                 "relation": relation,
                 "safe": True,
                 "original": bool(same_template),
                 "target_avg_nfv": target_average,
-                "range_mode": "target_interval" if target is not None else "not_higher",
+                "range_mode": "target_interval" if target is not None else "outcome_ceiling",
             }
         )
     options.sort(
         key=lambda option: (
-            bool(option.get("original")),
+            not bool(option.get("original")),
             str(option.get("name") or ""),
         )
     )
@@ -1960,9 +2106,9 @@ def purchase_batch_replacement_options(
         target_text = f"目标产物磨损 {target_low:.18f} ～ {target_high:.18f}"
     else:
         target_text = (
-            f"产物归一化磨损不高于原配方 {float(target_average):.18f}，且不改变产物池"
+            "按其余材料反推：所有产物均不向上跨原配方的磨损区间（与材料采集分档一致）；采用前预览整组结果"
         )
-    return options[:80], target_text
+    return options, target_text
 
 
 def _planned_template_key_from_row(row: dict[str, Any]) -> str:
@@ -2005,6 +2151,10 @@ def _candidate_preserves_replacement_target(
 ) -> bool:
     replacement = row.get("replacement")
     if not isinstance(replacement, dict):
+        return True
+    if replacement.get("outcome_preview_confirmed"):
+        # A user-confirmed whole-recipe preview replaces the old per-item ceiling.
+        # Exact listing matching is still enforced by _row_matches_inventory.
         return True
     recipe = entry.get("recipe")
     if not isinstance(recipe, dict):
@@ -2256,13 +2406,11 @@ def reconcile_purchase_batches_for_profile(
     tasks.sort(key=lambda task: (task[0], str(task[4].get("row_id") or "")))
     matched_by_path: dict[Path, int] = {}
     for _ordered_at, path, batch, recipe_entry, row in tasks:
-        baseline = {str(value) for value in batch.get("baseline_asset_ids") or []}
         chosen = next(
             (
                 item
                 for item in available
-                if str(item.get("assetid") or "") not in baseline
-                and _row_matches_inventory(row, item)
+                if _row_matches_inventory(row, item)
                 and _candidate_preserves_replacement_target(recipe_entry, row, item)
             ),
             None,

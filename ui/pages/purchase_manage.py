@@ -164,6 +164,7 @@ class _ProfitTrendChart(QWidget):
 
 class PurchaseManagePage(QWidget):
     simulate_tradeup_requested = Signal(object)
+    import_to_collection_requested = Signal(object)
     navigation_route_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -520,6 +521,7 @@ class PurchaseManagePage(QWidget):
             card.deleted.connect(self._rebuild_purchase_batch_rows)
             card.change_account_requested.connect(self._change_purchase_batch_account)
             card.simulate_tradeup_requested.connect(lambda plan: self.simulate_tradeup_requested.emit(plan))
+            card.import_to_collection_requested.connect(self.import_to_collection_requested.emit)
             self._purchase_batch_layout.addWidget(card)
         self._purchase_batch_layout.addStretch(1)
         QTimer.singleShot(0, lambda value=self._purchase_batch_scroll_value: self._purchase_scroll.verticalScrollBar().setValue(value))

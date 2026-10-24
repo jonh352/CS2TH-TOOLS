@@ -96,7 +96,7 @@ class PurchaseTrackingUiTests(unittest.TestCase):
         reconcile.assert_called_once_with("six-profile", items)
         self.assertIn("新入库 1 件", page.status_label.text())
         self.assertIn("仍待入库 2 件", page.status_label.text())
-        self.assertIn("3 件已入库材料离开库存", page.status_label.text())
+        self.assertIn("待核对离库 3 件", page.status_label.text())
 
 
 if __name__ == "__main__":

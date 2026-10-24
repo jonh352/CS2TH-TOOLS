@@ -808,7 +808,7 @@ def compute_special_wear_recipes(
     if not best_by_fp:
         return [], "未找到满足目标产物磨损的组合（可尝试增加搜索轮数或扩大底物池）"
 
-    out = sorted(best_by_fp.values(), key=lambda x: float(x.get("cost", 0)))[:_TOP_N]
+    out = sorted(best_by_fp.values(), key=lambda x: float(x.get("cost", 0)))
     if progress_callback is not None:
         progress_callback(
             last_cc, last_tc, last_nn, 100, rounds - 1, rounds, last_n_inst, k
