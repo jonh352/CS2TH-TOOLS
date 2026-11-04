@@ -220,20 +220,20 @@ class PurchaseBatchUiTests(unittest.TestCase):
         self.assertEqual(dialog._continue.text(), "继续")
         dialog.close()
 
-    def test_entering_ready_section_refreshes_automatically(self) -> None:
+    def test_removed_sections_restore_to_purchase_management(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(
-            "core.purchase_batches.PURCHASE_BATCHES_DIR",
-            Path(temp_dir),
+            "core.purchase_batches.PURCHASE_BATCHES_DIR", Path(temp_dir),
         ):
             page = PurchaseManagePage()
-            with patch.object(page, "_refresh_ready_recipes") as refresh:
-                page._show_section("ready")
-                page._show_section("ready")
+            self.assertNotIn("ready", page._section_buttons)
+            self.assertNotIn("purchase_completed", page._section_buttons)
+            for section in ("ready", "purchase_completed"):
+                page.restore_navigation_subroute(section)
+                self.assertEqual(page.navigation_subroute(), "purchasing")
+            page.close()
+            page.deleteLater()
 
-        self.assertEqual(refresh.call_count, 2)
-        self.assertEqual(page.navigation_subroute(), "ready")
-
-    def test_ready_and_history_default_to_inventory_active_account(self) -> None:
+    def test_history_defaults_to_inventory_active_account(self) -> None:
         profiles = [
             {"id": "first-profile", "display_name": "first"},
             {"id": "active-profile", "display_name": "active"},
@@ -252,13 +252,10 @@ class PurchaseBatchUiTests(unittest.TestCase):
             patch("ui.pages.purchase_manage.show_toast"),
         ):
             page = PurchaseManagePage()
-            page._show_section("ready")
-            ready_profile = page._selected_profile_id()
             page._account_combo.setCurrentIndex(0)
             page._show_section("history")
             history_profile = page._selected_profile_id()
 
-        self.assertEqual(ready_profile, "active-profile")
         self.assertEqual(history_profile, "active-profile")
 
     def test_real_inventory_recipe_enters_simulation_before_tradeup(self) -> None:
@@ -454,7 +451,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
         self.assertEqual(page._title_count_label.text(), "共0个批次 · 0个配方 · 0件材料")
         self.assertEqual(
             [button.text() for button in page._section_buttons.values()],
-            ["采购管理", "可炼金配方", "已采购完成", "已炼金批次", "汰换记录与统计"],
+            ["采购管理", "已炼金批次", "汰换记录与统计", "ECO合炉"],
         )
         page._show_section("history")
         self.assertEqual(page.navigation_subroute(), "history")
@@ -489,7 +486,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch("core.purchase_batches.PURCHASE_BATCHES_DIR", Path(temp_dir)),
-            patch("ui.pages.purchase_manage.list_tradeup_records", return_value=records),
+            patch("ui.pages.purchase_manage.list_steam_tradeup_records", return_value=records),
         ):
             page = PurchaseManagePage()
             page._show_section("history")
@@ -826,7 +823,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
             add_recipe_to_purchase_batch(path, _special_recipe(1))
             card = PurchaseBatchCard(path, load_purchase_batch(path), expanded=True)
 
-            self.assertEqual(card._recipe_tradeup_buttons[0].text(), "未汰换")
+            self.assertEqual(card._recipe_tradeup_buttons[0].text(), "已手动汰换")
             card._recipe_tradeup_buttons[0].click()
             self.assertTrue(
                 load_purchase_batch(path)["recipes"][0]["tradeup_completed"]
@@ -840,7 +837,7 @@ class PurchaseBatchUiTests(unittest.TestCase):
             restored = load_purchase_batch(path)
 
         self.assertNotIn("tradeup_completed", restored["recipes"][0])
-        self.assertEqual(card._recipe_tradeup_buttons[0].text(), "未汰换")
+        self.assertEqual(card._recipe_tradeup_buttons[0].text(), "已手动汰换")
 
     def test_batch_card_offers_safe_departure_classification(self) -> None:
         with TemporaryDirectory() as temp_dir, patch(

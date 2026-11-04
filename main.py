@@ -52,8 +52,12 @@ def main() -> int:
         return 0
     instance_server = SingleInstanceServer(app)
     if not instance_server.listen():
-        QMessageBox.warning(None, APP_NAME, "小助手启动失败：无法建立单实例通信。")
+        # A simultaneous launch may acquire the lock just before its pipe is ready.
+        if send_to_running_instance(forwarded_command):
+            return 0
+        QMessageBox.warning(None, APP_NAME, "小助手已在运行或暂时无法连接，请稍后重试。")
         return 1
+    app.aboutToQuit.connect(instance_server.close)
     window = MainWindow()
     instance_server.command_received.connect(window.handle_external_command)
     window.show()

@@ -80,11 +80,34 @@ class AppProtocolTests(unittest.TestCase):
             QTimer.singleShot(3_000, app.quit)
             app.exec()
             worker.join(timeout=1)
-            server._server.close()
+            server.close()
             QLocalServer.removeServer(server_name)
 
         self.assertEqual(sent, [True])
         self.assertEqual(received, [command])
+
+    def test_second_process_cannot_start_another_primary_server(self) -> None:
+        app = QCoreApplication.instance() or QCoreApplication([])
+        server_name = f"CS2TH.Tools.Exclusion.{os.getpid()}"
+        with patch.object(app_protocol, "INSTANCE_SERVER_NAME", server_name):
+            server = SingleInstanceServer()
+            self.assertTrue(server.listen())
+            code = (
+                "from PySide6.QtCore import QCoreApplication; "
+                "import core.app_protocol as p; "
+                "app=QCoreApplication([]); "
+                f"p.INSTANCE_SERVER_NAME={server_name!r}; "
+                "server=p.SingleInstanceServer(); "
+                "raise SystemExit(1 if server.listen() else 0)"
+            )
+            try:
+                result = subprocess.run([sys.executable, "-c", code], check=False, timeout=5)
+                self.assertEqual(result.returncode, 0)
+            finally:
+                server.close()
+            replacement = SingleInstanceServer()
+            self.assertTrue(replacement.listen())
+            replacement.close()
 
 
 if __name__ == "__main__":

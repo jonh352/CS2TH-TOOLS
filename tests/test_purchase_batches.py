@@ -49,6 +49,7 @@ from core.purchase_batches import (
     update_purchase_batch_account,
 )
 from core.steam_inventory_history import parse_steam_inventory_history_page
+from core.steam_tradeup_history import list_steam_tradeup_records
 from core.purchase_tracking import (
     STATUS_CANCELLED,
     STATUS_ORDERED,
@@ -268,7 +269,7 @@ class PurchaseBatchTests(unittest.TestCase):
         payload = {
             "descriptions": descriptions,
             "html": (
-                '<div class="tradehistoryrow">'
+                '<div class="tradehistoryrow" data-timestamp="1793010420">Crafted'
                 '<div class="tradehistory_items_plusminus">-</div>'
                 f'<div class="tradehistory_items_group">{inputs}</div>'
                 '<div class="tradehistory_items_plusminus">+</div>'
@@ -285,7 +286,7 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(len(events[0]["inputs"]), 10)
         self.assertEqual(events[0]["outputs"][0]["classid"], "202")
 
-    def test_steam_history_fills_actual_product_and_candidate_price(self) -> None:
+    def test_steam_history_records_actual_product_without_predicted_wear(self) -> None:
         material, product = _template_pair()
         recipe = _special_recipe()
         recipe["products_display"] = [
@@ -310,24 +311,26 @@ class PurchaseBatchTests(unittest.TestCase):
                 output_asset_ids=["output"], gc_recipe=2,
             )
             event = {
-                "inputs": [{"market_name": _name(material)} for _ in range(10)],
-                "outputs": [{"market_name": _name(product), "icon_url": "icon/path"}],
+                "event_type": "tradeup", "completed_at": "2026-10-26T18:27:00+08:00",
+                "inputs": [{"assetid": f"asset-{index}", "market_name": _name(material)} for index in range(10)],
+                "outputs": [{"assetid": "output", "market_name": _name(product), "icon_url": "icon/path"}],
             }
 
             self.assertEqual(apply_steam_tradeup_history("profile", [event]), 1)
-            record = list_tradeup_records("profile")[0]
+            record = list_steam_tradeup_records("profile")[0]
             self.assertEqual(apply_steam_tradeup_history("profile", [event]), 0)
 
         self.assertEqual(record["recipe_index"], 1)
         self.assertEqual(record["products"][0]["name"], _name(product))
-        self.assertEqual(record["products"][0]["price"], 88.8)
+        self.assertIsNone(record["products"][0]["float_value"])
+        self.assertEqual(record["completed_at"], "2026-10-26T18:27:00+08:00")
         # The result popup matches history by output asset IDs before reading
         # profit. A correctly calculated value is useless if this key is lost.
         self.assertEqual(record["output_asset_ids"], ["output"])
-        self.assertIsNotNone(record["profit"])
+        self.assertEqual(record["material_cost"], 100.0)
         self.assertEqual(record["products"][0]["steam_icon_url"], "icon/path")
 
-    def test_steam_history_recovers_manually_completed_legacy_record(self) -> None:
+    def test_steam_history_does_not_modify_manually_completed_legacy_record(self) -> None:
         material, product = _template_pair()
         recipe = _special_recipe()
         recipe["products_display"] = [
@@ -350,22 +353,20 @@ class PurchaseBatchTests(unittest.TestCase):
             set_purchase_batch_recipe_tradeup_completed(path, entry_id, True)
             self.assertNotIn("tradeup_execution", load_purchase_batch(path)["recipes"][0])
             event = {
+                "event_type": "tradeup", "completed_at": "2026-10-25T12:34:00+08:00",
                 "inputs": [{"market_name": _name(material)} for _ in range(10)],
                 "outputs": [{"market_name": _name(product), "icon_url": "legacy/icon"}],
             }
 
             self.assertEqual(apply_steam_tradeup_history("profile", [event]), 1)
             stored_entry = load_purchase_batch(path)["recipes"][0]
-            record = list_tradeup_records("profile")[0]
+            record = list_steam_tradeup_records("profile")[0]
 
-        self.assertEqual(
-            stored_entry["tradeup_execution"]["method"],
-            "steam_inventory_history_recovery",
-        )
+        self.assertNotIn("tradeup_execution", stored_entry)
         self.assertEqual(len(record["products"]), 1)
         self.assertEqual(record["products"][0]["name"], _name(product))
-        self.assertEqual(record["products"][0]["price"], 66.6)
-        self.assertEqual(record["output_value"], 66.6)
+        self.assertIsNone(record["products"][0]["float_value"])
+        self.assertNotEqual(record["products"][0]["price"], 66.6)
 
     def test_five_covert_inventory_items_can_build_tradeup_plan(self) -> None:
         template = next(
@@ -716,7 +717,7 @@ class PurchaseBatchTests(unittest.TestCase):
             entry_id = add_recipe_to_purchase_batch(path, _special_recipe(1))
             mark_all_purchase_batch_materials_ordered(path)
             reconcile_purchase_batches_for_profile(
-                "ten-profile", [_inventory("received-then-missing")]
+                "ten-profile", [{**_inventory("received-then-missing"), "cooldown_ends_at": 1792937520}]
             )
             original_ready = refresh_purchase_batch_alchemy_ready_at(path)
 
@@ -767,7 +768,7 @@ class PurchaseBatchTests(unittest.TestCase):
             entry_id = add_recipe_to_purchase_batch(path, _special_recipe(1))
             mark_all_purchase_batch_materials_ordered(path)
             reconcile_purchase_batches_for_profile(
-                "ten-profile", [_inventory("seller-reversed")]
+                "ten-profile", [{**_inventory("seller-reversed"), "cooldown_ends_at": 1792937520}]
             )
             refresh_purchase_batch_alchemy_ready_at(path)
             received = load_purchase_batch(path)
@@ -1398,12 +1399,12 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(received["status"], STATUS_RECEIVED)
         self.assertEqual(received["matched_assetid"], "same-replacement-asset")
 
-    def test_alchemy_ready_at_is_next_hour_plus_seven_days(self) -> None:
+    def test_alchemy_ready_at_is_next_hour(self) -> None:
         verified = datetime(2026, 8, 27, 9, 34, tzinfo=timezone(timedelta(hours=8)))
         ready = compute_alchemy_ready_at(verified)
         self.assertEqual(
             ready,
-            datetime(2026, 9, 3, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+            datetime(2026, 8, 27, 10, 0, tzinfo=timezone(timedelta(hours=8))),
         )
         self.assertEqual(
             purchase_batch_alchemy_status_text(
@@ -1419,7 +1420,7 @@ class PurchaseBatchTests(unittest.TestCase):
                 },
                 now=verified,
             ),
-            "炼金时间:2026-9-3 10:00",
+            "炼金时间:2026-8-27 10:00",
         )
         self.assertEqual(
             purchase_batch_alchemy_status_text(
@@ -1463,6 +1464,7 @@ class PurchaseBatchTests(unittest.TestCase):
             self.assertNotIn("alchemy_ready_at", load_purchase_batch(path))
 
             inventory = _inventory("ready-1", float(row["float_value"]))
+            inventory["cooldown_ends_at"] = verified.timestamp()
             result = reconcile_purchase_batches_for_profile(
                 "alchemy-profile", [inventory]
             )
@@ -1475,7 +1477,7 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertIsNotNone(ready_iso)
         self.assertEqual(
             purchase_batch_alchemy_status_text(updated, now=verified),
-            "炼金时间:2026-9-3 10:00",
+            "炼金时间:2026-8-27 10:00",
         )
 
     def test_refresh_alchemy_ready_at_is_not_moved_after_it_is_set(self) -> None:
@@ -1501,7 +1503,7 @@ class PurchaseBatchTests(unittest.TestCase):
             )
             reconcile_purchase_batches_for_profile(
                 "alchemy-lock-profile",
-                [_inventory("ready-lock-1", float(row["float_value"]))],
+                [{**_inventory("ready-lock-1", float(row["float_value"])), "cooldown_ends_at": first_verified.timestamp()}],
             )
             first_ready = refresh_purchase_batch_alchemy_ready_at(
                 path, verified_at=first_verified
@@ -1517,7 +1519,7 @@ class PurchaseBatchTests(unittest.TestCase):
         self.assertEqual(first_ready, second_ready)
         self.assertEqual(
             purchase_batch_alchemy_status_text(updated, now=first_verified),
-            "炼金时间:2026-9-3 10:00",
+            "炼金时间:2026-8-27 10:00",
         )
 
     def test_list_batches_is_newest_first(self) -> None:

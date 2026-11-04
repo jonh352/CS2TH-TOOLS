@@ -37,6 +37,30 @@ class RecipeFavoriteUiTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_non_overlapping_requires_confirmation_and_limits_material_count(self):
+        page = AlchemyPage()
+        page._selected_data = [{}] * 100
+        page._sync_no_overlap_availability()
+        self.assertTrue(page.step3_no_overlap_check.isEnabled())
+        self.assertFalse(page.step3_no_overlap_check.isChecked())
+        with patch("ui.pages.alchemy.ask_confirmation", return_value=False) as confirm:
+            page.step3_no_overlap_check.click()
+        confirm.assert_called_once()
+        self.assertFalse(page.step3_no_overlap_check.isChecked())
+        with patch("ui.pages.alchemy.ask_confirmation", return_value=True):
+            page.step3_no_overlap_check.click()
+        self.assertTrue(page.step3_no_overlap_check.isChecked())
+        page._selected_data = [{}] * 101
+        with patch("ui.pages.alchemy.FetchPriceWorker") as fetch, patch("ui.pages.alchemy.show_alert") as alert:
+            page._on_step3_start_calc()
+        fetch.assert_not_called()
+        alert.assert_called_once()
+        self.assertFalse(page.step3_no_overlap_check.isEnabled())
+        self.assertFalse(page.step3_no_overlap_check.isChecked())
+        self.assertEqual(page.step3_min_be_label.text(), "保本率")
+        self.assertEqual(page.step3_max_be_label.text(), "-")
+        page.close()
+
     def test_favorite_persists_and_is_removed_from_favorites_view(self):
         with TemporaryDirectory() as temp, patch.object(saved_recipes, "RECIPES_DIR", Path(temp)):
             saved_recipes.invalidate_saved_recipes_cache()

@@ -108,6 +108,25 @@ def _wait_for_cdp(
     raise C5PlatformPausedError(f"C5GAME 采集通道未就绪{detail}")
 
 
+import ctypes
+from ctypes import wintypes
+
+
+class ProcessEntry32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * 260),
+    ]
+
+
 def _descendant_pids(root_pid: int) -> set[int]:
     """Return ``root_pid`` plus children (Chrome/Edge often own the HWND elsewhere)."""
     import ctypes
@@ -121,21 +140,17 @@ def _descendant_pids(root_pid: int) -> set[int]:
     th32cs_snapprocess = 0x00000002
     invalid_handle = ctypes.c_void_p(-1).value
 
-    class ProcessEntry32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD),
-            ("cntUsage", wintypes.DWORD),
-            ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-            ("th32ModuleID", wintypes.DWORD),
-            ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD),
-            ("pcPriClassBase", ctypes.c_long),
-            ("dwFlags", wintypes.DWORD),
-            ("szExeFile", wintypes.WCHAR * 260),
-        ]
 
     kernel32 = ctypes.windll.kernel32
+    # ctypes defaults to 32-bit integers; HANDLE is pointer-sized on Win64.
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for name in ("Process32FirstW", "Process32NextW"):
+        function = getattr(kernel32, name)
+        function.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+        function.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
     snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
     if snapshot in (0, invalid_handle, None):
         return pids
@@ -174,6 +189,7 @@ def _hide_browser_windows(proc: subprocess.Popen | None) -> None:
     user32 = ctypes.windll.user32
     sw_hide = 0
     callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    _configure_browser_window_api(user32, callback_type)
 
     @callback_type
     def callback(hwnd, _lparam):
@@ -189,6 +205,27 @@ def _hide_browser_windows(proc: subprocess.Popen | None) -> None:
         pass
 
 
+def _configure_browser_window_api(user32, callback_type) -> None:
+    """Preserve full HWND values when hiding or restoring the browser."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    for name in ("IsWindowVisible", "SetForegroundWindow"):
+        function = getattr(user32, name)
+        function.argtypes = [wintypes.HWND]
+        function.restype = wintypes.BOOL
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+
 def _show_browser_windows(proc: subprocess.Popen | None) -> None:
     """Restore and foreground C5's native window for user verification."""
     import ctypes
@@ -200,6 +237,7 @@ def _show_browser_windows(proc: subprocess.Popen | None) -> None:
     user32 = ctypes.windll.user32
     sw_restore = 9
     callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    _configure_browser_window_api(user32, callback_type)
 
     @callback_type
     def callback(hwnd, _lparam):
@@ -318,6 +356,8 @@ class C5BrowserCollector:
         self._headers: dict[str, str] | None = None
         self._opened = False
         self._verification_visible = False
+        self._hide_stop = threading.Event()
+        self._hide_thread: threading.Thread | None = None
         self._cmd_q: queue.Queue = queue.Queue()
         self._worker = threading.Thread(
             target=self._worker_loop,
@@ -430,6 +470,13 @@ class C5BrowserCollector:
         else:
             self._close_impl()
 
+    def _keep_collection_window_hidden(self):
+        # Chromium can recreate/show its native window while goto/CDP blocks.
+        # Periodic hiding must continue independently of those blocking calls.
+        while not self._hide_stop.wait(0.15):
+            if not self._verification_visible:
+                _hide_browser_windows(self._proc)
+
     def _ensure_open_impl(
         self,
         *,
@@ -475,6 +522,12 @@ class C5BrowserCollector:
                 stderr=subprocess.DEVNULL,
                 startupinfo=_hidden_browser_startupinfo(),
             )
+            self._hide_stop.clear()
+            self._hide_thread = threading.Thread(
+                target=self._keep_collection_window_hidden,
+                name="c5-window-hide", daemon=True,
+            )
+            self._hide_thread.start()
             _hide_browser_windows(self._proc)
             _wait_for_cdp(port, self._proc, cancel_check=cancel_check)
 
@@ -572,6 +625,10 @@ class C5BrowserCollector:
             ) from exc
 
     def _close_impl(self) -> None:
+        self._hide_stop.set()
+        if self._hide_thread is not None:
+            self._hide_thread.join(timeout=1)
+            self._hide_thread = None
         self._opened = False
         self._headers = None
         page, browser, playwright, proc = (

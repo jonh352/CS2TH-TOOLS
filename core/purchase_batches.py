@@ -12,6 +12,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -76,9 +77,12 @@ def _validated_batch_path(path: Path) -> Path:
     return resolved
 
 
-def _write_batch(path: Path, payload: dict[str, Any]) -> None:
+def _write_batch(
+    path: Path, payload: dict[str, Any], *,
+    inventory_items: list[dict[str, Any]] | None = None,
+) -> None:
     target = _validated_batch_path(path)
-    _refresh_purchase_recipe_alchemy_times(payload)
+    _refresh_purchase_recipe_alchemy_times(payload, inventory_items=inventory_items if inventory_items is not None else [])
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(".json.tmp")
     temp.write_text(
@@ -149,6 +153,16 @@ def create_purchase_batch(
     path = PURCHASE_BATCHES_DIR / f"{batch_id}.json"
     _write_batch(path, payload)
     return path
+
+
+def daily_purchase_batch(*, profile_id: str, steam_id: str, account_name: str,
+                         inventory_items: list[dict], day: str = "") -> Path:
+    day = day or datetime.fromisoformat(_utc_now()).astimezone().strftime("%Y-%m-%d")
+    for path, batch in list_purchase_batches():
+        if batch.get("name") == day and batch.get("profile_id") == profile_id:
+            return path
+    return create_purchase_batch(day, profile_id=profile_id, steam_id=steam_id,
+                                 account_name=account_name, inventory_items=inventory_items)
 
 
 def add_recipe_to_purchase_batch(
@@ -252,16 +266,106 @@ def purchase_batch_section(batch: dict[str, Any]) -> str:
     return "purchasing"
 
 
-def compute_alchemy_ready_at(verified_at: datetime | None = None) -> datetime:
-    """Next whole hour after verification, plus 7 days (local timezone)."""
-    when = verified_at or datetime.now().astimezone()
+
+def purchase_recipe_section(entry: dict[str, Any]) -> str:
+    """单配方独立归类，离库待核对不撤销历史入库。"""
+    return purchase_batch_section({"recipes": [entry]})
+
+
+def purchase_recipe_received_date(entry: dict[str, Any], batch: dict[str, Any]) -> str:
+    """最后一件材料的入库日期（北京时间），兼容缺少时间戳的旧配方。"""
+    times = [
+        parsed for row in entry.get("materials") or [] if isinstance(row, dict)
+        if (parsed := _parse_alchemy_ready_at(row.get("received_at"))) is not None
+    ]
+    if times:
+        received = max(times)
+    else:
+        if entry.get("received_date_fallback"):
+            return str(entry["received_date_fallback"])
+        ready = _parse_alchemy_ready_at(entry.get("alchemy_ready_at"))
+        received = (ready - timedelta(days=7, hours=1)) if ready and entry.get("alchemy_time_source") != "steam_cooldown" else None
+        if received is None:
+            received = _parse_alchemy_ready_at(entry.get("added_at"))
+        if received is None:
+            received = _parse_alchemy_ready_at(batch.get("created_at"))
+    return received.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d") if received else "日期未知"
+
+
+def delete_purchase_batch_recipe(path: Path, recipe_entry_id: str) -> None:
+    batch = load_purchase_batch(path)
+    entries = batch.get("recipes") or []
+    remaining = [entry for entry in entries if str(entry.get("id") or "") != recipe_entry_id]
+    if len(remaining) == len(entries):
+        raise ValueError("未找到要删除的配方")
+    batch["recipes"] = remaining
+    batch.pop("alchemy_ready_at", None)
+    batch["updated_at"] = _utc_now()
+    _write_batch(path, batch)
+
+
+def move_purchase_batch_recipe(source_path: Path, recipe_entry_id: str, target_path: Path) -> int:
+    """转移一条配方；跨 Steam 账号时撤销旧库存匹配，保留采购记录。"""
+    source_path = _validated_batch_path(source_path)
+    target_path = _validated_batch_path(target_path)
+    if source_path == target_path:
+        raise ValueError("请选择其他采购批次")
+    source = load_purchase_batch(source_path)
+    target = load_purchase_batch(target_path)
+    entry = next((row for row in source.get("recipes") or [] if str(row.get("id") or "") == recipe_entry_id), None)
+    if entry is None:
+        raise ValueError("未找到要转移的配方")
+    if entry.get("tradeup_completed"):
+        raise ValueError("已汰换的配方不能转移")
+    if any(str(row.get("id") or "") == recipe_entry_id for row in target.get("recipes") or []):
+        raise ValueError("目标批次已存在该配方")
+    if entry.get("source_ref") and any(row.get("source_ref") == entry["source_ref"] for row in target.get("recipes") or []):
+        raise ValueError("目标批次已有同一计算结果的配方")
+    moved = copy.deepcopy(entry)
+    source_steam = str(source.get("steam_id") or "")
+    target_steam = str(target.get("steam_id") or "")
+    same_account = (source_steam == target_steam) if source_steam and target_steam else (
+        str(source.get("profile_id") or "") == str(target.get("profile_id") or "")
+    )
+    reset = 0
+    if not same_account:
+        for row in moved.get("materials") or []:
+            if row.get("status") == STATUS_RECEIVED:
+                _restore_departed_item_in_recipe(moved, row)
+                row["status"] = STATUS_ORDERED
+                reset += 1
+            for key in ("matched_assetid", "matched_float", "received_at", "inventory_missing_since", "normal_departure_assetid", "normal_departure_at"):
+                row.pop(key, None)
+        moved.pop("alchemy_ready_at", None)
+        moved.pop("received_date_fallback", None)
+        for row in moved.get("materials") or []:
+            row.pop("steam_cooldown", None)
+    original_target = copy.deepcopy(target)
+    original_source = copy.deepcopy(source)
+    target.setdefault("recipes", []).append(moved)
+    source["recipes"] = [row for row in source["recipes"] if str(row.get("id") or "") != recipe_entry_id]
+    for batch in (source, target):
+        batch.pop("alchemy_ready_at", None)
+        batch["updated_at"] = _utc_now()
+    # 两个文件均使用原子替换；第二次写入失败时恢复两端，避免配方丢失或重复。
+    try:
+        _write_batch(target_path, target)
+        _write_batch(source_path, source)
+    except OSError:
+        _write_batch(target_path, original_target)
+        _write_batch(source_path, original_source)
+        raise
+    return reset
+
+def compute_alchemy_ready_at(cooldown_at: datetime) -> datetime:
+    """Round the latest Steam cooldown up to an hour; exact hours stay unchanged."""
+    when = cooldown_at
     if when.tzinfo is None:
         when = when.astimezone()
     else:
         when = when.astimezone()
     floored = when.replace(minute=0, second=0, microsecond=0)
-    next_hour = floored + timedelta(hours=1)
-    return next_hour + timedelta(days=7)
+    return floored if when == floored else floored + timedelta(hours=1)
 
 
 def _parse_alchemy_ready_at(value: object) -> datetime | None:
@@ -293,9 +397,11 @@ def purchase_batch_alchemy_status_text(
     """Orange suffix after batch name: alchemy countdown text, or empty."""
     if not purchase_batch_is_fully_received(batch):
         return ""
+    if batch.get("alchemy_time_state") == "clear":
+        return "可炼金"
     ready = _parse_alchemy_ready_at(batch.get("alchemy_ready_at"))
     if ready is None:
-        return ""
+        return "炼金时间:待刷新 Steam 库存确认"
     current = now or datetime.now().astimezone()
     if current.tzinfo is None:
         current = current.astimezone()
@@ -306,39 +412,109 @@ def purchase_batch_alchemy_status_text(
     return f"炼金时间:{format_alchemy_ready_at(ready)}"
 
 
-def _refresh_purchase_recipe_alchemy_time(entry: dict[str, Any]) -> bool:
-    """Keep each recipe's receipt clock independent of its batch's clock."""
-    rows = [row for row in entry.get("materials") or [] if isinstance(row, dict)]
-    if not rows or any(row.get("status") != STATUS_RECEIVED for row in rows):
-        return entry.pop("alchemy_ready_at", None) is not None
-    if entry.get("alchemy_ready_at") or any(row.get("inventory_missing_since") for row in rows):
+def _remember_material_cooldown(row: dict[str, Any], item: dict[str, Any]) -> bool:
+    """Keep Steam's cooldown alongside the exact received asset, never its receipt time."""
+    raw = item.get("cooldown_ends_at")
+    ends = None
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+            if math.isfinite(value) and value > 0:
+                datetime.fromtimestamp(value, tz=timezone.utc)
+                ends = value
+        except (ValueError, TypeError, OSError, OverflowError):
+            pass
+    clear = raw in (None, "") and bool(item.get("marketable")) and item.get("cooldown_kind") not in ("market_listed", "trade_hold")
+    snapshot = {"assetid": str(item.get("assetid") or ""), "ends_at": ends, "clear": clear}
+    if row.get("steam_cooldown") == snapshot:
         return False
-    # Historical batches already store receipt timestamps. Use the final
-    # receipt so opening an older recipe does not restart its seven-day wait.
-    received_times = [
-        received for row in rows
-        if (received := _parse_alchemy_ready_at(row.get("received_at"))) is not None
-    ]
-    verified_at = max(received_times) if received_times else None
-    entry["alchemy_ready_at"] = compute_alchemy_ready_at(verified_at).isoformat()
+    row["steam_cooldown"] = snapshot
     return True
 
 
-def _refresh_purchase_recipe_alchemy_times(batch: dict[str, Any]) -> bool:
+def _refresh_purchase_recipe_alchemy_time(
+    entry: dict[str, Any], inventory_by_id: dict[str, dict[str, Any]] | None = None,
+) -> bool:
+    """Derive the recipe's clock from its latest exact Steam asset cooldown."""
+    before = copy.deepcopy(entry)
+    rows = [row for row in entry.get("materials") or [] if isinstance(row, dict)]
+    entry.pop("alchemy_ready_at", None)
+    entry.pop("alchemy_time_state", None)
+    entry["alchemy_time_source"] = "steam_cooldown"
+    if not rows or any(row.get("status") != STATUS_RECEIVED for row in rows):
+        for row in rows:
+            if row.get("status") != STATUS_RECEIVED:
+                row.pop("steam_cooldown", None)
+        return entry != before
+    ends = []
+    unknown = False
+    for row in rows:
+        asset_id = str(row.get("matched_assetid") or "")
+        if inventory_by_id is not None and asset_id in inventory_by_id:
+            _remember_material_cooldown(row, inventory_by_id[asset_id])
+        snapshot = row.get("steam_cooldown")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        if not asset_id or snapshot.get("assetid") != asset_id:
+            unknown = True
+        elif snapshot.get("ends_at") is not None:
+            try:
+                value = float(snapshot["ends_at"])
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError("invalid Steam cooldown")
+                ends.append(datetime.fromtimestamp(value, tz=timezone.utc))
+            except (ValueError, TypeError, OSError, OverflowError):
+                unknown = True
+        elif not snapshot.get("clear"):
+            unknown = True
+    if unknown:
+        entry["alchemy_time_state"] = "unknown"
+    elif ends:
+        entry["alchemy_ready_at"] = compute_alchemy_ready_at(max(ends)).isoformat()
+    else:
+        entry["alchemy_time_state"] = "clear"
+    return entry != before
+
+
+def _refresh_purchase_recipe_alchemy_times(
+    batch: dict[str, Any], *, inventory_items: list[dict[str, Any]] | None = None,
+) -> bool:
+    if inventory_items is None:
+        profile_id = str(batch.get("profile_id") or "")
+        inventory_items = load_profile_inventory_items(profile_id) if profile_id else []
+    inventory_by_id = {str(item.get("assetid") or ""): item for item in inventory_items if isinstance(item, dict) and item.get("assetid")}
     changed = False
     for entry in batch.get("recipes") or []:
-        if isinstance(entry, dict) and _refresh_purchase_recipe_alchemy_time(entry):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("alchemy_time_source") != "steam_cooldown" and entry.get("alchemy_ready_at") and not any(row.get("received_at") for row in entry.get("materials") or [] if isinstance(row, dict)):
+            entry["received_date_fallback"] = purchase_recipe_received_date(entry, batch)
             changed = True
+        changed = _refresh_purchase_recipe_alchemy_time(entry, inventory_by_id) or changed
+    before = (batch.get("alchemy_ready_at"), batch.get("alchemy_time_state"), batch.get("alchemy_time_source"))
+    batch.pop("alchemy_ready_at", None)
+    batch.pop("alchemy_time_state", None)
+    batch["alchemy_time_source"] = "steam_cooldown"
+    entries = [entry for entry in batch.get("recipes") or [] if isinstance(entry, dict)]
+    summary = purchase_batch_summary(batch)
+    if summary["total"] and summary[STATUS_RECEIVED] == summary["total"]:
+        times = [_parse_alchemy_ready_at(entry.get("alchemy_ready_at")) for entry in entries]
+        if any(entry.get("alchemy_time_state") == "unknown" for entry in entries):
+            batch["alchemy_time_state"] = "unknown"
+        elif any(value is not None for value in times):
+            batch["alchemy_ready_at"] = max(value for value in times if value is not None).isoformat()
+        else:
+            batch["alchemy_time_state"] = "clear"
+    after = (batch.get("alchemy_ready_at"), batch.get("alchemy_time_state"), batch.get("alchemy_time_source"))
+    changed = changed or before != after
     return changed
 
 
 def purchase_batch_recipe_alchemy_status_text(
     entry: dict[str, Any], *, now: datetime | None = None
 ) -> str:
-    snapshot = copy.deepcopy(entry)
-    _refresh_purchase_recipe_alchemy_time(snapshot)
     return purchase_batch_alchemy_status_text(
-        {"recipes": [snapshot], "alchemy_ready_at": snapshot.get("alchemy_ready_at")},
+        {"recipes": [entry], "alchemy_ready_at": entry.get("alchemy_ready_at"), "alchemy_time_state": entry.get("alchemy_time_state")},
         now=now,
     )
 
@@ -348,27 +524,10 @@ def refresh_purchase_batch_alchemy_ready_at(
     *,
     verified_at: datetime | None = None,
 ) -> str | None:
-    """Record alchemy_ready_at once when a batch first becomes fully received."""
+    """Recompute from Steam inventory; verified_at no longer influences the clock."""
     batch = load_purchase_batch(path)
-    changed = _refresh_purchase_recipe_alchemy_times(batch)
-    summary = purchase_batch_summary(batch)
-    existing = str(batch.get("alchemy_ready_at") or "").strip()
-    result = existing or None
-    if not summary["missing_review"]:
-        if purchase_batch_is_fully_received(batch):
-            if not existing:
-                batch["alchemy_ready_at"] = compute_alchemy_ready_at(verified_at).isoformat()
-                changed = True
-            result = str(batch["alchemy_ready_at"])
-        else:
-            if "alchemy_ready_at" in batch:
-                batch.pop("alchemy_ready_at", None)
-                changed = True
-            result = None
-    if changed:
-        batch["updated_at"] = _utc_now()
-        _write_batch(path, batch)
-    return result
+    _write_batch(path, batch, inventory_items=load_profile_inventory_items(str(batch.get("profile_id") or "")))
+    return batch.get("alchemy_ready_at")
 
 
 def _find_material(
@@ -415,8 +574,23 @@ def set_purchase_batch_recipe_tradeup_completed(
             if isinstance(row, dict):
                 row.pop("inventory_missing_since", None)
     else:
+        restoring_ids = {
+            str(row.get("matched_assetid") or "") for row in entry.get("materials") or []
+            if isinstance(row, dict) and row.get("status") == STATUS_RECEIVED and row.get("matched_assetid")
+        }
+        for other_path, other_batch in list_purchase_batches():
+            if str(other_batch.get("profile_id") or "") != str(batch.get("profile_id") or ""):
+                continue
+            for other_entry in other_batch.get("recipes") or []:
+                if other_entry.get("tradeup_completed"):
+                    continue
+                if other_path.resolve() == Path(path).resolve() and str(other_entry.get("id") or "") == str(recipe_entry_id):
+                    continue
+                if any(row.get("status") == STATUS_RECEIVED and str(row.get("matched_assetid") or "") in restoring_ids for row in other_entry.get("materials") or [] if isinstance(row, dict)):
+                    raise ValueError("这条历史配方的材料已被其他未汰换配方占用，请先撤销对应入库，再恢复此配方")
         entry.pop("tradeup_completed", None)
         entry.pop("tradeup_completed_at", None)
+        entry.pop("archive_reason", None)
     batch["updated_at"] = now
     _write_batch(path, batch)
     return True
@@ -531,12 +705,12 @@ def list_ready_purchase_batch_recipes(
     *,
     now: datetime | None = None,
 ) -> list[tuple[Path, dict[str, Any], list[str]]]:
-    """List fully received batches with the recipe ids currently safe to craft."""
+    """List individually received recipes currently safe to craft, including mixed batches."""
     wanted_profile = str(profile_id or "").strip()
     results: list[tuple[Path, dict[str, Any], list[str]]] = []
     inventory_cache: dict[str, list[dict[str, Any]]] = {}
     for path, batch in list_purchase_batches():
-        if purchase_batch_section(batch) != "purchase_completed":
+        if not any(purchase_recipe_section(entry) == "purchase_completed" for entry in batch.get("recipes") or [] if isinstance(entry, dict)):
             continue
         batch_profile = str(batch.get("profile_id") or "")
         if wanted_profile and batch_profile != wanted_profile:
@@ -548,6 +722,7 @@ def list_ready_purchase_batch_recipes(
             str(entry.get("id") or "")
             for entry in batch.get("recipes") or []
             if isinstance(entry, dict)
+            and purchase_recipe_section(entry) == "purchase_completed"
             and purchase_batch_recipe_live_readiness(
                 batch, entry, inventory, now=now
             )[0]
@@ -813,184 +988,28 @@ def list_tradeup_records(profile_id: str = "") -> list[dict[str, Any]]:
     return records
 
 
-def _record_material_signature(record: dict[str, Any]) -> Counter[str]:
-    return Counter(
-        key
-        for row in record.get("materials") or []
-        if isinstance(row, dict)
-        for key in [recipe_substrate_template_key({"name": row.get("name")})]
-        if key
-    )
-
-
-def _history_event_input_signature(event: dict[str, Any]) -> Counter[str]:
-    return Counter(
-        key
-        for row in event.get("inputs") or []
-        if isinstance(row, dict)
-        for key in [inventory_item_template_key(row)]
-        if key
-    )
-
-
-def _history_product_for_record(
-    record: dict[str, Any],
-    history_item: dict[str, Any],
-) -> dict[str, Any]:
-    template = resolve_inventory_skin_template(history_item)
-    template_key = inventory_item_template_key(history_item)
-    chosen: dict[str, Any] = {}
-    for candidate in record.get("product_candidates") or []:
-        if not isinstance(candidate, dict):
-            continue
-        if recipe_substrate_template_key({"name": candidate.get("name")}) == template_key:
-            chosen = candidate
-            break
-    current_products = [row for row in record.get("products") or [] if isinstance(row, dict)]
-    asset_id = str(current_products[0].get("asset_id") or "") if current_products else ""
-    if str(chosen.get("name") or "").strip():
-        name = str(chosen["name"])
-    elif template is not None:
-        name = (
-            f"{template.weapon_name} | {template.skin_name}"
-            if template.skin_name else template.weapon_name
-        )
-    else:
-        name = str(
-            history_item.get("market_name") or history_item.get("name")
-            or history_item.get("market_hash_name") or "未知产物"
-        )
-    return {
-        "asset_id": asset_id,
-        "name": name,
-        "float_value": chosen.get("float_value"),
-        "price": chosen.get("price"),
-        "steam_icon_url": str(history_item.get("icon_url") or ""),
-        "source": "steam_inventory_history",
-    }
-
-
-def apply_steam_tradeup_history(
-    profile_id: str,
-    events: list[dict[str, Any]],
-) -> int:
-    """Match Steam Crafted rows to local recipes and persist the actual output."""
-    profile_id = str(profile_id or "").strip()
-    records = list_tradeup_records(profile_id)
-    event_rows = [event for event in events if isinstance(event, dict)]
-    used_events: set[int] = set()
-    updates: dict[tuple[str, str], dict[str, Any]] = {}
-    for record in records:
-        if any(
-            isinstance(product, dict)
-            and str(product.get("source") or "") == "steam_inventory_history"
-            for product in record.get("products") or []
-        ):
-            continue
-        signature = _record_material_signature(record)
-        if not signature:
-            continue
-        match_index = next(
-            (
-                index for index, event in enumerate(event_rows)
-                if index not in used_events
-                and _history_event_input_signature(event) == signature
-                and any(isinstance(row, dict) for row in event.get("outputs") or [])
-            ),
-            None,
-        )
-        if match_index is None:
-            continue
-        used_events.add(match_index)
-        history_item = next(
-            row for row in event_rows[match_index].get("outputs") or [] if isinstance(row, dict)
-        )
-        product = _history_product_for_record(record, history_item)
-        updates[(str(record.get("batch_path") or ""), str(record.get("recipe_entry_id") or ""))] = product
-
-    if not updates:
-        return 0
-    changed = 0
-    for path, batch in list_purchase_batches():
-        dirty = False
-        for entry in batch.get("recipes") or []:
-            if not isinstance(entry, dict):
-                continue
-            key = (str(path), str(entry.get("id") or ""))
-            product = updates.get(key)
-            execution = entry.get("tradeup_execution")
-            if product is None:
-                continue
-            if not isinstance(execution, dict):
-                execution = {
-                    "method": "steam_inventory_history_recovery",
-                    "completed_at": str(
-                        entry.get("tradeup_completed_at")
-                        or batch.get("updated_at")
-                        or _utc_now()
-                    ),
-                    "output_asset_ids": [],
-                }
-                recipe = entry.get("recipe") if isinstance(entry.get("recipe"), dict) else {}
-                execution["product_candidates"] = copy.deepcopy(
-                    [
-                        row for row in recipe.get("products_display") or []
-                        if isinstance(row, dict)
-                    ]
-                )
-                entry["tradeup_execution"] = execution
-            execution["products"] = [copy.deepcopy(product)]
-            execution["history_synced_at"] = _utc_now()
-            dirty = True
-            changed += 1
-        if dirty:
-            batch["updated_at"] = _utc_now()
-            _write_batch(path, batch)
-
-    history_path = _tradeup_history_path()
-    try:
-        archived = json.loads(history_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        archived = []
-    archive_dirty = False
-    if isinstance(archived, list):
-        for record in archived:
-            if not isinstance(record, dict):
-                continue
-            key = (str(record.get("batch_path") or ""), str(record.get("recipe_entry_id") or ""))
-            product = updates.get(key)
-            if product is None:
-                continue
-            record["products"] = [copy.deepcopy(product)]
-            prices = [product.get("price")]
-            record["output_value"] = float(prices[0]) if prices[0] is not None else None
-            record["profit"] = (
-                float(prices[0]) - float(record["material_cost"])
-                if prices[0] is not None and record.get("material_cost") is not None else None
-            )
-            record["history_synced_at"] = _utc_now()
-            archive_dirty = True
-            changed += 1
-    if archive_dirty:
-        temporary = history_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(archived, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(history_path)
-    return changed
+def apply_steam_tradeup_history(profile_id: str, events: list[dict[str, Any]]) -> int:
+    """Save real Steam events independently of local purchase operations."""
+    from core.steam_tradeup_history import save_steam_tradeup_events
+    return save_steam_tradeup_events(profile_id, events)
 
 
 def delete_tradeup_completed_batches(profile_id: str = "") -> int:
-    """Clear completed batches after preserving their statistics history."""
+    """Clear completed recipes from any batch while preserving statistics history."""
     wanted_profile = str(profile_id or "").strip()
-    paths = [
-        path
-        for path, batch in list_purchase_batches()
-        if purchase_batch_is_tradeup_completed(batch)
-        and (not wanted_profile or str(batch.get("profile_id") or "") == wanted_profile)
+    batches = [
+        (path, batch) for path, batch in list_purchase_batches()
+        if (not wanted_profile or str(batch.get("profile_id") or "") == wanted_profile)
+        and any(entry.get("tradeup_completed") for entry in batch.get("recipes") or [])
     ]
-    path_keys = {str(path) for path in paths}
+    completed_keys = {
+        (str(path), str(entry.get("id") or ""))
+        for path, batch in batches for entry in batch.get("recipes") or []
+        if entry.get("tradeup_completed")
+    }
     records_to_archive = [
         row for row in list_tradeup_records(wanted_profile)
-        if str(row.get("batch_path") or "") in path_keys
+        if (str(row.get("batch_path") or ""), str(row.get("recipe_entry_id") or "")) in completed_keys
     ]
     if records_to_archive:
         history_path = _tradeup_history_path()
@@ -1013,9 +1032,15 @@ def delete_tradeup_completed_batches(profile_id: str = "") -> int:
         temporary = history_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(history_path)
-    for path in paths:
-        delete_purchase_batch(path)
-    return len(paths)
+    for path, batch in batches:
+        batch["recipes"] = [entry for entry in batch["recipes"] if not entry.get("tradeup_completed")]
+        if batch["recipes"]:
+            batch.pop("alchemy_ready_at", None)
+            batch["updated_at"] = _utc_now()
+            _write_batch(path, batch)
+        else:
+            delete_purchase_batch(path)
+    return len(completed_keys)
 
 
 def _tradeup_history_path() -> Path:
@@ -1512,7 +1537,7 @@ def mark_all_purchase_batch_materials_ordered(path: Path) -> int:
     changed = 0
     now = _utc_now()
     for entry in batch.get("recipes") or []:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("tradeup_completed"):
             continue
         for row in entry.get("materials") or []:
             if not isinstance(row, dict):
@@ -1529,13 +1554,14 @@ def mark_all_purchase_batch_materials_ordered(path: Path) -> int:
     return changed
 
 
-def toggle_all_purchase_batch_materials_ordered(path: Path) -> tuple[int, str]:
+def toggle_all_purchase_batch_materials_ordered(path: Path, recipe_ids: set[str] | None = None, *, ordered: bool | None = None) -> tuple[int, str]:
     """Mark every non-received row ordered, or undo when all are already ordered."""
     batch = load_purchase_batch(path)
     rows = [
         row
         for entry in batch.get("recipes") or []
-        if isinstance(entry, dict)
+        if isinstance(entry, dict) and not entry.get("tradeup_completed")
+        and (recipe_ids is None or str(entry.get("id") or "") in recipe_ids)
         for row in entry.get("materials") or []
         if isinstance(row, dict)
         and str(row.get("status") or STATUS_PENDING) != STATUS_RECEIVED
@@ -1546,7 +1572,7 @@ def toggle_all_purchase_batch_materials_ordered(path: Path) -> tuple[int, str]:
         str(row.get("status") or STATUS_PENDING) == STATUS_ORDERED
         for row in rows
     )
-    target = STATUS_PENDING if undo else STATUS_ORDERED
+    target = STATUS_PENDING if (undo if ordered is None else not ordered) else STATUS_ORDERED
     now = _utc_now()
     changed = 0
     for row in rows:
@@ -2205,6 +2231,7 @@ def _apply_received_item_to_recipe(
     row: dict[str, Any],
     item: dict[str, Any],
 ) -> None:
+    _remember_material_cooldown(row, item)
     recipe = entry.get("recipe")
     try:
         substrate_index = int(row.get("substrate_index"))
@@ -2338,6 +2365,7 @@ def reconcile_purchase_batches_for_profile(
         for item in inventory_items
         if isinstance(item, dict) and str(item.get("assetid") or "")
     }
+    inventory_by_id = {str(item.get("assetid") or ""): item for item in inventory_items if isinstance(item, dict) and item.get("assetid")}
     changed: set[Path] = set()
     used = {str(value) for value in (excluded_asset_ids or set()) if str(value)}
     for path, batch in entries:
@@ -2350,7 +2378,9 @@ def reconcile_purchase_batches_for_profile(
                     continue
                 if str(row.get("status") or "") == STATUS_RECEIVED:
                     assetid = str(row.get("matched_assetid") or "")
-                    if assetid:
+                    # 手动归档仅保留历史，不继续占用仍在库存中的材料。
+                    # 本程序实际汰换过的资产仍保留占用，避免旧库存缓存复用已消耗材料。
+                    if assetid and (not tradeup_completed or isinstance(recipe_entry.get("tradeup_execution"), dict)):
                         used.add(assetid)
                     if tradeup_completed:
                         if row.pop("inventory_missing_since", None) is not None:
@@ -2358,6 +2388,8 @@ def reconcile_purchase_batches_for_profile(
                             batch["updated_at"] = _utc_now()
                         continue
                     if assetid and assetid in inventory_asset_ids:
+                        if _remember_material_cooldown(row, inventory_by_id[assetid]):
+                            changed.add(path)
                         cleared = False
                         for key in (
                             "inventory_missing_since",
@@ -2379,6 +2411,20 @@ def reconcile_purchase_batches_for_profile(
                         changed.add(path)
                         batch["updated_at"] = _utc_now()
 
+    for path, batch in entries:
+        for entry in batch.get("recipes") or []:
+            materials = entry.get("materials") or []
+            if entry.get("tradeup_completed") or len(materials) != 10:
+                continue
+            assets = {str(row.get("matched_assetid") or "") for row in materials}
+            if len(assets) == 10 and "" not in assets and not assets.intersection(inventory_asset_ids) and all(row.get("status") == STATUS_RECEIVED for row in materials):
+                now = _utc_now()
+                entry.update(tradeup_completed=True, tradeup_completed_at=now, archive_reason="all_materials_departed")
+                for row in materials:
+                    row.pop("inventory_missing_since", None)
+                batch["updated_at"] = now
+                changed.add(path)
+
     available = [
         item
         for item in inventory_items
@@ -2390,7 +2436,7 @@ def reconcile_purchase_batches_for_profile(
     tasks: list[tuple[str, Path, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     for path, batch in entries:
         for recipe_entry in batch.get("recipes") or []:
-            if not isinstance(recipe_entry, dict):
+            if not isinstance(recipe_entry, dict) or recipe_entry.get("tradeup_completed"):
                 continue
             for row in recipe_entry.get("materials") or []:
                 if isinstance(row, dict) and str(row.get("status") or STATUS_PENDING) == STATUS_ORDERED:
@@ -2433,10 +2479,12 @@ def reconcile_purchase_batches_for_profile(
     failures = 0
     failed_matches = 0
     for path, batch in entries:
+        if _refresh_purchase_recipe_alchemy_times(batch, inventory_items=inventory_items):
+            changed.add(path)
         if path not in changed:
             continue
         try:
-            _write_batch(path, batch)
+            _write_batch(path, batch, inventory_items=inventory_items)
         except (OSError, ValueError):
             failures += 1
             failed_matches += matched_by_path.get(path, 0)

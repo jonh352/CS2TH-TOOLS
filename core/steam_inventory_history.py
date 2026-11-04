@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,48 @@ from core.steam_session_profiles import steam_account_storage_state_path
 
 _HISTORY_URL = "https://steamcommunity.com/my/inventoryhistory/"
 _VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+
+def history_event_datetime(event: dict[str, Any]) -> datetime | None:
+    """Read Steam's event time; never substitute the synchronization time."""
+    candidates = [event.get("completed_at"), event.get("timestamp"), *(event.get("time_text") or [])]
+    candidates.append(event.get("text"))
+    for raw in candidates:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        try:
+            if re.fullmatch(r"\d{10}(?:\.\d+)?|\d{13}", value):
+                stamp = float(value)
+                return datetime.fromtimestamp(stamp / 1000 if stamp > 1e12 else stamp, timezone.utc)
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.astimezone()
+        except (ValueError, OverflowError, OSError):
+            pass
+        value = re.sub(r"\s*(?:@| at )\s*", " ", value, flags=re.I)
+        value = re.sub(r"(\d)\s+(am|pm)\b", r"\1\2", value, flags=re.I)
+        date_match = re.search(r"(?:\d{1,2}\s+[A-Za-z]{3,9},?\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})", value, re.I)
+        time_match = re.search(r"\b\d{1,2}:\d{2}(?::\d{2})?(?:am|pm)?\b", value, re.I)
+        if date_match and time_match:
+            value = (date_match.group() + " " + time_match.group()).replace(",", "")
+            for date_format in ("%b %d %Y", "%B %d %Y", "%d %b %Y", "%d %B %Y"):
+                for time_format in ("%I:%M%p", "%I:%M:%S%p", "%H:%M", "%H:%M:%S"):
+                    try:
+                        return datetime.strptime(value, f"{date_format} {time_format}").astimezone()
+                    except ValueError:
+                        pass
+    return None
+
+
+def is_tradeup_history_event(event: dict[str, Any]) -> bool:
+    inputs, outputs = event.get("inputs") or [], event.get("outputs") or []
+    if len(inputs) not in (5, 10) or len(outputs) != 1:
+        return False
+    if any(not isinstance(item, dict) or str(item.get("appid") or STEAM_APP_ID) != str(STEAM_APP_ID) for item in [*inputs, *outputs]):
+        return False
+    return event.get("event_type") == "tradeup" or bool(
+        re.search(r"\b(?:crafted|trade[ -]?up)\b|合成|汰换", str(event.get("text") or ""), re.I)
+    )
 
 
 class SteamInventoryHistoryError(RuntimeError):
@@ -73,6 +116,9 @@ def _description_index(value: object) -> dict[tuple[str, str, str], dict[str, An
 
 
 def _economy_identity(raw: str) -> tuple[str, str, str] | None:
+    class_info = re.search(r"classinfo/(\d+)/(\d+)/(\d+)", str(raw or ""))
+    if class_info:
+        return class_info.group(1), class_info.group(2), class_info.group(3)
     numbers = re.findall(r"\d+", str(raw or ""))
     if len(numbers) < 2:
         return None
@@ -93,18 +139,28 @@ class _HistoryHtmlParser(HTMLParser):
         self._row: dict[str, Any] | None = None
         self._sign = ""
         self._sign_depth = -1
+        self._time_depth = -1
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr = {key: str(value or "") for key, value in attrs}
         classes = set(attr.get("class", "").split())
         if self._row is None and "tradehistoryrow" in classes:
-            self._row = {"text": [], "inputs": [], "outputs": []}
+            self._row = {"text": [], "inputs": [], "outputs": [], "time_text": [],
+                         "event_id": attr.get("data-eventid") or attr.get("data-tradeid") or ""}
+            self._row["timestamp"] = attr.get("data-timestamp") or attr.get("data-time") or ""
             self._depth = 1
             return
         if self._row is None:
             return
         if tag not in _VOID_TAGS:
             self._depth += 1
+        for key in ("data-timestamp", "data-time", "datetime"):
+            if attr.get(key):
+                self._row["timestamp"] = attr[key]
+        if any("date" in name or "time" in name for name in classes) or tag == "time":
+            self._time_depth = self._depth
+            if attr.get("title"):
+                self._row["time_text"].append(attr["title"])
         if "tradehistory_items_plusminus" in classes:
             self._sign_depth = self._depth
         economy_raw = attr.get("data-economy-item", "")
@@ -127,6 +183,8 @@ class _HistoryHtmlParser(HTMLParser):
                 description.setdefault("instanceid", identity[2])
             description.setdefault("name", attr.get("title", ""))
             description["history_element_id"] = attr.get("id", "")
+            if attr.get("data-assetid"):
+                description["assetid"] = attr["data-assetid"]
             target = "outputs" if self._sign == "+" else "inputs" if self._sign == "-" else ""
             if target:
                 self._row[target].append(description)
@@ -141,6 +199,8 @@ class _HistoryHtmlParser(HTMLParser):
         if not text:
             return
         self._row["text"].append(text)
+        if self._time_depth >= 0:
+            self._row["time_text"].append(text)
         if self._sign_depth >= 0 and text in {"+", "-", "＋", "－"}:
             self._sign = "+" if text in {"+", "＋"} else "-"
 
@@ -149,13 +209,18 @@ class _HistoryHtmlParser(HTMLParser):
             return
         if self._sign_depth == self._depth:
             self._sign_depth = -1
+        if self._time_depth == self._depth:
+            self._time_depth = -1
         self._depth -= 1
         if self._depth > 0:
             return
         row = self._row
         row["text"] = " ".join(row["text"])
-        if row["inputs"] and row["outputs"]:
-            self.rows.append(row)
+        row["time_text"] = [" ".join(row["time_text"])]
+        when = history_event_datetime(row)
+        if when is not None:
+            row["completed_at"] = when.isoformat()
+        self.rows.append(row)
         self._row = None
         self._sign = ""
         self._sign_depth = -1
@@ -166,14 +231,15 @@ def parse_steam_inventory_history_page(payload: dict[str, Any]) -> list[dict[str
     parser.feed(str(payload.get("html") or ""))
     return [
         row for row in parser.rows
-        if len(row.get("inputs") or []) in (5, 10) and len(row.get("outputs") or []) >= 1
+        if is_tradeup_history_event(row)
     ]
 
 
 def fetch_steam_tradeup_history(
     profile_id: str,
     *,
-    max_pages: int = 10,
+    max_pages: int = 100,
+    since: datetime | None = None,
     on_status: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch Crafted rows through the same browser session used by inventory.
@@ -268,6 +334,12 @@ def fetch_steam_tradeup_history(
                                 str(error or "Steam 库存历史暂时无响应，请稍后重试")
                             )
                         events.extend(parse_steam_inventory_history_page(payload))
+                        if since is not None:
+                            page_parser = _HistoryHtmlParser({})
+                            page_parser.feed(str(payload.get("html") or ""))
+                            times = [when for row in page_parser.rows if (when := history_event_datetime(row)) is not None]
+                            if times and min(times) <= since.astimezone():
+                                break
                         next_cursor = payload.get("cursor")
                         if (
                             not isinstance(next_cursor, dict)
@@ -277,6 +349,8 @@ def fetch_steam_tradeup_history(
                             break
                         cursor = next_cursor
                         page.wait_for_timeout(250)
+                    else:
+                        raise SteamInventoryHistoryError("库存历史尚未读取到所选起始日期，请缩小日期范围后重试")
                     return events
                 finally:
                     if context is not None:

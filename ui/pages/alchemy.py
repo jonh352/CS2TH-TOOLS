@@ -87,9 +87,6 @@ from core.alchemy_calc import select_recipe_display_results
 from core.purchase_tracking import load_profile_inventory_items
 from core.purchase_batches import (
     add_recipe_to_purchase_batch,
-    create_purchase_batch,
-    list_purchase_batches,
-    purchase_batch_summary,
 )
 from core.saved_recipes import (
     SUBSTRATE_ALCHEMY_META_EXCLUDED_KEY,
@@ -110,7 +107,6 @@ REQUIRED_KEYS = frozenset({"float_value", "goods_id", "goods_name", "platform", 
 
 # 与 CollapsibleGroup 中「库存」组标签一致；用于合并导入时识别非库存行
 _INVENTORY_PLATFORMS = frozenset({"inventory", "steam_inventory"})
-_NEW_PURCHASE_BATCH_LABEL = "＋ 新建采购批次"
 logger = logging.getLogger(__name__)
 
 
@@ -480,7 +476,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         step3_layout.setContentsMargins(0, 0, 0, 0)
         step3_layout.setSpacing(16)
         step3_top = QHBoxLayout()
-        step3_top.setSpacing(12)
+        step3_top.setSpacing(8)
         self._step3_title_icon = QLabel(self)
         self._step3_title_icon.setObjectName("contentPageTitleIcon")
         self._step3_title_icon.setFixedSize(28, 28)
@@ -495,7 +491,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         _min_be_layout = QHBoxLayout(self._step3_min_be_row)
         _min_be_layout.setContentsMargins(0, 0, 0, 0)
         _min_be_layout.setSpacing(6)
-        self.step3_min_be_label = QLabel("最低保本率")
+        self.step3_min_be_label = QLabel("保本率")
         self.step3_min_be_label.setObjectName("alchemyStep2NormLabel")
         self.step3_min_be_spin = QSpinBox(self._step3_min_be_row)
         self.step3_min_be_spin.setObjectName("alchemyStep2NormSpin")
@@ -504,12 +500,13 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_min_be_spin.setSuffix("%")
         _min_be_fm = QFontMetrics(self.step3_min_be_spin.font())
         self.step3_min_be_spin.setFixedWidth(
-            12 + 12 + 34 + _min_be_fm.horizontalAdvance("100%") + 10
+            32 + _min_be_fm.horizontalAdvance("100%")
         )
+        self.step3_min_be_spin.setStyleSheet("padding: 0 4px;")
         self.step3_min_be_spin.setToolTip(
             "仅搜索保本率不低于该值的配方"
         )
-        self.step3_max_be_label = QLabel("最高保本率")
+        self.step3_max_be_label = QLabel("-")
         self.step3_max_be_label.setObjectName("alchemyStep2NormLabel")
         self.step3_max_be_spin = QSpinBox(self._step3_min_be_row)
         self.step3_max_be_spin.setObjectName("alchemyStep2NormSpin")
@@ -517,8 +514,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_max_be_spin.setValue(100)
         self.step3_max_be_spin.setSuffix("%")
         self.step3_max_be_spin.setFixedWidth(
-            12 + 12 + 34 + _min_be_fm.horizontalAdvance("100%") + 10
+            32 + _min_be_fm.horizontalAdvance("100%")
         )
+        self.step3_max_be_spin.setStyleSheet("padding: 0 4px;")
         self.step3_max_be_spin.setToolTip(
             "仅搜索保本率不高于该值的配方"
         )
@@ -527,27 +525,26 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         _min_be_layout.addWidget(self.step3_max_be_label, 0, Qt.AlignVCenter)
         _min_be_layout.addWidget(self.step3_max_be_spin, 0, Qt.AlignVCenter)
         step3_top.addWidget(self._step3_min_be_row, 0, Qt.AlignVCenter)
-        self._step3_recipe_overlap_row = QWidget()
-        self._step3_recipe_overlap_row.setObjectName("alchemyStep3RecipeOverlapRow")
-        _overlap_layout = QHBoxLayout(self._step3_recipe_overlap_row)
-        _overlap_layout.setContentsMargins(0, 0, 0, 0)
-        _overlap_layout.setSpacing(0)
         self.step3_no_overlap_check = QCheckBox("配方材料不重复")
-        self.step3_no_overlap_check.setToolTip(
-            "勾选后每件材料最多进入一个配方；程序选出当前最高期望配方后扣除其材料，"
-            "再用剩余材料继续计算。例如100件军规级材料最多生成10个十合一配方。"
-            "计算时长较长，请谨慎勾选。"
-        )
-        self.step3_no_overlap_check.setObjectName("alchemyNoOverlapCheck")
-        self.step3_no_overlap_check.setChecked(False)
-        self.step3_no_overlap_check.setCursor(Qt.PointingHandCursor)
-        self.step3_no_overlap_check.toggled.connect(self._on_no_overlap_toggled)
-        _overlap_layout.addWidget(
-            self.step3_no_overlap_check,
-            0,
-            Qt.AlignVCenter,
-        )
-        step3_top.addWidget(self._step3_recipe_overlap_row, 0, Qt.AlignVCenter)
+        self.step3_no_overlap_check.setToolTip("每件材料只用于一个配方；启用前需确认")
+        self.step3_no_overlap_check.clicked.connect(self._on_no_overlap_clicked)
+        step3_top.addWidget(self.step3_no_overlap_check, 0, Qt.AlignVCenter)
+        result_options = QHBoxLayout()
+        result_options.setSpacing(8)
+        result_options.addWidget(QLabel("展示数"))
+        self.step3_result_limit_spin = QSpinBox()
+        self.step3_result_limit_spin.setRange(1, 10000)
+        self.step3_result_limit_spin.setValue(20)
+        self.step3_result_limit_spin.setToolTip("最多展示指定条数；不足时展示全部结果")
+        self.step3_result_limit_spin.setFixedWidth(76)
+        result_options.addWidget(self.step3_result_limit_spin)
+        result_options.addWidget(QLabel("排序"))
+        self.step3_result_sort_combo = QComboBox()
+        self.step3_result_sort_combo.addItem("配方品级 + 收益率", "rate")
+        self.step3_result_sort_combo.addItem("配方品级 + 保本率", "break_even_rate")
+        result_options.addWidget(self.step3_result_sort_combo)
+        step3_top.addLayout(result_options)
+
         step3_top.addStretch(1)
         self._step3_save_location_row = QWidget()
         self._step3_save_location_row.setObjectName("alchemyStep3SaveLocationRow")
@@ -555,7 +552,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         _sl_top = QHBoxLayout(self._step3_save_location_row)
         _sl_top.setContentsMargins(0, 0, 0, 0)
         _sl_top.setSpacing(12)
-        self._step3_save_mode_label = QLabel("配方保存位置")
+        self._step3_save_mode_label = QLabel("保存位置")
         self._step3_save_mode_label.setObjectName("alchemyStep1Hint")
         _sl_top.addWidget(self._step3_save_mode_label, 0, Qt.AlignVCenter)
         self._step3_save_tooltip_row = QWidget()
@@ -602,22 +599,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step3_calc_btn.clicked.connect(self._on_step3_calc_action_clicked)
         step3_top.addWidget(self.step3_calc_btn, 0, Qt.AlignVCenter)
         step3_layout.addLayout(step3_top)
-        result_options = QHBoxLayout()
-        result_options.setSpacing(8)
-        result_options.addWidget(QLabel("展示配方数"))
-        self.step3_result_limit_spin = QSpinBox()
-        self.step3_result_limit_spin.setRange(1, 10000)
-        self.step3_result_limit_spin.setValue(20)
-        self.step3_result_limit_spin.setToolTip("最多展示指定条数；不足时展示全部结果")
-        result_options.addWidget(self.step3_result_limit_spin)
-        result_options.addWidget(QLabel("计算排序"))
-        self.step3_result_sort_combo = QComboBox()
-        self.step3_result_sort_combo.addItem("配方品级 + 收益率", "rate")
-        self.step3_result_sort_combo.addItem("配方品级 + 保本率", "break_even_rate")
-        result_options.addWidget(self.step3_result_sort_combo)
-        result_options.addStretch(1)
-        step3_layout.addLayout(result_options)
-
         self.step3_progress_container = QWidget()
         self.step3_progress_container.setVisible(False)
         progress_outer = QVBoxLayout(self.step3_progress_container)
@@ -759,7 +740,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 "mode": self.get_step2_mode(),
                 "norm_target": nt,
                 "special_rounds": sr,
-                "non_overlapping_recipes": self.step3_no_overlap_check.isChecked(),
                 "result_display_limit": self.step3_result_limit_spin.value(),
                 "result_sort_mode": self.step3_result_sort_combo.currentData(),
             }
@@ -783,10 +763,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self.step2_mode_target_btn.setChecked(mode == "target")
         self.step2_mode_special_btn.setChecked(mode == "special_wear")
         self.step2_mode_container.sync_mode_slider(animate=False)
-        non_overlapping = bool(d.get("non_overlapping_recipes", False))
-        self.step3_no_overlap_check.blockSignals(True)
-        self.step3_no_overlap_check.setChecked(non_overlapping)
-        self.step3_no_overlap_check.blockSignals(False)
         self._step2_update_norm_row_visibility()
 
         def _norm_f(key: str, default: float) -> float:
@@ -819,11 +795,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         except (TypeError, ValueError):
             r = ALCHEMY_SPECIAL_WEAR_DEFAULT_ROUNDS
         self.step2_special_rounds_spin.setValue(max(1, min(50, r)))
-
-    def _on_no_overlap_toggled(self, checked: bool) -> None:
-        if checked:
-            show_alert(self, "提示", "计算时长较长, 谨慎勾选")
-        self.save_step2_wear_prefs_for_exit()
 
     def showEvent(self, event: QShowEvent):
         super().showEvent(event)
@@ -1060,11 +1031,23 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         """计算设置 - 上一步，返回磨损设置"""
         self.step_stack.setCurrentIndex(1)
 
+    def _sync_no_overlap_availability(self) -> None:
+        self.step3_no_overlap_check.setEnabled(not self._step3_calc_running)
+
+    def _on_no_overlap_clicked(self, checked: bool) -> None:
+        if not checked:
+            return
+        if not ask_confirmation(
+            self, "启用配方材料不重复",
+            "每件材料只用于一个配方。程序会扣除已选配方的材料，再用剩余材料继续计算，耗时会明显增加。\n是否启用？",
+        ):
+            self.step3_no_overlap_check.setChecked(False)
+
     def _step3_set_calc_button_idle(self) -> None:
         self._step3_calc_running = False
+        self._sync_no_overlap_availability()
         self.step3_calc_btn.setText("开始计算")
         self.step3_calc_btn.setEnabled(True)
-        self.step3_no_overlap_check.setEnabled(True)
         self._step3_set_calc_btn_stopping(False)
 
     def _step3_set_calc_btn_stopping(self, stopping: bool) -> None:
@@ -1079,6 +1062,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         self._special_wear_runner = None
         self._fetch_worker = None
         self._step3_calc_running = False
+        self._sync_no_overlap_availability()
         self.step3_progress_container.setVisible(False)
         self.step3_progress_bar.setVisible(True)
         self.step3_progress_bar.setRange(0, 100)
@@ -1091,7 +1075,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         )
         self.step3_calc_btn.setText("开始计算")
         self.step3_calc_btn.setEnabled(True)
-        self.step3_no_overlap_check.setEnabled(True)
         self._step3_set_calc_btn_stopping(False)
         show_toast(self, "计算已中断", style="info")
 
@@ -1123,14 +1106,14 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
                 self,
                 "重新计算",
                 "当前配方购买链接均已查看。\n"
-                "除非材料已全部排除且已加入采购批次，否则重新计算将清空现有结果。\n"
+                "除非材料已全部排除且已加入采购，否则重新计算将清空现有结果。\n"
                 "是否继续？",
             ):
                 return
 
         self._step3_calc_running = True
-        self.step3_calc_btn.setText("停止计算")
         self.step3_no_overlap_check.setEnabled(False)
+        self.step3_calc_btn.setText("停止计算")
         self._step3_set_calc_btn_stopping(True)
         show_toast(self, "正在加载产物价格...", style="info")
 
@@ -1251,7 +1234,6 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
             show_alert(self, "计算完成", f"{msg}\n\n{elapsed_str}")
             return
 
-        total_recipes = len(recipes)
         recipes = select_recipe_display_results(
             recipes,
             self.step3_result_limit_spin.value(),
@@ -1294,7 +1276,7 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
 
         show_toast(
             self,
-            f"计算完成，共 {total_recipes} 个配方，展示 {len(recipes)} 条，{elapsed_str}",
+            f"计算完成，{elapsed_str}",
             style="success",
         )
 
@@ -1362,87 +1344,9 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         except OSError as e:
             show_toast(self, f"保存失败：{e}", style="error")
 
-    def _create_purchase_batch_path(self) -> Path | None:
-        accounts = [
-            entry for entry in list_profile_entries() if str(entry.get("id") or "")
-        ]
-        if not accounts:
-            show_toast(self, "请先在 Steam 库存添加收货账号", style="warning")
-            return None
-        if not ask_confirmation(
-            self,
-            "创建采购批次",
-            "创建时会把该账号当前本地库存记为基线。请确认已经在 Steam 库存页刷新过该账号库存。",
-        ):
-            return None
-        default_name = datetime.now().strftime("采购批次 %Y-%m-%d %H:%M")
-        name, accepted = get_wide_text_input(
-            self,
-            title="新建采购批次",
-            label="批次名称：",
-            value=default_name,
-        )
-        if not accepted or not name.strip():
-            return None
-        account_labels = [combo_display_name_for_profile(entry) for entry in accounts]
-        active_id = get_active_profile_id()
-        current = next(
-            (
-                index
-                for index, entry in enumerate(accounts)
-                if str(entry.get("id") or "") == active_id
-            ),
-            0,
-        )
-        account_label, accepted = QInputDialog.getItem(
-            self,
-            "选择收货账号",
-            "Steam 收货账号：",
-            account_labels,
-            current,
-            False,
-        )
-        if not accepted:
-            return None
-        entry = accounts[account_labels.index(account_label)]
-        profile_id = str(entry.get("id") or "")
-        cfg = load_steam_account_config_dict(profile_id)
-        try:
-            return create_purchase_batch(
-                name,
-                profile_id=profile_id,
-                steam_id=str(cfg.get("steam_id") or ""),
-                account_name=account_label,
-                inventory_items=load_profile_inventory_items(profile_id),
-            )
-        except (OSError, ValueError) as exc:
-            show_toast(self, f"采购批次创建失败：{exc}", style="warning")
-            return None
-
     def _choose_purchase_batch_path(self):
-        batches = list_purchase_batches()
-        labels: list[str] = []
-        for _path, batch in batches:
-            summary = purchase_batch_summary(batch)
-            labels.append(
-                f"{batch.get('name') or '未命名批次'} · "
-                f"{batch.get('account_name') or 'Steam'} · "
-                f"{summary['recipes']}配方/{summary['total']}件"
-            )
-        labels.append(_NEW_PURCHASE_BATCH_LABEL)
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "加入采购批次",
-            "选择目标批次：",
-            labels,
-            0,
-            False,
-        )
-        if not accepted:
-            return None
-        if selected == _NEW_PURCHASE_BATCH_LABEL:
-            return self._create_purchase_batch_path()
-        return batches[labels.index(selected)][0]
+        from ui.dialogs.daily_purchase import choose_daily_purchase
+        return choose_daily_purchase(self)
 
     def _alchemy_purchase_title(self, rank: int, recipe: dict) -> str:
         wear = float(recipe.get("avg_nfv") or 0)
@@ -1474,13 +1378,13 @@ class AlchemyPage(AlchemyModeMixin, QWidget):
         try:
             self._add_alchemy_recipe_to_batch(path, rank, recipe)
         except (OSError, ValueError) as exc:
-            show_toast(self, f"加入采购批次失败：{exc}", style="warning")
+            show_toast(self, f"加入采购失败：{exc}", style="warning")
             return
         for group in self._step3_recipe_groups:
             if getattr(group, "_rank", None) == rank:
                 group.mark_added_to_purchase_batch()
                 break
-        show_toast(self, "配方已加入采购批次", style="success")
+        show_toast(self, "配方已加入采购", style="success")
 
     def _on_clear_file(self):
         """清除所有已加载的数据"""

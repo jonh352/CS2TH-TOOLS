@@ -7,6 +7,7 @@ styles and keeps theme changes inexpensive and visually consistent.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -1040,7 +1041,7 @@ QLabel#purchaseBatchProductSummary {{
   padding: 8px 10px;
   font-weight: 700;
 }}
-QPushButton#purchaseBatchReconcileBtn {{
+QPushButton#purchaseBatchReconcileBtn, QPushButton#purchaseDayReconcileBtn {{
   min-height: 40px;
   max-height: 40px;
   color: #FFFFFF;
@@ -1048,18 +1049,18 @@ QPushButton#purchaseBatchReconcileBtn {{
   border-color: #16A34A;
   font-weight: 800;
 }}
-QPushButton#purchaseBatchReconcileBtn:hover {{
+QPushButton#purchaseBatchReconcileBtn:hover, QPushButton#purchaseDayReconcileBtn:hover {{
   color: #FFFFFF;
   background: #15803D;
   border-color: #15803D;
 }}
-QPushButton#purchaseBatchReconcileBtn:pressed {{
+QPushButton#purchaseBatchReconcileBtn:pressed, QPushButton#purchaseDayReconcileBtn:pressed {{
   color: #FFFFFF;
   background: #166534;
   border-color: #166534;
   padding-top: 1px;
 }}
-QPushButton#purchaseBatchViewMaterialsBtn {{
+QPushButton#purchaseBatchViewMaterialsBtn, QPushButton#purchaseDayViewBtn {{
   min-height: 40px;
   max-height: 40px;
   color: {primary_text};
@@ -1070,11 +1071,11 @@ QPushButton#purchaseBatchViewMaterialsBtn {{
   border-color: {cyan};
   font-weight: 800;
 }}
-QPushButton#purchaseBatchViewMaterialsBtn:hover {{
+QPushButton#purchaseBatchViewMaterialsBtn:hover, QPushButton#purchaseDayViewBtn:hover {{
   color: {primary_text};
   border-color: {cyan_hover};
 }}
-QPushButton#purchaseBatchViewMaterialsBtn:pressed {{
+QPushButton#purchaseBatchViewMaterialsBtn:pressed, QPushButton#purchaseDayViewBtn:pressed {{
   color: {primary_text};
   border-color: {cyan_hover};
   padding-top: 1px;
@@ -1147,6 +1148,15 @@ QPushButton#alchemySegmentLeft:checked, QPushButton#alchemySegmentMiddle:checked
 QPushButton#alchemySegmentRight:checked {{
   color: {cyan};
   background: transparent;
+}}
+
+QPushButton#recipeSimImportBtn[favorite="true"] {{
+  color: #16a34a;
+  background: white;
+}}
+QPushButton#recipeSimImportBtn[favorite="true"]:hover {{
+  color: #15803d;
+  background: white;
 }}
 
 /* ---------- Inputs ---------- */
@@ -1404,6 +1414,20 @@ QLabel#alchemySimulationResultProb {{
 QFrame#alchemySimulationResultsDivider {{
   background: {border_strong};
   border: 0;
+}}
+QPushButton#purchaseDayHeading {{
+  color: {cyan};
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+  padding: 0;
+  border: none;
+  background: transparent;
+}}
+QLabel#purchaseDayAccountSummary {{
+  color: {blue};
+  font-size: 14px;
+  font-weight: 700;
 }}
 QLabel#recipeSavedTitle {{
   color: {cyan};
@@ -1810,6 +1834,9 @@ QMessageBox {{
 def apply_theme(app: QApplication | None, name: str) -> None:
     if app is None:
         return
+    # Avoid Qt's temporary top-level animation windows while showing tooltips.
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, False)
     colors = PALETTES.get(name, PALETTES["dark"])
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(colors["bg"]))

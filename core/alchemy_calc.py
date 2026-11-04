@@ -1,7 +1,7 @@
 """炼金计算核心 - 产物价格（分 paint_index）、均价期望、Dinkelbach、配方汇总与保本率"""
 
-import bisect
 from collections import Counter
+import bisect
 import json
 import logging
 import math
@@ -1548,35 +1548,17 @@ def remove_recipe_substrates_from_rows(
     return remaining
 
 
-def highest_expectation_recipe(recipes: list[dict]) -> dict | None:
-    """Pick the recipe that owns its materials in non-overlapping mode."""
-    if not recipes:
-        return None
-    return min(
-        enumerate(recipes),
-        key=lambda pair: (
-            -float(pair[1].get("expectation") or 0.0),
-            -float(pair[1].get("rate") or 0.0),
-            float(pair[1].get("cost") or 0.0),
-            pair[0],
-        ),
-    )[1]
+def best_ranked_recipe(recipes: list[dict], sort_mode: str = "rate") -> dict | None:
+    """Choose the next recipe using the same ranking as the result list."""
+    return select_recipe_display_results(recipes, 1, sort_mode)[0] if recipes else None
 
 
-def filter_non_overlapping_recipes(recipes: list[dict]) -> list[dict]:
-    """按期望值从高到低保留配方，保证任何底物最多出现在一条结果中。"""
-    ordered = sorted(
-        enumerate(recipes),
-        key=lambda pair: (
-            -float(pair[1].get("expectation") or 0.0),
-            -float(pair[1].get("rate") or 0.0),
-            float(pair[1].get("cost") or 0.0),
-            pair[0],
-        ),
-    )
+def filter_non_overlapping_recipes(recipes: list[dict], sort_mode: str = "rate") -> list[dict]:
+    """按所选指标保留配方，保证任何底物最多出现在一条结果中。"""
+    ordered = select_recipe_display_results(recipes, len(recipes), sort_mode)
     used_substrates: set[tuple[str, str, str]] = set()
     selected: list[dict] = []
-    for _original_index, recipe in ordered:
+    for recipe in ordered:
         identities = {
             identity
             for substrate in recipe.get("substrates_display") or []

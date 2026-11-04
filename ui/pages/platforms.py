@@ -55,8 +55,6 @@ from core.recipe_bridge import material_wear_range, saved_recipe_to_bridge_paylo
 from core.saved_recipes import list_saved_recipes
 from core.purchase_batches import (
     add_recipe_to_purchase_batch,
-    list_purchase_batches,
-    purchase_batch_summary,
 )
 from ui.dialogs.pick_saved_recipe_dialog import pick_saved_recipe
 from core.json_store import read_json_dict, write_json
@@ -618,7 +616,7 @@ class PlatformPage(QWidget):
         results_heading = QHBoxLayout()
         results_heading.addWidget(self.special_results_title)
         results_heading.addStretch(1)
-        self.special_add_all_to_batch_button = QPushButton("全部加入采购批次")
+        self.special_add_all_to_batch_button = QPushButton("全部加入采购")
         self.special_add_all_to_batch_button.setObjectName("primaryButton")
         self.special_add_all_to_batch_button.clicked.connect(
             self._add_all_special_solutions_to_purchase_batch
@@ -1775,6 +1773,7 @@ class PlatformPage(QWidget):
         self.special_add_all_to_batch_button.hide()
         _clear_layout(self.special_results_layout)
         worker = SpecialCollectionWorker(
+            max_rows_per_wear_window=150 if self.include_alternatives.isChecked() else 300,
             materials=materials,
             providers=providers,
             provider_intervals={
@@ -1948,9 +1947,9 @@ class PlatformPage(QWidget):
                 value
             )
         )
-        add_to_batch = QPushButton("加入采购批次")
+        add_to_batch = QPushButton("加入采购")
         add_to_batch.setObjectName("primaryButton")
-        add_to_batch.setToolTip("将本方案直接加入独立采购批次，不保存到“已保存配方”")
+        add_to_batch.setToolTip("将本方案直接加入当天采购记录，不保存到“已保存配方”")
         add_to_batch.clicked.connect(
             lambda _=False, value=dict(recipe): self._add_special_solution_to_purchase_batch(
                 value
@@ -2034,39 +2033,13 @@ class PlatformPage(QWidget):
                 title=f"{target_name} · {output:.7f}",
             )
         except (OSError, ValueError) as exc:
-            show_toast(self, f"加入采购批次失败：{exc}", style="warning")
+            show_toast(self, f"加入采购失败：{exc}", style="warning")
             return
-        show_toast(self, "方案已加入采购批次", style="success")
+        show_toast(self, "方案已加入采购", style="success")
 
     def _choose_purchase_batch_path(self):
-        batches = list_purchase_batches()
-        if not batches:
-            show_toast(
-                self,
-                "请先到“配方管理 → 采购批次”新建批次",
-                style="warning",
-            )
-            return None
-        labels: list[str] = []
-        for _path, batch in batches:
-            summary = purchase_batch_summary(batch)
-            labels.append(
-                f"{batch.get('name') or '未命名批次'} · "
-                f"{batch.get('account_name') or 'Steam'} · "
-                f"{summary['recipes']}配方/{summary['total']}件"
-            )
-        selected, accepted = QInputDialog.getItem(
-            self,
-            "加入采购批次",
-            "选择目标批次：",
-            labels,
-            0,
-            False,
-        )
-        if not accepted:
-            return None
-        index = labels.index(selected)
-        return batches[index][0]
+        from ui.dialogs.daily_purchase import choose_daily_purchase
+        return choose_daily_purchase(self)
 
     def _add_all_special_solutions_to_purchase_batch(self) -> None:
         if not self._special_solution_recipes:
@@ -2088,9 +2061,9 @@ class PlatformPage(QWidget):
                 continue
             added += 1
         if added:
-            show_toast(self, f"已将 {added} 个方案加入采购批次", style="success")
+            show_toast(self, f"已将 {added} 个方案加入采购", style="success")
         else:
-            show_toast(self, "没有方案成功加入采购批次", style="warning")
+            show_toast(self, "没有方案成功加入采购", style="warning")
 
     def _choose_saved_recipe(self) -> None:
         entries = list_saved_recipes()
@@ -2475,6 +2448,7 @@ class PlatformPage(QWidget):
                 total=max(1, len(materials) * len(exact_platforms)),
             )
             worker = MaterialCollectionWorker(
+                max_rows_per_wear_window=150 if self.include_alternatives.isChecked() else 300,
                 materials=materials,
                 providers=exact_platforms,
                 provider_intervals={

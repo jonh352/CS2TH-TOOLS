@@ -9,6 +9,7 @@ from PySide6.QtCore import QCoreApplication
 from ui.workers.alchemy_workers import (
     _CalcPoolThread,
     _build_non_overlapping_group_recipes,
+    SpecialWearCalcWorker,
 )
 from ui.pages.alchemy_modes import AlchemyModeMixin
 
@@ -56,7 +57,7 @@ class AlchemyWorkerTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._app = QCoreApplication.instance() or QCoreApplication([])
 
-    def _run_target(self, non_overlapping_recipes: bool) -> list[dict]:
+    def _run_target(self) -> list[dict]:
         emitted: list[tuple[list[dict], object]] = []
         rows = _rows(10)
         worker = _CalcPoolThread(
@@ -65,7 +66,6 @@ class AlchemyWorkerTests(unittest.TestCase):
             norm_min=0.5,
             norm_max=0.5,
             mode="target",
-            non_overlapping_recipes=non_overlapping_recipes,
         )
         worker.task_finished.connect(
             lambda recipes, error: emitted.append((recipes, error))
@@ -85,9 +85,56 @@ class AlchemyWorkerTests(unittest.TestCase):
         self.assertIsNone(emitted[0][1])
         return emitted[0][0]
 
-    def test_non_overlapping_switch_controls_result_filter(self) -> None:
-        self.assertEqual(len(self._run_target(non_overlapping_recipes=True)), 1)
-        self.assertEqual(len(self._run_target(non_overlapping_recipes=False)), 2)
+    def test_target_returns_overlapping_recipes_without_resolving(self) -> None:
+        self.assertEqual(len(self._run_target()), 2)
+
+    def test_non_overlapping_hundred_items_make_ten_disjoint_recipes(self) -> None:
+        rows = _rows(100)
+        with patch("ui.workers.alchemy_workers.compute_recipes",
+                   side_effect=lambda remaining, *_a, **_k: ([_recipe(remaining[:10], 100)], None)):
+            recipes = _build_non_overlapping_group_recipes(
+                rows=rows, initial_recipes=[_recipe(rows[:10], 100)], k=10,
+                price_map={}, norm_min=0, norm_max=1, mode="target", timeout=30,
+                min_break_even_rate=0, max_break_even_rate=1, cancel_check=lambda: False,
+            )
+        used = [s["float_value"] for r in recipes for s in r["substrates_display"]]
+        self.assertEqual(len(recipes), 10)
+        self.assertEqual(len(set(used)), 100)
+
+    def test_non_overlapping_keeps_profitable_recipe_before_expensive_loss(self) -> None:
+        from core.alchemy_calc import filter_non_overlapping_recipes
+        rows = _rows(20)
+        profitable = _recipe(rows[:10], 564.80)
+        profitable.update(cost=523.38, rate=564.80 / 523.38 - 1, break_even_rate=0.2)
+        expensive = _recipe(rows[:5] + rows[10:15], 959.74)
+        expensive.update(cost=1269.85, rate=959.74 / 1269.85 - 1, break_even_rate=0.1)
+        with patch("ui.workers.alchemy_workers.compute_recipes", return_value=([], None)):
+            selected = _build_non_overlapping_group_recipes(
+                rows=rows, initial_recipes=[expensive, profitable], k=10,
+                price_map={}, norm_min=0, norm_max=1, mode="target", timeout=30,
+                min_break_even_rate=0, max_break_even_rate=1, cancel_check=lambda: False,
+            )
+        self.assertEqual(selected, [profitable])
+        self.assertEqual(filter_non_overlapping_recipes([expensive, profitable]), [profitable])
+
+    def test_non_overlapping_selection_follows_chosen_sort_mode(self) -> None:
+        from core.alchemy_calc import best_ranked_recipe
+        rows = _rows(10)
+        higher_rate = dict(_recipe(rows, 100), rate=0.2, break_even_rate=0.3)
+        higher_break_even = dict(_recipe(rows, 200), rate=0.1, break_even_rate=0.8)
+        self.assertIs(best_ranked_recipe([higher_break_even, higher_rate]), higher_rate)
+        self.assertIs(best_ranked_recipe([higher_break_even, higher_rate], "break_even_rate"), higher_break_even)
+
+    def test_non_overlapping_workers_accept_more_than_hundred_items(self) -> None:
+        rows = _rows(101)
+        worker = _CalcPoolThread(rows, {}, 0, 1, "scan", non_overlapping_recipes=True)
+        with patch("ui.workers.alchemy_workers.partition_selected_data_by_tradeup_group", return_value=[]) as partition:
+            worker.run()
+        partition.assert_called_once()
+        worker = SpecialWearCalcWorker(rows, {}, "1", 0, 1, non_overlapping_recipes=True)
+        with patch("ui.workers.alchemy_workers.eligible_selected_data_for_target", return_value=[]) as eligible:
+            worker.run()
+        eligible.assert_called_once()
 
     def test_target_worker_forwards_break_even_range(self) -> None:
         rows = _rows(10)
@@ -99,7 +146,6 @@ class AlchemyWorkerTests(unittest.TestCase):
             mode="target",
             min_break_even_rate=0.25,
             max_break_even_rate=0.75,
-            non_overlapping_recipes=False,
         )
         with (
             patch(
@@ -134,38 +180,6 @@ class AlchemyWorkerTests(unittest.TestCase):
         self.assertEqual(page.step3_progress_bar.value, 99)
         self.assertEqual(page.step3_progress_label.value, "99%")
 
-    def test_one_hundred_military_items_make_ten_disjoint_recipes(self) -> None:
-        rows = _rows(100)
-
-        def solve(remaining, *_args, **_kwargs):
-            return ([_recipe(list(remaining)[:10], 1000 - len(remaining))], None)
-
-        with patch(
-            "ui.workers.alchemy_workers.compute_recipes",
-            side_effect=solve,
-        ):
-            recipes = _build_non_overlapping_group_recipes(
-                rows=rows,
-                initial_recipes=[_recipe(rows[:10], 900.0)],
-                k=10,
-                price_map={},
-                norm_min=0.5,
-                norm_max=0.5,
-                mode="target",
-                timeout=30,
-                min_break_even_rate=0,
-                max_break_even_rate=1,
-                cancel_check=lambda: False,
-            )
-
-        self.assertEqual(len(recipes), 10)
-        used = [
-            substrate["float_value"]
-            for recipe in recipes
-            for substrate in recipe["substrates_display"]
-        ]
-        self.assertEqual(len(used), 100)
-        self.assertEqual(len(set(used)), 100)
 
 
 if __name__ == "__main__":

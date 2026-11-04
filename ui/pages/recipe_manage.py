@@ -749,6 +749,7 @@ class _SavedRecipeRow(QWidget):
         self._title_row = title_row
         self._favorite_btn = QPushButton("★" if payload.get("favorite") else "☆", self)
         self._favorite_btn.setObjectName("recipeSimImportBtn")
+        self._favorite_btn.setProperty("favorite", bool(payload.get("favorite")))
         self._favorite_btn.setToolTip("取消收藏" if payload.get("favorite") else "收藏配方")
         self._favorite_btn.setCursor(Qt.PointingHandCursor)
         self._favorite_btn.clicked.connect(self._toggle_favorite)
@@ -869,6 +870,9 @@ class _SavedRecipeRow(QWidget):
         self._payload["favorite"] = favorite
         self._favorite_btn.setText("★" if favorite else "☆")
         self._favorite_btn.setToolTip("取消收藏" if favorite else "收藏配方")
+        self._favorite_btn.setProperty("favorite", favorite)
+        self._favorite_btn.style().unpolish(self._favorite_btn)
+        self._favorite_btn.style().polish(self._favorite_btn)
         page = self._recipe_manage_page()
         if page is not None and page._view_mode == "favorites":
             QTimer.singleShot(0, page._rebuild_recipe_rows)

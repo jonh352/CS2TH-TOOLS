@@ -15,7 +15,7 @@ _EXCLUDED_QT = [
     "PySide6.QtBluetooth", "PySide6.QtCharts", "PySide6.QtConcurrent",
     "PySide6.QtDBus", "PySide6.QtDataVisualization", "PySide6.QtDesigner",
     "PySide6.QtGraphs", "PySide6.QtHelp", "PySide6.QtHttpServer",
-    "PySide6.QtLocation", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets",
+    "PySide6.QtLocation", "PySide6.QtMultimediaWidgets",
     "PySide6.QtNetworkAuth", "PySide6.QtNfc", "PySide6.QtOpenGL",
     "PySide6.QtOpenGLWidgets", "PySide6.QtPdf", "PySide6.QtPdfWidgets",
     "PySide6.QtPositioning", "PySide6.QtPrintSupport", "PySide6.QtQml",
@@ -33,7 +33,7 @@ _EXCLUDED_MISC = [
     "matplotlib", "scipy", "pandas", "IPython", "notebook", "pytest",
 ]
 _QT_DLL_DENY = (
-    "qt63d", "qt6quick", "qt6qml", "qt6webengine", "qt6multimedia",
+    "qt63d", "qt6quick", "qt6qml", "qt6webengine",
     "qt6charts", "qt6datavisualization", "qt6bluetooth", "qt6sensors",
     "qt6positioning", "qt6pdf", "qt6designer", "qt6test", "qt6location",
     "qt6sql", "qt6xml", "qt6remoteobjects", "qt6serial", "qt6nfc",
@@ -51,17 +51,20 @@ def _norm(path: str) -> str:
 def _keep_binary(item) -> bool:
     name = _norm(item[0] if isinstance(item, (tuple, list)) else str(item))
     base = os.path.basename(name)
+    # Use Qt's native Schannel backend; keep Python's separate OpenSSL runtime.
+    if base in ("qopensslbackend.dll", "libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+        return False
     if base.startswith("_avif."):
         return False
     # Use Windows ICU/API sets, never incompatible copies found on build PATH.
-    if base in ("icuuc.dll", "icuin.dll", "icudt.dll") or base.startswith("api-ms-win-core-"):
+    if (base.startswith(("icuuc", "icuin", "icudt")) and base.endswith(".dll")) or base.startswith("api-ms-win-core-"):
         return False
     if any(tok in base for tok in _QT_DLL_DENY):
         return False
     if "/plugins/" in name and any(
         p in name
         for p in (
-            "/qmltooling/", "/geoservices/", "/multimedia/", "/sqldrivers/",
+            "/qmltooling/", "/geoservices/", "/sqldrivers/",
             "/sensorgestures/", "/position/", "/canbus/", "/designer/",
         )
     ):
@@ -71,6 +74,13 @@ def _keep_binary(item) -> bool:
 
 def _keep_data(item) -> bool:
     name = _norm(item[0] if isinstance(item, (tuple, list)) else str(item))
+    if name.startswith("assets/help/eco/") and name.endswith("-redacted.png"):
+        return False
+    if name.startswith("node_modules/"):
+        if name.endswith((".d.ts", ".map")) or "/readme" in name:
+            return False
+        if any(part in {"test", "tests", "example", "examples", "coverage", "docs"} for part in name.split("/")):
+            return False
     if "/translations/" in name or "/qml/" in name or "/metatypes/" in name:
         return False
     if name.endswith(".qmltypes"):

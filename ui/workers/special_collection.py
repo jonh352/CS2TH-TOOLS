@@ -28,9 +28,11 @@ class SpecialCollectionWorker(QThread):
         target_wear_low: float,
         target_wear_high: float,
         slot_count: int,
+        max_rows_per_wear_window: int = 300,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.max_rows_per_wear_window = max_rows_per_wear_window
         self.materials = [dict(item) for item in materials]
         self.providers = list(providers)
         self.provider_intervals = dict(provider_intervals)
@@ -76,6 +78,7 @@ class SpecialCollectionWorker(QThread):
             progress=self.progress.emit,
             cancel_check=self._is_scrape_stop_requested,
             unit_progress=self.progress_units.emit,
+            max_rows_per_wear_window=self.max_rows_per_wear_window,
         )
         scrape_stopped = self._is_scrape_stop_requested()
 

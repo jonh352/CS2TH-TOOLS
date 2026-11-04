@@ -36,7 +36,6 @@ from core.alchemy_calc import (
     compute_recipes,
     compute_tradeup_simulation_products,
     eligible_selected_data_for_target,
-    filter_non_overlapping_recipes,
     get_expectation_map,
     lookup_pid_price_at_nfv,
     lookup_template_price_value,
@@ -1286,7 +1285,13 @@ class MetadataTests(unittest.TestCase):
         session.close.assert_called()
 
     def test_youpin_stops_at_wear_window_row_limit(self) -> None:
-        from core.market_candidates import _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+        self._assert_youpin_window_limit(300)
+
+    def test_youpin_stops_at_150_rows_with_alternatives(self) -> None:
+        self._assert_youpin_window_limit(150)
+
+    def _assert_youpin_window_limit(self, row_limit: int) -> None:
+        from core.market_candidates import fetch_exact_wear_candidates
 
         template = get_name_map()["USP消音版 | 破颚者"]
         bare = SkinTemplate(
@@ -1312,7 +1317,7 @@ class MetadataTests(unittest.TestCase):
                 return self._payload
 
         page_size = 40
-        pages_needed = (_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW // page_size) + 2
+        pages_needed = (row_limit // page_size) + 2
 
         def make_page(page_index: int) -> FakeResponse:
             start = (page_index - 1) * page_size
@@ -1329,7 +1334,9 @@ class MetadataTests(unittest.TestCase):
             )
 
         responses = [make_page(i) for i in range(1, pages_needed + 1)]
-        with patch(
+        with patch("core.market_candidates.provider_auth_available", return_value=True), patch(
+            "core.market_candidates._candidate_cache", {}
+        ), patch(
             "core.market_candidates._youpin_auth",
             return_value=("tok", ""),
         ), patch(
@@ -1338,7 +1345,9 @@ class MetadataTests(unittest.TestCase):
             "core.market_candidates.requests.post",
             side_effect=responses,
         ) as youpin_post:
-            rows = fetch_youpin_candidates(
+            rows = fetch_exact_wear_candidates(
+                "yyyp",
+                max_rows_per_wear_window=row_limit,
                 template=bare,
                 display_name="USP消音版 | 破颚者",
                 min_wear=0.15,
@@ -1347,10 +1356,10 @@ class MetadataTests(unittest.TestCase):
                 request_interval=1,
                 extra_ids=[125007],
             )
-        self.assertEqual(len(rows), _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW)
+        self.assertEqual(len(rows), row_limit)
         self.assertLessEqual(
             youpin_post.call_count,
-            (_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW // page_size) + 1,
+            (row_limit // page_size) + 1,
         )
 
     def test_youpin_continues_when_first_page_outside_wear_window(self) -> None:
@@ -2563,48 +2572,6 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(
             neighboring_purchase_interval(0.11540335, min_float=0, max_float=1),
             (0.1, 0.18),
-        )
-
-    def test_recipe_results_keep_material_only_in_highest_expectation(self) -> None:
-        def substrate(platform: str, float_value: float) -> dict:
-            return {
-                "name": "AK-47 | 传承（崭新出厂）",
-                "float_value": float_value,
-                "platform": platform,
-            }
-
-        recipes = [
-            {
-                "expectation": 80.0,
-                "rate": 0.4,
-                "cost": 50.0,
-                "substrates_display": [substrate("steam", 0.03)],
-            },
-            {
-                "expectation": 90.0,
-                "rate": 0.8,
-                "cost": 50.0,
-                "substrates_display": [substrate("buff", 0.03)],
-            },
-            {
-                "expectation": 100.0,
-                "rate": 0.2,
-                "cost": 50.0,
-                "substrates_display": [substrate("buff", 0.03)],
-            },
-            {
-                "expectation": 70.0,
-                "rate": 0.1,
-                "cost": 50.0,
-                "substrates_display": [substrate("buff", 0.04)],
-            },
-        ]
-
-        selected = filter_non_overlapping_recipes(recipes)
-
-        self.assertEqual(
-            [recipe["expectation"] for recipe in selected],
-            [100.0, 80.0, 70.0],
         )
 
     def test_catalog_matches_cs2th_arabesque_collection(self) -> None:

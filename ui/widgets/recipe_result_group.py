@@ -272,11 +272,11 @@ class RecipeResultGroup(QFrame):
                 0,
                 Qt.AlignVCenter,
             )
-            self.add_to_purchase_batch_btn = QPushButton("加入采购批次")
+            self.add_to_purchase_batch_btn = QPushButton("加入采购")
             self.add_to_purchase_batch_btn.setObjectName("alchemySelectFileBtn")
             self.add_to_purchase_batch_btn.setCursor(Qt.PointingHandCursor)
             self.add_to_purchase_batch_btn.setToolTip(
-                "将此配方及全部材料直接加入采购批次"
+                "将此配方及全部材料直接加入采购"
             )
             self.add_to_purchase_batch_btn.clicked.connect(
                 self._on_add_to_purchase_batch_clicked

@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from decimal import Decimal
 from html.parser import HTMLParser
@@ -164,6 +165,7 @@ _COLLECTION_PRICE_CAP_MULTIPLIER = 2.0
 _COLLECTION_ECO_PRICE_CAP_MULTIPLIER = 2.5
 # Per platform · per material · per wear window (e.g. 略磨 / 久经).
 _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW = 300
+_collection_row_limit = ContextVar("collection_row_limit", default=_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW)
 # BUFF 429: retries after the first rate-limit response.
 _BUFF_RATE_LIMIT_RETRIES = 1
 # Used only when the 429 response has no Retry-After header.
@@ -263,7 +265,7 @@ c5_collection_wait_seconds = collection_jitter_wait_seconds
 
 
 def _collection_window_row_limit_reached(kept: int) -> bool:
-    return int(kept) >= _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+    return int(kept) >= _collection_row_limit.get()
 
 
 def _collection_max_unit_price(
@@ -2665,12 +2667,12 @@ def _fetch_c5_via_napi(
                     if float(row.get("price") or 0) <= price_cap
                 ]
                 hit_cap = len(kept) < len(rows)
-                room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                room = max(0, _collection_row_limit.get() - len(out))
                 out.extend(kept[:room])
                 if hit_cap and not kept:
                     break
             else:
-                room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                room = max(0, _collection_row_limit.get() - len(out))
                 out.extend(rows[:room])
             if _collection_window_row_limit_reached(len(out)):
                 break
@@ -2831,12 +2833,12 @@ def _fetch_c5_via_search_api(
                         if float(row.get("price") or 0) <= price_cap
                     ]
                     hit_cap = len(kept) < len(rows)
-                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    room = max(0, _collection_row_limit.get() - len(out))
                     out.extend(kept[:room])
                     if hit_cap and not kept:
                         break
                 else:
-                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    room = max(0, _collection_row_limit.get() - len(out))
                     out.extend(rows[:room])
                 if _collection_window_row_limit_reached(len(out)):
                     break
@@ -2915,12 +2917,12 @@ def _fetch_c5_via_browser(
                         if float(row.get("price") or 0) <= price_cap
                     ]
                     hit_cap = len(kept) < len(rows)
-                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    room = max(0, _collection_row_limit.get() - len(out))
                     out.extend(kept[:room])
                     if hit_cap and not kept:
                         break
                 else:
-                    room = max(0, _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW - len(out))
+                    room = max(0, _collection_row_limit.get() - len(out))
                     out.extend(rows[:room])
                 if _collection_window_row_limit_reached(len(out)):
                     break
@@ -3609,7 +3611,7 @@ def fetch_eco_candidates(
                     )
                     room = max(
                         0,
-                        _COLLECTION_MAX_ROWS_PER_WEAR_WINDOW
+                        _collection_row_limit.get()
                         - (len(collected) - window_start),
                     )
                     before = len(collected)
@@ -3673,6 +3675,20 @@ def fetch_eco_candidates(
 
 def fetch_exact_wear_candidates(
     provider: str,
+    *,
+    max_rows_per_wear_window: int = 300,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    # Keep the limit local to this request, including C5/ECO browser fallbacks.
+    token = _collection_row_limit.set(max_rows_per_wear_window)
+    try:
+        return _fetch_exact_wear_candidates(provider, **kwargs)
+    finally:
+        _collection_row_limit.reset(token)
+
+
+def _fetch_exact_wear_candidates(
+    provider: str,
     **kwargs: Any,
 ) -> list[dict[str, Any]]:
     cancel_check = kwargs.get("cancel_check")
@@ -3707,6 +3723,7 @@ def fetch_exact_wear_candidates(
         round(float(kwargs.get("min_wear") or 0), 8),
         round(float(kwargs.get("max_wear") or 1), 8),
         int(kwargs.get("max_pages") or 0),
+        _collection_row_limit.get(),
         tuple(extra_ids),
         round(float(price_cap), 4) if price_cap is not None else None,
     )

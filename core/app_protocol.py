@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qs, urlparse
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QDir, QLockFile, QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
@@ -73,12 +73,26 @@ class SingleInstanceServer(QObject):
         super().__init__(parent)
         self._server = QLocalServer(self)
         self._server.newConnection.connect(self._accept_connections)
+        self._lock: QLockFile | None = None
 
     def listen(self) -> bool:
+        # Windows permits multiple QLocalServers on the same pipe name.
+        self._lock = QLockFile(QDir.tempPath() + "/" + INSTANCE_SERVER_NAME + ".lock")
+        self._lock.setStaleLockTime(0)
+        if not self._lock.tryLock(0):
+            return False
         if self._server.listen(INSTANCE_SERVER_NAME):
             return True
         QLocalServer.removeServer(INSTANCE_SERVER_NAME)
-        return self._server.listen(INSTANCE_SERVER_NAME)
+        if self._server.listen(INSTANCE_SERVER_NAME):
+            return True
+        self._lock.unlock()
+        return False
+
+    def close(self) -> None:
+        self._server.close()
+        if self._lock is not None:
+            self._lock.unlock()
 
     def _accept_connections(self) -> None:
         while self._server.hasPendingConnections():

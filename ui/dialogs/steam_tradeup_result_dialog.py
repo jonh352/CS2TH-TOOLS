@@ -2,17 +2,16 @@
 
 import math
 
-from PySide6.QtCore import QEvent, QEasingCurve, QPointF, QRectF, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap, QRadialGradient
+from PySide6.QtCore import QEvent, QEasingCurve, QRect, QRectF, Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QLabel, QPushButton
 
 from core.alchemy_quality import get_pid_map, get_template_from_goods_name
-from core.data_utils import tradeup_display_quality
 from core.inventory_icons import weapon_image_path_from_skin_template
 from core.collection_icons import collection_icon_path
 from ui.dialog_topmost_support import apply_frameless_modal_geometry, install_dialog_topmost_follow_parent
-from ui.weapon_card_image_area import line_and_tint_for_quality_cn
 from ui.dialogs.tradeup_history_product_dialog import _ProductRevealCover
+from ui.widgets.tradeup_original_background import TradeupOriginalBackground, result_background_color
 
 
 def _product_image_path(product: dict) -> str | None:
@@ -71,16 +70,10 @@ class SteamTradeupResultDialog(QDialog):
         # case's badge as the sole provenance in that situation.
         icon_path = collection_icon_path(sources[0]) if len(sources) == 1 else None
         self._source_icon = QPixmap(str(icon_path)) if icon_path else QPixmap()
-        color = str(self.product.get("rarity_color") or "#a879ef")
-        if color and not color.startswith("#"):
-            color = "#" + color
-        self._quality = "汰换产物"
-        if template is not None:
-            self._quality = tradeup_display_quality(template)
-            color, _ = line_and_tint_for_quality_cn(self._quality)
-        self._grade = QColor(color)
-        if not self._grade.isValid():
-            self._grade = QColor("#a879ef")
+        self._quality, self._grade = result_background_color(self.product, template)
+        self._foreground_cache = QPixmap()
+        self._original_background = TradeupOriginalBackground(self._grade, self)
+        self._original_background.frame_changed.connect(self._update_background)
         self._continue = QPushButton("继续", self)
         self._continue.hide()
         self._continue.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -129,6 +122,12 @@ class SteamTradeupResultDialog(QDialog):
             self._finish_reveal()
         install_dialog_topmost_follow_parent(self)
 
+    def _update_background(self):
+        scale = self._panel_scale()
+        self.update(QRect(math.floor(self.width() / 2 - 450 * scale),
+                          math.floor(self.height() / 2 - 240 * scale),
+                          math.ceil(900 * scale) + 2, math.ceil(480 * scale) + 2))
+
     def _start_reveal(self):
         if self._started:
             return
@@ -139,6 +138,7 @@ class SteamTradeupResultDialog(QDialog):
         self.update()
 
     def _finish_reveal(self):
+        first_reveal = not self._started
         self._animation.stop()
         self._started = True
         self._reveal_cover.revealed = True
@@ -149,6 +149,9 @@ class SteamTradeupResultDialog(QDialog):
         if not self._history_preview:
             self._continue.show()
             self._continue.setFocus()
+        if first_reveal and self.isVisible():
+            self._original_background.player.setPosition(0)
+            self._original_background.start()
         self.update()
 
     def _advance(self):
@@ -167,6 +170,7 @@ class SteamTradeupResultDialog(QDialog):
         apply_frameless_modal_geometry(self, self.parentWidget())
         self.setFocus()
         self._layout_cover()
+        self._original_background.start()
 
     def _panel_scale(self):
         return 0.84 * min(self.width() / 1000, self.height() / 600)
@@ -196,12 +200,15 @@ class SteamTradeupResultDialog(QDialog):
         if hasattr(self, "_details_popup"):
             self._details_popup.hide()
         self._layout_cover()
+        self._foreground_cache = QPixmap()
 
     def done(self, result):
+        self._original_background.stop()
         self._animation.stop()
         super().done(result)
 
     def hideEvent(self, event):
+        self._original_background.stop()
         self._animation.stop()
         super().hideEvent(event)
 
@@ -260,48 +267,20 @@ class SteamTradeupResultDialog(QDialog):
         panel = QRectF(-450, -240, 900, 480)
         painter.setClipRect(panel)
 
-        def tinted(factor, alpha=255):
-            return QColor(round(self._grade.red() * factor), round(self._grade.green() * factor),
-                          round(self._grade.blue() * factor), alpha)
+        self._original_background.paint(painter, panel)
+        if self._foreground_cache.isNull():
+            self._build_foreground_cache()
+        painter.drawPixmap(panel, self._foreground_cache, QRectF(self._foreground_cache.rect()))
+        painter.end()
 
-        bg = QLinearGradient(0, -240, 0, 240)
-        bg.setColorAt(0, tinted(0.065))
-        bg.setColorAt(0.55, tinted(0.22))
-        bg.setColorAt(1, tinted(0.20))
-        painter.fillRect(panel, bg)
-        glow = QRadialGradient(0, 0, 310)
-        glow.setColorAt(0, tinted(0.9, 220))
-        glow.setColorAt(0.13, tinted(0.65, 170))
-        glow.setColorAt(0.5, tinted(0.38, 90))
-        glow.setColorAt(1, tinted(0.15, 0))
-        painter.fillRect(panel, glow)
-        painter.save()
-        watermark_font = QFont(self.font())
-        watermark_font.setPixelSize(112)
-        watermark_font.setBold(True)
-        watermark_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 12)
-        painter.setFont(watermark_font)
-        painter.setPen(QColor(255, 255, 255, 14))
-        painter.drawText(QRectF(-420, -100, 840, 200), Qt.AlignmentFlag.AlignCenter, "CS2TH")
-        painter.restore()
-        # Connected light points imitate the reference's angular background.
-        points = [(-205, 75), (-180, 110), (-125, -150), (-20, -180),
-                  (45, 30), (-40, 150), (215, 115), (320, -175), (445, 25)]
-        edges = [(0, 1), (0, 2), (0, 4), (1, 5), (2, 3), (3, 4),
-                 (4, 5), (4, 8), (5, 8), (6, 7), (7, 8), (1, 8)]
-        painter.setPen(tinted(0.7, 55))
-        for start, end in edges:
-            painter.drawLine(QPointF(*points[start]), QPointF(*points[end]))
-        for x, y in points:
-            dot = QRadialGradient(x, y, 12)
-            dot.setColorAt(0, tinted(1, 135))
-            dot.setColorAt(1, tinted(0.8, 0))
-            painter.fillRect(QRectF(x - 12, y - 12, 24, 24), dot)
-        for index in range(22):
-            angle = index * 2.39996
-            painter.setPen(tinted(0.85, 30))
-            painter.drawLine(QPointF(0, 0), QPointF(math.cos(angle) * 155,
-                                                  math.sin(angle) * 155))
+    def _build_foreground_cache(self):
+        scale = self._panel_scale() * self.devicePixelRatioF()
+        self._foreground_cache = QPixmap(math.ceil(900 * scale), math.ceil(480 * scale))
+        self._foreground_cache.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(self._foreground_cache)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        painter.scale(scale, scale)
+        painter.translate(450, 240)
         painter.fillRect(QRectF(-450, -240, 12, 480), self._grade)
 
         def text(rect, value, size, color, bold=False):

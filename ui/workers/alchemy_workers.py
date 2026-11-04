@@ -23,7 +23,7 @@ from core.alchemy_calc import (
     build_price_map,
     eligible_selected_data_for_target,
     filter_non_overlapping_recipes,
-    highest_expectation_recipe,
+    best_ranked_recipe,
     partition_selected_data_by_tradeup_group,
     remove_recipe_substrates_from_rows,
 )
@@ -58,6 +58,7 @@ def _build_non_overlapping_group_recipes(
     min_break_even_rate: float,
     max_break_even_rate: float,
     cancel_check,
+    sort_mode: str = "rate",
 ) -> list[dict]:
     """Repeatedly solve, consume the winner's physical items, and solve again."""
     remaining = list(rows)
@@ -67,7 +68,7 @@ def _build_non_overlapping_group_recipes(
     while len(selected) < max_batches and len(remaining) >= k:
         if cancel_check():
             raise ComputationCancelled
-        winner = highest_expectation_recipe(candidates)
+        winner = best_ranked_recipe(candidates, sort_mode)
         if winner is None:
             break
         next_remaining = remove_recipe_substrates_from_rows(remaining, winner)
@@ -162,7 +163,8 @@ class _CalcPoolThread(QThread):
         mode: str,
         min_break_even_rate: float = 0.0,
         max_break_even_rate: float = 1.0,
-        non_overlapping_recipes: bool = True,
+        non_overlapping_recipes: bool = False,
+        sort_mode: str = "rate",
         parent=None,
     ):
         super().__init__(parent)
@@ -174,6 +176,7 @@ class _CalcPoolThread(QThread):
         self._min_break_even_rate = max(0.0, float(min_break_even_rate))
         self._max_break_even_rate = min(1.0, max(0.0, float(max_break_even_rate)))
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
+        self._sort_mode = sort_mode
 
     def _wait_future_result_or_cancel(
         self, fut, ex: ProcessPoolExecutor
@@ -352,6 +355,7 @@ class _CalcPoolThread(QThread):
                             min_break_even_rate=self._min_break_even_rate,
                             max_break_even_rate=self._max_break_even_rate,
                             cancel_check=self.isInterruptionRequested,
+                            sort_mode=self._sort_mode,
                         )
                     _tag_recipe_group(recipes, quality, stat_trak)
                     all_recipes.extend(recipes)
@@ -392,6 +396,7 @@ class _CalcPoolThread(QThread):
                             min_break_even_rate=self._min_break_even_rate,
                             max_break_even_rate=self._max_break_even_rate,
                             cancel_check=self.isInterruptionRequested,
+                            sort_mode=self._sort_mode,
                         )
                     _tag_recipe_group(recipes, quality, stat_trak)
                     all_recipes.extend(recipes)
@@ -425,7 +430,8 @@ class SpecialWearCalcWorker(QThread):
         target_wear_hi: float,
         seed: Optional[int] = None,
         rounds: int = 1,
-        non_overlapping_recipes: bool = True,
+        non_overlapping_recipes: bool = False,
+        sort_mode: str = "rate",
         parent=None,
     ):
         super().__init__(parent)
@@ -437,6 +443,7 @@ class SpecialWearCalcWorker(QThread):
         self._seed = seed
         self._rounds = rounds
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
+        self._sort_mode = sort_mode
 
     def run(self):
         try:
@@ -490,7 +497,7 @@ class SpecialWearCalcWorker(QThread):
             )
             _tag_recipe_group(recipes, quality, stat_trak)
             if self._non_overlapping_recipes:
-                recipes = filter_non_overlapping_recipes(recipes)
+                recipes = filter_non_overlapping_recipes(recipes, self._sort_mode)
             self.finished.emit(_recipes_to_ui_payload(recipes), err)
         except ComputationCancelled:
             self.finished.emit([], "__cancelled__")
@@ -512,7 +519,8 @@ class SpecialWearCalcRunner(QObject):
         target_wear_hi: float,
         seed: Optional[int] = None,
         rounds: int = 1,
-        non_overlapping_recipes: bool = True,
+        non_overlapping_recipes: bool = False,
+        sort_mode: str = "rate",
         parent=None,
     ):
         super().__init__(parent)
@@ -524,6 +532,7 @@ class SpecialWearCalcRunner(QObject):
         self._seed = seed
         self._rounds = rounds
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
+        self._sort_mode = sort_mode
         self._thread: SpecialWearCalcWorker | None = None
 
     def start(self):
@@ -536,6 +545,7 @@ class SpecialWearCalcRunner(QObject):
             self._seed,
             self._rounds,
             self._non_overlapping_recipes,
+            self._sort_mode,
             parent=self,
         )
         self._thread.progress.connect(self.progress.emit)
@@ -575,7 +585,8 @@ class CalcProcessRunner(QObject):
         mode: str,
         min_break_even_rate: float = 0.0,
         max_break_even_rate: float = 1.0,
-        non_overlapping_recipes: bool = True,
+        non_overlapping_recipes: bool = False,
+        sort_mode: str = "rate",
         parent=None,
     ):
         super().__init__(parent)
@@ -589,6 +600,7 @@ class CalcProcessRunner(QObject):
         self._min_break_even_rate = max(0.0, float(min_break_even_rate))
         self._max_break_even_rate = min(1.0, max(0.0, float(max_break_even_rate)))
         self._non_overlapping_recipes = bool(non_overlapping_recipes)
+        self._sort_mode = sort_mode
         self._thread: _CalcPoolThread | None = None
 
     def start(self):
@@ -601,6 +613,7 @@ class CalcProcessRunner(QObject):
             self._min_break_even_rate,
             self._max_break_even_rate,
             self._non_overlapping_recipes,
+            self._sort_mode,
             parent=self,
         )
         self._thread.task_finished.connect(self.finished.emit)

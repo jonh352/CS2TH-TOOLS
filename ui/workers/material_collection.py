@@ -145,6 +145,7 @@ def collect_candidates_parallel(
     cancel_check,
     silent: bool = False,
     unit_progress: UnitProgress | None = None,
+    max_rows_per_wear_window: int = 300,
 ) -> tuple[list[dict], list[str], dict[str, list[dict]]]:
     """Collect in waves: BUFF∥悠悠 first, then C5∥ECO (each provider still serial).
 
@@ -220,6 +221,7 @@ def collect_candidates_parallel(
                                 min_wear=float(material.get("min_wear") or 0),
                                 max_wear=float(material.get("max_wear") or 1),
                                 max_pages=0,
+                                max_rows_per_wear_window=max_rows_per_wear_window,
                                 request_interval=request_interval,
                                 progress=progress,
                                 extra_ids=_extra_ids_for_provider(provider, material),
@@ -347,6 +349,7 @@ class MaterialCollectionWorker(QThread):
         providers: list[str],
         provider_intervals: dict[str, int],
         silent: bool = False,
+        max_rows_per_wear_window: int = 300,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -354,6 +357,7 @@ class MaterialCollectionWorker(QThread):
         self.providers = list(providers)
         self.provider_intervals = dict(provider_intervals)
         self.silent = bool(silent)
+        self.max_rows_per_wear_window = max_rows_per_wear_window
         self._stop_event = Event()
 
     def request_stop(self) -> None:
@@ -372,6 +376,7 @@ class MaterialCollectionWorker(QThread):
             cancel_check=self._is_stop_requested,
             silent=self.silent,
             unit_progress=self.progress_units.emit,
+            max_rows_per_wear_window=self.max_rows_per_wear_window,
         )
 
         message = "；".join(errors)

@@ -29,7 +29,6 @@ _EXCLUDED_QT = [
     "PySide6.QtHelp",
     "PySide6.QtHttpServer",
     "PySide6.QtLocation",
-    "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
     "PySide6.QtNetworkAuth",
     "PySide6.QtNfc",
@@ -83,7 +82,6 @@ _QT_DLL_DENY = (
     "qt6quick",
     "qt6qml",
     "qt6webengine",
-    "qt6multimedia",
     "qt6charts",
     "qt6datavisualization",
     "qt6bluetooth",
@@ -121,11 +119,14 @@ def _norm(path: str) -> str:
 def _keep_binary(item) -> bool:
     name = _norm(item[0] if isinstance(item, (tuple, list)) else str(item))
     base = os.path.basename(name)
+    # Qt uses the native Schannel TLS backend; Python keeps its own OpenSSL DLLs.
+    if base in ("qopensslbackend.dll", "libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+        return False
     if base.startswith("_avif."):
         return False
     # Qt uses Windows' ICU API. PATH tools (e.g. Poppler) may provide an
     # incompatible DLL with the same name. Windows API sets also belong to OS.
-    if base in ("icuuc.dll", "icuin.dll", "icudt.dll") or base.startswith("api-ms-win-core-"):
+    if (base.startswith(("icuuc", "icuin", "icudt")) and base.endswith(".dll")) or base.startswith("api-ms-win-core-"):
         return False
     if any(tok in base for tok in _QT_DLL_DENY):
         return False
@@ -135,7 +136,6 @@ def _keep_binary(item) -> bool:
             for p in (
                 "/qmltooling/",
                 "/geoservices/",
-                "/multimedia/",
                 "/sqldrivers/",
                 "/sensorgestures/",
                 "/position/",
@@ -149,6 +149,13 @@ def _keep_binary(item) -> bool:
 
 def _keep_data(item) -> bool:
     name = _norm(item[0] if isinstance(item, (tuple, list)) else str(item))
+    if name.startswith("assets/help/eco/") and name.endswith("-redacted.png"):
+        return False  # identical pixels are shipped as smaller lossless WebP files
+    if name.startswith("node_modules/"):
+        if name.endswith((".d.ts", ".map")) or "/readme" in name:
+            return False
+        if any(part in {"test", "tests", "example", "examples", "coverage", "docs"} for part in name.split("/")):
+            return False
     if "/translations/" in name:
         return False
     if "/qml/" in name:

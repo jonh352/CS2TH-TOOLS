@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import html
 import math
 from pathlib import Path
 
@@ -39,14 +38,12 @@ from core.purchase_batches import (
     build_purchase_batch_recipe_tradeup_plan,
     delete_purchase_batch,
     load_purchase_batch,
-    purchase_batch_alchemy_status_text,
     purchase_batch_recipe_alchemy_status_text,
     purchase_batch_recipe_tradeup_readiness,
     purchase_batch_replacement_options,
     preview_purchase_batch_replacement,
     purchase_batch_summary,
     reconcile_all_purchase_records_for_profile,
-    refresh_purchase_batch_alchemy_ready_at,
     resolve_purchase_batch_inventory_departure,
     set_purchase_batch_recipe_tradeup_completed,
     set_purchase_batch_material_status,
@@ -288,12 +285,32 @@ def _purchase_recipe_result_snapshot(entry: dict) -> dict:
     return recipe
 
 
+def purchase_recipe_matches_item_search(entry: dict, query: str) -> bool:
+    """按材料原名和替代饰品名匹配，忽略大小写及空白。"""
+    needle = "".join(query.casefold().split())
+    if not needle:
+        return True
+    recipe = entry.get("recipe") or {}
+    rows = [*(entry.get("materials") or []), *(recipe.get("substrates_display") or [])]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        replacement = row.get("replacement")
+        names = [row.get("name")]
+        if isinstance(replacement, dict):
+            names.append(replacement.get("name"))
+        if any(needle in "".join(str(name or "").casefold().split()) for name in names):
+            return True
+    return False
+
+
 class PurchaseBatchCard(QFrame):
     changed = Signal()
     deleted = Signal()
     change_account_requested = Signal(object)
     simulate_tradeup_requested = Signal(object)
     import_to_collection_requested = Signal(object)
+    edit_recipe_requested = Signal(object, str)
 
     def __init__(
         self,
@@ -304,6 +321,10 @@ class PurchaseBatchCard(QFrame):
         expanded: bool = False,
         ready_recipe_ids: set[str] | None = None,
         compact_archive: bool = False,
+        recipe_only: bool = False,
+        visible_recipe_ids: set[str] | None = None,
+        allow_recipe_edit: bool = True,
+        allow_batch_actions: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("recipeManageRow")
@@ -311,12 +332,16 @@ class PurchaseBatchCard(QFrame):
         self._path = path
         self._payload = payload
         self._expanded = bool(expanded)
+        self._item_search = ""
         self._ready_recipe_ids = (
             {str(value) for value in ready_recipe_ids}
             if ready_recipe_ids is not None
             else None
         )
         self._compact_archive = bool(compact_archive)
+        self._recipe_only = recipe_only
+        self._visible_recipe_ids = visible_recipe_ids
+        self._allow_recipe_edit = allow_recipe_edit
         self._table: QTableWidget | None = None
         self._tables: list[QTableWidget] = []
         self._product_tables: list[QTableWidget] = []
@@ -324,6 +349,7 @@ class PurchaseBatchCard(QFrame):
         self._recipe_group_buttons: list[QPushButton] = []
         self._recipe_tradeup_buttons: list[QPushButton] = []
         self._recipe_one_click_buttons: list[QPushButton] = []
+        self._recipe_alchemy_labels: dict[str, QLabel] = {}
         self._expanded_recipe_ids: set[str] = set()
 
         root = QVBoxLayout(self)
@@ -412,7 +438,16 @@ class PurchaseBatchCard(QFrame):
             change_account.hide()
         actions.addStretch(1)
         controls_grid.addLayout(actions, 1, 0)
-        root.addLayout(controls_grid)
+        if recipe_only:
+            controls_widget = QWidget(self)
+            controls_widget.setLayout(controls_grid)
+            controls_widget.hide()
+            root.addWidget(controls_widget)
+        else:
+            root.addLayout(controls_grid)
+        if not allow_batch_actions:
+            change_account.hide()
+            delete.hide()
         self._content = QWidget(self)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(0, 0, 0, 0)
@@ -425,7 +460,17 @@ class PurchaseBatchCard(QFrame):
         )
         workflow_hint.setObjectName("alchemyStep1Hint")
         workflow_hint.setWordWrap(True)
+        workflow_hint.setVisible(not recipe_only)
         self._content_layout.addWidget(workflow_hint)
+        self._recipe_tools = None
+        if recipe_only and not self._compact_archive:
+            self._recipe_tools = QWidget(self._content)
+            recipe_actions = QHBoxLayout(self._recipe_tools)
+            recipe_actions.setContentsMargins(0, 0, 0, 0)
+            for widget in (self._review_departure_button, self._mark_all_button):
+                recipe_actions.addWidget(widget)
+            recipe_actions.addStretch(1)
+            self._recipe_tools.hide()
         self._content.setVisible(self._expanded)
         root.addWidget(self._content)
         self._refresh_header()
@@ -437,17 +482,8 @@ class PurchaseBatchCard(QFrame):
         self._review_departure_button.setVisible(bool(summary["missing_review"]))
         self._review_departure_button.setText(f"查看待确认离库（{summary['missing_review']}）")
         batch_name = str(self._payload.get("name") or "未命名采购批次")
-        alchemy_text = purchase_batch_alchemy_status_text(self._payload)
-        if alchemy_text:
-            self._title_label.setTextFormat(Qt.TextFormat.RichText)
-            self._title_label.setText(
-                f'{html.escape(batch_name)}'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;'
-                f'<span style="color:#f59e0b">{html.escape(alchemy_text)}</span>'
-            )
-        else:
-            self._title_label.setTextFormat(Qt.TextFormat.PlainText)
-            self._title_label.setText(batch_name)
+        self._title_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._title_label.setText(batch_name)
         self._summary_label.setText(
             f"账号：{self._payload.get('account_name') or 'Steam'} · "
             f"{summary['recipes']} 个配方 / {summary['total']} 件 · "
@@ -495,6 +531,10 @@ class PurchaseBatchCard(QFrame):
         self._filter.blockSignals(True)
         self._filter.setCurrentText(filter_text)
         self._filter.blockSignals(False)
+        if self._recipe_only and filter_text != "全部材料" and not any(rows for _label, _entry, rows in self._recipe_groups()):
+            self._filter.blockSignals(True)
+            self._filter.setCurrentText("全部材料")
+            self._filter.blockSignals(False)
         recipe_ids = state.get("expanded_recipe_ids")
         if isinstance(recipe_ids, (list, tuple, set, frozenset)):
             self._expanded_recipe_ids = {
@@ -536,6 +576,19 @@ class PurchaseBatchCard(QFrame):
         self._filter.blockSignals(False)
         self._set_expanded(True)
 
+    def set_item_search(self, query: str) -> None:
+        self._item_search = query.strip()
+        if self._item_search:
+            self._expanded_recipe_ids.update(
+                str(entry.get("id") or "")
+                for entry in self._payload.get("recipes") or []
+                if isinstance(entry, dict)
+                and purchase_recipe_matches_item_search(entry, self._item_search)
+            )
+            self._set_expanded(True)
+        elif self._expanded:
+            self._rebuild_table()
+
     def _recipe_groups(self) -> list[tuple[str, dict, list[tuple[dict, dict]]]]:
         wanted = _FILTER_TO_STATUS.get(self._filter.currentText(), "")
         groups: list[tuple[str, dict, list[tuple[dict, dict]]]] = []
@@ -550,7 +603,9 @@ class PurchaseBatchCard(QFrame):
         for recipe_index, entry in enumerate(entries, start=1):
             if not isinstance(entry, dict):
                 continue
-            group_label = _recipe_group_label(recipe_index)
+            if not purchase_recipe_matches_item_search(entry, self._item_search):
+                continue
+            group_label = _recipe_group_label(self._payload.get("_day_recipe_number", recipe_index))
             recipe = entry.get("recipe") if isinstance(entry.get("recipe"), dict) else {}
             substrates = recipe.get("substrates_display") or []
             rows: list[tuple[dict, dict]] = []
@@ -581,13 +636,16 @@ class PurchaseBatchCard(QFrame):
                 rows.append(
                     (material, substrate if isinstance(substrate, dict) else {})
                 )
-            if rows:
+            if rows or self._recipe_only:
                 groups.append((group_label, entry, rows))
         return groups
 
     def _rebuild_table(self) -> None:
         if not self._expanded:
             return
+        if self._recipe_tools is not None:
+            self._recipe_tools.setParent(self._content)
+            self._recipe_tools.hide()
         for widget in self._detail_widgets:
             self._content_layout.removeWidget(widget)
             widget.deleteLater()
@@ -597,6 +655,7 @@ class PurchaseBatchCard(QFrame):
         self._recipe_group_buttons.clear()
         self._recipe_tradeup_buttons.clear()
         self._recipe_one_click_buttons.clear()
+        self._recipe_alchemy_labels.clear()
         self._table = None
         groups = self._recipe_groups()
         if self._filter.currentText() != "全部材料":
@@ -639,7 +698,7 @@ class PurchaseBatchCard(QFrame):
         toggle.setFlat(True)
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         toggle.setToolTip(str(entry.get("title") or f"配方 {group_label}"))
-        toggle.setStyleSheet("text-align: left; border: none; background: transparent;")
+        toggle.setStyleSheet("QPushButton { text-align: left; border: none; background: transparent; }")
         toggle.setIcon(
             expand_section_triangle_icon(
                 expanded,
@@ -660,8 +719,9 @@ class PurchaseBatchCard(QFrame):
                     "inventory_missing_since"
                 ):
                     missing_review += 1
+        account_prefix = f"账号：{self._payload.get('account_name') or 'Steam'} · " if self._recipe_only else ""
         summary = QLabel(
-            f"{len(entry.get('materials') or [])}件 · "
+            account_prefix + f"{len(entry.get('materials') or [])}件 · "
             f"已入库{status_counts[STATUS_RECEIVED]} · "
             f"待入库{status_counts[STATUS_ORDERED]} · "
             f"待购买{status_counts[STATUS_PENDING]} · "
@@ -671,17 +731,21 @@ class PurchaseBatchCard(QFrame):
             header,
         )
         summary.setObjectName("alchemyStep1Hint")
+        summary.setToolTip(str(entry.get("title") or "采购配方"))
         header_layout.addWidget(summary, 1, Qt.AlignmentFlag.AlignVCenter)
         alchemy_text = purchase_batch_recipe_alchemy_status_text(entry)
-        if alchemy_text:
+        if alchemy_text and not self._compact_archive:
             alchemy_label = QLabel(alchemy_text, header)
             alchemy_label.setObjectName("purchaseRecipeAlchemyTime")
+            alchemy_label.setToolTip("取本配方已匹配材料中最晚的 Steam 冷却时间，向上取整到整点，正好整点时不再顺延；库存确认无 CD 时显示可炼金。")
             alchemy_label.setStyleSheet("color: #f59e0b;")
             header_layout.addWidget(alchemy_label, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._recipe_alchemy_labels[entry_id] = alchemy_label
         tradeup_completed = bool(entry.get("tradeup_completed"))
         ready, readiness_reason = purchase_batch_recipe_tradeup_readiness(entry)
         one_click_button = QPushButton("模拟并汰换", header)
         one_click_button.setObjectName("purchaseBatchOneClickTradeupBtn")
+        one_click_button.setVisible(not self._compact_archive)
         one_click_button.setFixedHeight(32)
         one_click_button.setMinimumWidth(88)
         live_ready = ready and (
@@ -691,7 +755,7 @@ class PurchaseBatchCard(QFrame):
         one_click_button.setToolTip(
             readiness_reason
             if live_ready or not ready
-            else "请前往“可炼金配方”刷新并确认库存及 CD"
+            else "请刷新 Steam 库存并核对材料及 CD"
         )
         one_click_button.clicked.connect(
             lambda _checked=False, recipe_id=entry_id: self._request_tradeup_simulation(
@@ -705,7 +769,7 @@ class PurchaseBatchCard(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
         tradeup_button = QPushButton(
-            "已汰换" if tradeup_completed else "未汰换",
+            "全部离库已归档" if entry.get("archive_reason") == "all_materials_departed" else "已汰换" if tradeup_completed else "已手动汰换",
             header,
         )
         tradeup_button.setObjectName("purchaseBatchTradeupStateBtn")
@@ -717,9 +781,10 @@ class PurchaseBatchCard(QFrame):
         executed_locally = isinstance(entry.get("tradeup_execution"), dict)
         tradeup_button.setEnabled(not executed_locally)
         tradeup_button.setToolTip(
-            "一键汰换成功记录不可撤销"
+            "10 件已入库材料全部不在该账号库存中，按发现日期自动归档；不代表已确认真实汰换。点击可恢复为未汰换。"
+            if entry.get("archive_reason") == "all_materials_departed" else "一键汰换成功记录不可撤销"
             if executed_locally
-            else "已汰换的配方不再校验其材料是否仍在 Steam 库存中"
+            else ("点击恢复为未汰换，继续核对材料库存" if tradeup_completed else "已在游戏中手动汰换后，点击标记完成并归档；不会执行实际汰换")
         )
         tradeup_button.clicked.connect(
             lambda checked, recipe_id=entry_id: self._set_tradeup_completed(
@@ -733,46 +798,78 @@ class PurchaseBatchCard(QFrame):
             0,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
+        if self._allow_recipe_edit:
+            edit_button = QPushButton("✎", header)
+            edit_button.setObjectName("purchaseRecipeEditBtn")
+            edit_button.setFixedSize(32, 32)
+            edit_button.setCursor(Qt.PointingHandCursor)
+            edit_button.setToolTip("删除该配方" if tradeup_completed else "修改账号或删除该配方")
+            edit_button.setAccessibleName("编辑配方")
+            edit_button.clicked.connect(
+                lambda _checked=False, recipe_id=entry_id: self.edit_recipe_requested.emit(self._path, recipe_id)
+            )
+            header_layout.addWidget(edit_button)
         root.addWidget(header)
         content = QFrame(group)
         content.setObjectName("alchemyTableFrame")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(10, 8, 10, 10)
-        table = self._build_material_table(entry, rows, content)
-        content_layout.addWidget(table)
-        result_recipe = _purchase_recipe_result_snapshot(entry)
-        products = result_recipe.get("products_display") or []
-        product_label = QLabel("产物", content)
-        product_label.setObjectName("alchemyProductName")
-        content_layout.addWidget(product_label)
-        if products:
-            product_summary = QLabel(
-                format_recipe_summary_line(result_recipe),
-                content,
-            )
-            product_summary.setObjectName("purchaseBatchProductSummary")
-            product_summary.setWordWrap(True)
-            content_layout.addWidget(product_summary)
-            product_table = build_recipe_product_table(
-                content,
-                result_recipe,
-                cost=float(result_recipe.get("cost") or 0),
-            )
-            self._product_tables.append(product_table)
-            content_layout.addWidget(product_table)
-        else:
-            empty_products = QLabel(
-                "该配方没有可用的产物明细",
-                content,
-            )
-            empty_products.setObjectName("alchemyStep1Hint")
-            empty_products.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            content_layout.addWidget(empty_products)
+        details_built = False
+
+        def build_details():
+            nonlocal details_built
+            if details_built:
+                return
+            if self._recipe_tools is not None:
+                content_layout.addWidget(self._recipe_tools)
+                self._recipe_tools.show()
+            if not rows:
+                message = QLabel(f"材料筛选“{self._filter.currentText()}”下没有匹配项，可切换为“全部材料”查看。", content)
+                message.setObjectName("alchemyStep1Hint")
+                content_layout.addWidget(message)
+                details_built = True
+                return
+            table = self._build_material_table(entry, rows, content)
+            content_layout.addWidget(table)
+            result_recipe = _purchase_recipe_result_snapshot(entry)
+            products = result_recipe.get("products_display") or []
+            product_label = QLabel("产物", content)
+            product_label.setObjectName("alchemyProductName")
+            content_layout.addWidget(product_label)
+            if products:
+                product_summary = QLabel(
+                    format_recipe_summary_line(result_recipe),
+                    content,
+                )
+                product_summary.setObjectName("purchaseBatchProductSummary")
+                product_summary.setWordWrap(True)
+                content_layout.addWidget(product_summary)
+                product_table = build_recipe_product_table(
+                    content,
+                    result_recipe,
+                    cost=float(result_recipe.get("cost") or 0),
+                )
+                self._product_tables.append(product_table)
+                content_layout.addWidget(product_table)
+            else:
+                empty_products = QLabel(
+                    "该配方没有可用的产物明细",
+                    content,
+                )
+                empty_products.setObjectName("alchemyStep1Hint")
+                empty_products.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                content_layout.addWidget(empty_products)
+            details_built = True
+
+        if expanded:
+            build_details()
         content.setVisible(expanded)
         root.addWidget(content)
 
         def toggle_recipe(_checked: bool = False) -> None:
-            is_expanded = not content.isVisible()
+            is_expanded = content.isHidden()
+            if is_expanded:
+                build_details()
             content.setVisible(is_expanded)
             if is_expanded:
                 self._expanded_recipe_ids.add(entry_id)
@@ -978,6 +1075,8 @@ class PurchaseBatchCard(QFrame):
 
     def _reload(self) -> None:
         self._payload = load_purchase_batch(self._path)
+        if self._visible_recipe_ids is not None:
+            self._payload["recipes"] = [entry for entry in self._payload.get("recipes") or [] if str(entry.get("id") or "") in self._visible_recipe_ids]
         self._refresh_header()
         self._rebuild_table()
         self.changed.emit()
@@ -1075,7 +1174,7 @@ class PurchaseBatchCard(QFrame):
 
     def _toggle_all_ordered(self) -> None:
         try:
-            changed, target = toggle_all_purchase_batch_materials_ordered(self._path)
+            changed, target = toggle_all_purchase_batch_materials_ordered(self._path, self._visible_recipe_ids)
         except (OSError, ValueError) as exc:
             show_toast(self, f"批量状态保存失败：{exc}", style="warning")
             return
@@ -1093,7 +1192,6 @@ class PurchaseBatchCard(QFrame):
                 profile_id,
                 load_profile_inventory_items(profile_id),
             )
-            refresh_purchase_batch_alchemy_ready_at(self._path)
         except Exception as exc:
             show_toast(self, f"库存核对失败：{exc}", style="warning")
             return
@@ -1101,7 +1199,7 @@ class PurchaseBatchCard(QFrame):
         matched = int((result.get("matched_by_path") or {}).get(batch_key, 0))
         waiting = int((result.get("waiting_by_path") or {}).get(batch_key, 0))
         missing = int((result.get("missing_by_path") or {}).get(batch_key, 0))
-        message = f"本批次新入库 {matched} 件，仍待入库 {waiting} 件"
+        message = f"该账号采购记录新入库 {matched} 件，仍待入库 {waiting} 件"
         if missing:
             message += f"；{missing} 件待确认离库"
         show_toast(

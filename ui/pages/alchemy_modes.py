@@ -593,6 +593,7 @@ class AlchemyModeMixin:
                     dlg = SpecialWearComplexityWarningDialog(self.window())
                     if dlg.exec() != QDialog.Accepted:
                         return
+        self._sync_no_overlap_availability()
         self._step3_update_calc_filter_visibility()
         self.step_stack.setCurrentIndex(2)
 
@@ -646,6 +647,7 @@ class AlchemyModeMixin:
                 None,
                 rounds=sw_rounds,
                 non_overlapping_recipes=self.step3_no_overlap_check.isChecked(),
+                sort_mode=self.step3_result_sort_combo.currentData(),
                 parent=self,
             )
             self._special_wear_finished_conn = self._special_wear_runner.finished.connect(
@@ -702,6 +704,7 @@ class AlchemyModeMixin:
             min_break_even_rate=min_break_even_rate,
             max_break_even_rate=max_break_even_rate,
             non_overlapping_recipes=self.step3_no_overlap_check.isChecked(),
+            sort_mode=self.step3_result_sort_combo.currentData(),
         )
         self._calc_finished_conn = self._calc_worker.finished.connect(self._on_calc_finished)
         self._calc_progress_conn = None
