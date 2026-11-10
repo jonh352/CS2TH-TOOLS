@@ -28,7 +28,7 @@ class SpecialCollectionWorker(QThread):
         target_wear_low: float,
         target_wear_high: float,
         slot_count: int,
-        max_rows_per_wear_window: int = 300,
+        max_rows_per_wear_window: int = 150,
         parent=None,
     ) -> None:
         super().__init__(parent)

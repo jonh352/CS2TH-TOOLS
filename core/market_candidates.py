@@ -136,7 +136,7 @@ _CANDIDATE_CACHE_TTL_SECONDS = 180.0
 # ``max_pages <= 0`` means collect until the provider reports its last page.
 # Keep a high emergency ceiling so a broken endpoint that repeats one page can
 # never loop forever.
-_AUTO_PAGE_SAFETY_LIMIT = 500
+_AUTO_PAGE_SAFETY_LIMIT = 60
 _candidate_cache: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
 
 
@@ -145,7 +145,7 @@ def _effective_page_limit(max_pages: int) -> int:
         value = int(max_pages)
     except (TypeError, ValueError):
         value = 0
-    return value if value > 0 else _AUTO_PAGE_SAFETY_LIMIT
+    return min(value, _AUTO_PAGE_SAFETY_LIMIT) if value > 0 else _AUTO_PAGE_SAFETY_LIMIT
 
 
 def provider_display_name(provider: str) -> str:
@@ -160,11 +160,11 @@ _WEAR_BOUNDS = {
     "战痕累累": (0.45, 1.0),
 }
 # BUFF / 悠悠 / C5 stop paging once listings exceed this multiple of recipe unit_price_cny.
-_COLLECTION_PRICE_CAP_MULTIPLIER = 2.0
-# ECO uses a slightly looser cap after switching to price-asc Sort.
-_COLLECTION_ECO_PRICE_CAP_MULTIPLIER = 2.5
+_COLLECTION_PRICE_CAP_MULTIPLIER = 1.5
+# ECO uses the same price cap with price-ascending Sort.
+_COLLECTION_ECO_PRICE_CAP_MULTIPLIER = 1.5
 # Per platform · per material · per wear window (e.g. 略磨 / 久经).
-_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW = 300
+_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW = 150
 _collection_row_limit = ContextVar("collection_row_limit", default=_COLLECTION_MAX_ROWS_PER_WEAR_WINDOW)
 # BUFF 429: retries after the first rate-limit response.
 _BUFF_RATE_LIMIT_RETRIES = 1
@@ -3238,7 +3238,7 @@ def _eco_sell_query_body(
         "PageIndex": max(1, int(page)),
         "PageSize": max(1, min(100, int(page_size))),
         # Live probe: SortType=1 + Sort=0 returns price ascending (page + across pages).
-        # Sort=1 is NOT price-asc and must not be used with 2.5× early-stop.
+        # Sort=1 is NOT price-asc and must not be used with 1.5× early-stop.
         "SortType": 1,
         "Sort": 0,
         "TradeType": 1,
@@ -3676,7 +3676,7 @@ def fetch_eco_candidates(
 def fetch_exact_wear_candidates(
     provider: str,
     *,
-    max_rows_per_wear_window: int = 300,
+    max_rows_per_wear_window: int = 150,
     **kwargs: Any,
 ) -> list[dict[str, Any]]:
     # Keep the limit local to this request, including C5/ECO browser fallbacks.

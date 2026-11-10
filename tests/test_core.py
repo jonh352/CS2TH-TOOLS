@@ -888,8 +888,8 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(skipped_rows[0]["listing_id"], "eco-order-ok")
 
     def test_collection_price_cap_helper(self) -> None:
-        self.assertEqual(_collection_max_unit_price(10), 20.0)
-        self.assertEqual(_collection_max_unit_price("12.5"), 25.0)
+        self.assertEqual(_collection_max_unit_price(10), 15.0)
+        self.assertEqual(_collection_max_unit_price("12.5"), 18.75)
         self.assertEqual(
             _collection_max_unit_price(10, multiplier=2.5),
             25.0,
@@ -1285,7 +1285,7 @@ class MetadataTests(unittest.TestCase):
         session.close.assert_called()
 
     def test_youpin_stops_at_wear_window_row_limit(self) -> None:
-        self._assert_youpin_window_limit(300)
+        self._assert_youpin_window_limit(150)
 
     def test_youpin_stops_at_150_rows_with_alternatives(self) -> None:
         self._assert_youpin_window_limit(150)
@@ -1484,8 +1484,8 @@ class MetadataTests(unittest.TestCase):
                 unit_price_cny=10,
                 silent=True,
             )
-        self.assertEqual(buff_fetch.call_args.kwargs["max_unit_price"], 20.0)
-        self.assertEqual(eco_fetch.call_args.kwargs["max_unit_price"], 25.0)
+        self.assertEqual(buff_fetch.call_args.kwargs["max_unit_price"], 15.0)
+        self.assertEqual(eco_fetch.call_args.kwargs["max_unit_price"], 15.0)
         self.assertTrue(eco_fetch.call_args.kwargs["silent"])
 
     def test_wear_windows_split_by_exterior_buckets(self) -> None:

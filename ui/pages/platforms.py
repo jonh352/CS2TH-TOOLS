@@ -1773,7 +1773,7 @@ class PlatformPage(QWidget):
         self.special_add_all_to_batch_button.hide()
         _clear_layout(self.special_results_layout)
         worker = SpecialCollectionWorker(
-            max_rows_per_wear_window=150 if self.include_alternatives.isChecked() else 300,
+            max_rows_per_wear_window=150,
             materials=materials,
             providers=providers,
             provider_intervals={
@@ -2448,7 +2448,7 @@ class PlatformPage(QWidget):
                 total=max(1, len(materials) * len(exact_platforms)),
             )
             worker = MaterialCollectionWorker(
-                max_rows_per_wear_window=150 if self.include_alternatives.isChecked() else 300,
+                max_rows_per_wear_window=150,
                 materials=materials,
                 providers=exact_platforms,
                 provider_intervals={

@@ -229,6 +229,41 @@ class EcoApiTests(unittest.TestCase):
 
 
 class EcoDialogTests(unittest.TestCase):
+    def test_reference_prices_do_not_require_market_or_eco_login(self):
+        self.dialog.title_edit.setText("test")
+        quotes = {asset["AssetId"]: 48 for asset in self.dialog._assets}
+        with (
+            patch.object(self.dialog, "_credentials", side_effect=AssertionError("ECO authorization requested")),
+            patch("core.market_candidates.provider_auth_available", side_effect=AssertionError("market login requested")),
+            patch("ui.dialogs.eco_furnace_dialog.material_reference_prices", return_value={
+                "prices": quotes, "fetch_time": "20261110_161758", "errors": [],
+            }) as read,
+        ):
+            self.dialog._read_market_prices()
+            self.finish()
+        read.assert_called_once()
+        self.assertEqual(self.dialog._market_prices, quotes)
+        self.assertTrue(self.dialog.create_button.isEnabled())
+        self.assertIn("480.00", self.dialog.read_prices_button.text())
+        price = self.dialog.material_table.cellWidget(0, self.dialog.PRICE_COLUMN)
+        self.assertEqual(price.toolTip(), "")
+
+    def test_create_validation_only_appears_on_publish_tab(self):
+        self.dialog._sync_buttons()
+        self.assertIn("标题", self.dialog.status_label.text())
+        for tab in (self.dialog._settings_tab, self.dialog._list_tab):
+            self.dialog.tabs.setCurrentWidget(tab)
+            self.dialog._sync_buttons()
+            self.assertNotIn("标题", self.dialog.status_label.text())
+            self.dialog._set_status("operation succeeded")
+            self.dialog._sync_buttons()
+            self.assertEqual(self.dialog.status_label.text(), "operation succeeded")
+            self.dialog._set_status("operation failed", error=True)
+            self.dialog._sync_buttons()
+            self.assertEqual(self.dialog.status_label.text(), "operation failed")
+        self.dialog.tabs.setCurrentWidget(self.dialog._publish_tab)
+        self.assertIn("标题", self.dialog.status_label.text())
+
     def test_new_furnace_is_auto_selected_among_identically_named_old_furnaces(self):
         self.assertFalse(self.dialog.markup_spin.isEnabled())
         self.assertFalse(self.dialog.markup_button.isEnabled())
@@ -515,6 +550,11 @@ class EcoDialogTests(unittest.TestCase):
         self.assertTrue(self.dialog.private_listing_button.isEnabled())
 
     def test_create_failure_emits_uncertain_or_unlisted_without_retry(self):
+        self.dialog.title_edit.setText("test")
+        self.dialog._market_prices = {row["AssetId"]: 10 for row in self.dialog._assets}
+        for index in range(len(self.dialog._assets)):
+            self.dialog.material_table.cellWidget(index, self.dialog.PRICE_COLUMN).setValue(10)
+        self.stack.enter_context(patch.object(self.dialog, "_remember_furnace_title"))
         for uncertain, expected in ((True, "uncertain"), (False, "unlisted")):
             self.dialog._create_locked = False
             publications = []
@@ -525,6 +565,8 @@ class EcoDialogTests(unittest.TestCase):
                 self.dialog._create()
                 self.finish()
                 client.return_value.create.assert_called_once()
+            self.assertIn("failed", self.dialog.status_label.text())
+            self.assertIn("#ef4444", self.dialog.status_label.styleSheet())
             self.assertEqual([row[0] for row in publications], ["pending", expected])
             self.dialog.publication_changed.disconnect(callback)
 
@@ -533,6 +575,25 @@ class EcoDialogTests(unittest.TestCase):
         self.finish()
         self.assertFalse(self.dialog.create_button.isEnabled())
         self.assertIn("查询", self.dialog.status_label.text())
+
+    def test_pre_create_lookup_failure_remains_visible(self):
+        self.dialog.title_edit.setText("test")
+        self.dialog._market_prices = {row["AssetId"]: 10 for row in self.dialog._assets}
+        for index in range(len(self.dialog._assets)):
+            self.dialog.material_table.cellWidget(index, self.dialog.PRICE_COLUMN).setValue(10)
+        with (
+            patch.object(self.dialog, "_remember_furnace_title"),
+            patch("ui.dialogs.eco_furnace_dialog.ask_confirmation", return_value=True),
+            patch("ui.dialogs.eco_furnace_dialog.EcoFurnaceClient") as client,
+        ):
+            client.return_value.list_all_furnaces.side_effect = EcoApiError("lookup failed")
+            self.dialog._sync_buttons()
+            self.dialog.create_button.click()
+            self.finish()
+            client.return_value.create.assert_not_called()
+        self.assertEqual(self.dialog.status_label.text(), "lookup failed")
+        self.assertIn("#ef4444", self.dialog.status_label.styleSheet())
+        self.assertTrue(self.dialog.create_button.isEnabled())
 
     def test_payment_is_unavailable_even_for_payable_furnaces(self):
         for payable in (False, True):

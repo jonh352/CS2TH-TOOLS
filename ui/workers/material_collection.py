@@ -145,7 +145,7 @@ def collect_candidates_parallel(
     cancel_check,
     silent: bool = False,
     unit_progress: UnitProgress | None = None,
-    max_rows_per_wear_window: int = 300,
+    max_rows_per_wear_window: int = 150,
 ) -> tuple[list[dict], list[str], dict[str, list[dict]]]:
     """Collect in waves: BUFF∥悠悠 first, then C5∥ECO (each provider still serial).
 
@@ -349,7 +349,7 @@ class MaterialCollectionWorker(QThread):
         providers: list[str],
         provider_intervals: dict[str, int],
         silent: bool = False,
-        max_rows_per_wear_window: int = 300,
+        max_rows_per_wear_window: int = 150,
         parent=None,
     ) -> None:
         super().__init__(parent)

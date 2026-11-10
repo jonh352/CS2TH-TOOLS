@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QVBoxLayout, QWidget, QSizePolicy,
-    QFrame, QListWidget, QListWidgetItem, QMessageBox, QStyle,
+    QFrame, QListWidget, QListWidgetItem, QStyle,
 )
 
 from core.eco_furnace import (
@@ -23,7 +23,7 @@ from core.eco_furnace import (
 )
 from core.inventory_steam_accounts import list_profile_entries, load_steam_account_config_dict
 from core.app_settings_store import load_app_settings, update_app_settings
-from core.material_market_prices import material_market_prices
+from core.material_market_prices import material_reference_prices
 from core.eco_publication import furnace_is_published, sync_furnace_publications
 from core.purchase_tracking import load_profile_inventory_items
 from ui.dialog_topmost_support import apply_frameless_modal_geometry, install_dialog_topmost_follow_parent
@@ -113,6 +113,7 @@ class EcoFurnaceDialog(QDialog):
         self.status_label.setTextFormat(Qt.PlainText)
         self._set_status(self.status_label.text())
         layout.addWidget(self.status_label)
+        self.tabs.currentChanged.connect(self._tab_changed)
         self._match_inventory()
         self._created_furnace_id = furnace_id
         self._sync_publish_view()
@@ -128,13 +129,19 @@ class EcoFurnaceDialog(QDialog):
         install_dialog_topmost_follow_parent(self)
 
     def _set_status(self, message, *, error=False):
-        if hasattr(self, "create_button") and not self._workflow_furnace and not self._create_locked:
-            reason = self._create_block_reason()
-            if reason and self._worker is None and not error:
-                message, error = reason, True
         self.status_label.setText(message)
         color = "#ef4444" if error else "#16a34a"
         self.status_label.setStyleSheet(f"QLabel {{ color: {color}; }}")
+
+    def _tab_changed(self, _index):
+        tab = self.tabs.currentWidget()
+        if tab is self._settings_tab:
+            self._set_status("配置 ECO 开放平台授权后保存 API 设置。")
+        elif tab is self._list_tab:
+            self._set_status("选择合炉状态，点击「查询 / 刷新」查看已有合炉。")
+        else:
+            self._set_status("请核对材料和售价后创建合炉。")
+        self._sync_buttons()
 
     def _button(self, text, action, layout):
         button = QPushButton(text)
@@ -325,7 +332,7 @@ class EcoFurnaceDialog(QDialog):
         layout.addWidget(self.material_table)
         totals = QHBoxLayout()
 
-        self.market_total_label = QLabel("ECO / BUFF同磨损区间参考价合计：未读取（不使用收料成本）")
+        self.market_total_label = QLabel("材料参考价合计：未读取（不使用收料成本）")
         self.market_total_label.hide()
         self.reference_total_label = QLabel("材料总参考价值：创建后自动读取")
         self.reference_total_label.setToolTip("仅使用 ECO 合炉列表返回的 AllMatRefPrice；创建前暂不可获取。")
@@ -357,7 +364,7 @@ class EcoFurnaceDialog(QDialog):
         self.markup_button = QPushButton(self._markup_widget)
         self.markup_button.hide()
         self.markup_spin.valueChanged.connect(self._increase_prices)
-        self.markup_button.setToolTip("每件 ECO / BUFF同磨损区间参考价乘以此比例；110% 即上涨10%，重复点击不累加。")
+        self.markup_button.setToolTip("按小助手价格包参考价调整溢价幅度；10% 即上涨10%，负值表示降价，重复应用不累加。")
         markup.addStretch(1)
 
         self._workflow_hint = QLabel("套用已有合炉即可读取 ECO 材料总参考价值，无需重新创建；核对售价后可私密上架材料。")
@@ -602,7 +609,7 @@ class EcoFurnaceDialog(QDialog):
         inventory = load_profile_inventory_items(profile) if profile else []
         self._market_prices = {}
         self.read_prices_button.setText("读取材料参考价格")
-        self.market_total_label.setText("ECO / BUFF同磨损区间参考价合计：未读取（不使用收料成本）")
+        self.market_total_label.setText("材料参考价合计：未读取（不使用收料成本）")
         self._assets = match_recipe_inventory(self.recipe, inventory)
         if self._resume:
             for asset, substrate in zip(self._assets, self.recipe.get("substrates_display") or []):
@@ -649,72 +656,14 @@ class EcoFurnaceDialog(QDialog):
         sale_total = sum((Decimal(str(self.material_table.cellWidget(index, self.PRICE_COLUMN).value())) for index in range(self.material_table.rowCount()) if self.material_table.cellWidget(index, self.PRICE_COLUMN) is not None), Decimal("0"))
         self.sale_total_label.setText(f"炉主上架材料总售价：¥{sale_total:.2f}")
 
-    def _missing_market_login_choice(self, platform, detail=""):
-        prompt = QMessageBox(self)
-        prompt.setWindowTitle(f"{platform} 尚未登录或授权")
-        prompt.setText(f"读取 {platform} 报价前，请先完成登录或授权。\n{detail}")
-        login = prompt.addButton("去登录 / 配置授权", QMessageBox.AcceptRole)
-        skip = prompt.addButton("本次不登录，跳过此平台", QMessageBox.DestructiveRole)
-        prompt.addButton("取消查询", QMessageBox.RejectRole)
-        prompt.setDefaultButton(login)
-        prompt.exec()
-        return "login" if prompt.clickedButton() == login else "skip" if prompt.clickedButton() == skip else "cancel"
-
-    def _login_quote_platform(self, provider):
-        from ui.workers.market_login import MarketplaceLoginCaptureWorker
-
-        class LoginDialog(QDialog):
-            def reject(dialog):
-                if not dialog.worker.isRunning():
-                    super().reject()
-
-        dialog = LoginDialog(self)
-        dialog.setWindowTitle("完成平台登录")
-        dialog.setMinimumSize(440, 160)
-        layout = QVBoxLayout(dialog)
-        hint = QLabel("请在打开的浏览器中完成登录；放弃登录请关闭浏览器窗口。", dialog)
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        dialog.worker = MarketplaceLoginCaptureWorker(provider, dialog)
-        dialog.worker.progress.connect(lambda _provider, text: hint.setText(text))
-        dialog.worker.finished.connect(dialog.accept)
-        dialog.worker.start()
-        dialog.exec()
-
     def _read_market_prices(self):
-        from core.market_candidates import provider_auth_available
         if self._worker is not None:
             return
-        skipped = set()
         assets = [dict(asset) for asset in self._assets]
         if not assets or any(not asset["AssetId"] for asset in assets):
             self._set_status("请先匹配全部材料库存", error=True)
             return
-        try:
-            client = EcoFurnaceClient(self._credentials())
-        except (ValueError, OSError) as exc:
-            choice = self._missing_market_login_choice("ECO", str(exc))
-            if choice == "login":
-                self.tabs.setCurrentWidget(self._settings_tab)
-                return
-            if choice != "skip":
-                return
-            client = None
-            skipped.add("eco")
-        for provider, label in (("buff", "BUFF"),):
-            while not provider_auth_available(provider):
-                choice = self._missing_market_login_choice(label)
-                if choice == "skip":
-                    skipped.add(provider)
-                    break
-                if choice != "login":
-                    return
-                self._login_quote_platform(provider)
-        if len(skipped) == 2:
-            self._set_status("本次已跳过所有平台，未查询报价。")
-            return
-        steam_id = self._profiles.get(str(self.account_combo.currentData() or ""), "")
-        self._start_request("market_prices", lambda: material_market_prices(client, steam_id, assets, skipped=skipped))
+        self._start_request("market_prices", lambda: material_reference_prices(assets))
 
     def _increase_prices(self):
         if self._worker is not None or self._listing_uncertain:
@@ -724,7 +673,7 @@ class EcoFurnaceDialog(QDialog):
             return
         assets = [asset for asset in self._assets if asset["AssetId"] not in self._published_asset_ids]
         if any(asset["AssetId"] not in self._market_prices for asset in assets):
-            self._set_status("请先读取全部材料的 ECO / BUFF同磨损区间价格；缺失报价不能按成本替代。", error=True)
+            self._set_status("请先从小助手价格包读取全部材料参考价；缺失价格不能按成本替代。", error=True)
             return
         ratio = 1 + Decimal(str(self.markup_spin.value())) / 100
         updated = [(Decimal(str(self._market_prices[asset["AssetId"]])) * ratio).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) for asset in assets]
@@ -767,7 +716,7 @@ class EcoFurnaceDialog(QDialog):
             return f"尚有 {missing} 件材料未取得有效参考价格，请先读取材料参考价格。"
         return ""
 
-    def _sync_buttons(self):
+    def _sync_buttons(self, *, update_status=True):
         busy = self._worker is not None
         pricing = bool(self._workflow_furnace)
         self._step_label.setText("① 创建合炉  →  ② 确认最终售价" if not pricing else "① 合炉已创建  →  ② 确认最终售价")
@@ -792,9 +741,10 @@ class EcoFurnaceDialog(QDialog):
         self._create_disabled_reason = reason
         self.create_button.setEnabled(not reason)
         self.create_button.setToolTip(reason)
-        if reason and not pricing and hasattr(self, "status_label"):
+        show_create_status = update_status and self.tabs.currentWidget() is self._publish_tab
+        if show_create_status and reason and not pricing and hasattr(self, "status_label"):
             self._set_status(reason, error=True)
-        elif previous_reason and not reason and hasattr(self, "status_label"):
+        elif show_create_status and previous_reason and not reason and hasattr(self, "status_label"):
             self._set_status("标题及材料参考价格已就绪，可以创建合炉。")
         self.private_listing_button.setEnabled(not busy and bool(self._workflow_furnace) and not self._listing_uncertain and remaining and all(row["AssetId"] for row in self._assets))
         self.stock_check_button.setEnabled(not busy and bool(self._assets))
@@ -836,15 +786,10 @@ class EcoFurnaceDialog(QDialog):
                 if asset["AssetId"] not in self._published_asset_ids:
                     self.material_table.cellWidget(index, self.PRICE_COLUMN).setValue(self._market_prices.get(asset["AssetId"], 0))
             self._update_totals()
-            for index, asset in enumerate(self._assets):
-                quotes = worker.result["platforms"][asset["AssetId"]]
-                detail = "；".join(f"{platform}：¥{quotes[platform]:.2f}" if platform in quotes else f"{platform}：未取得报价" for platform in ("ECO", "BUFF"))
-                winner = min(quotes, key=quotes.get) if quotes else "无"
-                self.material_table.cellWidget(index, self.PRICE_COLUMN).setToolTip(f"{detail}；采用来源：{winner}")
             total = sum(Decimal(str(value)) for value in self._market_prices.values())
-            self.market_total_label.setText(f"ECO / BUFF同磨损区间参考价合计：¥{total:.2f} · 已报价 {len(self._market_prices)}/{len(self._assets)} 件")
+            self.market_total_label.setText(f"材料参考价合计：¥{total:.2f} · 已报价 {len(self._market_prices)}/{len(self._assets)} 件")
             self.read_prices_button.setText(f"材料参考价合计：¥{total:.2f}" if len(self._market_prices) == len(self._assets) else "读取材料参考价格（报价不完整，点击重试）")
-            self._set_status("；".join(worker.result["errors"]) or "材料参考价格读取完成。")
+            self._set_status("；".join(worker.result["errors"]) or "材料参考价格读取完成，来源：小助手价格包。")
             if self._workflow_furnace:
                 self._increase_prices()
         elif self._operation == "create":
@@ -892,7 +837,7 @@ class EcoFurnaceDialog(QDialog):
             self._workflow_furnace = {}
             self._listed = []
             self.furnace_list.clear()
-        self._sync_buttons()
+        self._sync_buttons(update_status=not bool(worker.error))
         worker.deleteLater()
         if refresh_furnaces:
             self._query()
@@ -925,7 +870,7 @@ class EcoFurnaceDialog(QDialog):
         logging.getLogger(__name__).warning("ECO create confirmed; saving pending state")
         self.publication_changed.emit("pending", self._create_payload, "")
         if self._create_locked:
-            self._sync_buttons()
+            self._sync_buttons(update_status=False)
             return
         def create_and_lookup():
             self._worker.progress.emit("正在查询已有合炉，准备提交创建请求...")
